@@ -14,7 +14,19 @@ Give Codex this prompt:
 >
 > First explain in detailed, plain language what the proposed system does and what installing it would change. Cover Hyper-V enablement; official Windows 11 ISO acquisition and validation; unattended unactivated Windows 11 Pro installation; VM, VHDX, checkpoint, scheduled-task, SYSTEM-broker, local-credential, Codex skill/policy, payload-cache, networking, evidence, recovery-bundle, validation, cleanup, retry, disk-space, memory, time, elevation, and possible reboot behavior. Explain what remains isolated, what data is not published, what is never activated or licensed automatically, and when an existing harness could be replaced or removed.
 >
-> Then ask me, in one compact set of questions, for the exact non-root installation directory; pool size; RAM and virtual processors per VM; display resolution; idle shutdown time; guest language; target Windows account; whether an automatic restart is acceptable; whether to create the large local recovery bundle; and whether any existing harness VMs or files must be preserved. Do not assume that `D:` or any other drive exists. You may describe the project's reference profile (four workers, 8 GiB RAM and four processors each, 1920 by 1080, ten-minute idle shutdown), but do not select it for me.
+> Then ask me one compact set of configuration questions, including the exact non-root installation directory. For every item, show the suggested/reference answer below plus a short reason or tradeoff. Tell me I may reply "use the reference profile" and list only my exceptions:
+>
+> - Installation directory — suggested layout: `<user-selected-large-local-fixed-drive>:\VMs\Codex-Harness`, with at least 200 GiB free. Do not assume that `D:` or any other drive exists. If I do not know which drive to use, offer to perform a read-only fixed-drive and free-space inventory, and ask permission before running it.
+> - Pool size — suggested: 4 workers, for maximum supported concurrency and warm-spare behavior; reduce it on a resource-constrained host.
+> - Memory — suggested: 8 GiB per VM, or up to 32 GiB when all four workers are running, plus host overhead.
+> - Virtual processors — suggested: 4 per VM; reduce this if the host has few logical processors.
+> - Display — suggested: 1920 by 1080.
+> - Idle shutdown — suggested: 600 seconds (10 minutes), balancing quick reuse against idle resource use.
+> - Guest language — suggested: `Auto`, so the installer chooses the host user's language when Microsoft offers it.
+> - Target Windows account — suggested: the current account that will use Codex; choose another account only deliberately.
+> - Restart behavior — suggested: allow the automatic restart after open work is saved (`NoRestart = false`); choose `NoRestart = true` to control the timing manually.
+> - Local recovery bundle — suggested: create it (`SkipLocalRecoveryBundle = false`) when disk capacity permits; it consumes substantial space and contains sensitive VM material, but makes later recovery much faster.
+> - Preservation — suggested: preserve every existing VM and file and keep `ForceRebuild = false`; replacement requires a separate, explicit destructive approval.
 >
 > After I answer, present an exact proposed configuration, paths, resource totals, named machine changes, downloads, security boundaries, destructive possibilities, and verification plan. Treat my answers as preferences, not authorization. Stop and wait for my explicit approval of that proposal.
 >

@@ -1,7 +1,7 @@
 # Rebuild checklist
 
 1. Explain the complete rebuild and its host, storage, network, credential, reboot, licensing, recovery, verification, and destructive implications before making local changes.
-2. Ask the user to select the exact non-root install directory, target account, pool size, VM memory/processors, display size, idle timeout, language, restart behavior, recovery-bundle behavior, and preservation requirements. Do not assume a drive or accept the answers as execution approval.
+2. Ask the user to select the exact non-root install directory, target account, pool size, VM memory/processors, display size, idle timeout, language, restart behavior, recovery-bundle behavior, and preservation requirements. Give a suggested/reference answer and tradeoff for every item, allow "use the reference profile" plus exceptions, and offer a permission-gated read-only disk inventory if the user needs a path recommendation. Do not assume a drive or accept the answers as execution approval.
 3. Present the exact proposed configuration and wait for explicit approval.
 4. After approval, confirm Windows 11 Pro, Enterprise, or Education, firmware virtualization, signed Microsoft Edge, official-page reachability, BITS, IMAPI, the inbox C# compiler, at least 200 GiB free, and enough host memory.
 5. Run the public repository audit and plan-only install with every selected value explicit. Show the plan and obtain a second approval before mutation.

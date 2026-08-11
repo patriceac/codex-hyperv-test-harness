@@ -31,10 +31,18 @@ if ($prompt -match 'Use `D:\\' -or $prompt -notmatch 'Do not assume that `D:` or
 }
 $scenarios.Add('public-prompt-does-not-assume-a-drive')
 
-foreach ($requiredChoice in @('pool size', 'RAM and virtual processors', 'display resolution', 'idle shutdown time', 'guest language', 'target Windows account', 'automatic restart', 'local recovery bundle', 'must be preserved')) {
-    if (-not $prompt.Contains($requiredChoice)) { throw "The public prompt does not collect required choice: $requiredChoice" }
+foreach ($requiredChoice in @('Pool size', 'Memory', 'Virtual processors', 'Display', 'Idle shutdown', 'Guest language', 'Target Windows account', 'Restart behavior', 'Local recovery bundle', 'Preservation')) {
+    if ($prompt.IndexOf($requiredChoice, [StringComparison]::OrdinalIgnoreCase) -lt 0) { throw "The public prompt does not collect required choice: $requiredChoice" }
 }
 $scenarios.Add('public-prompt-collects-basic-configuration')
+
+foreach ($referenceAnswer in @('"use the reference profile"', 'suggested: 4 workers', 'suggested: 8 GiB per VM', 'suggested: 4 per VM', 'suggested: 1920 by 1080', 'suggested: 600 seconds', 'suggested: `Auto`', 'suggested: the current account', 'NoRestart = false', 'SkipLocalRecoveryBundle = false', 'ForceRebuild = false', 'read-only fixed-drive and free-space inventory')) {
+    if (-not $prompt.Contains($referenceAnswer)) { throw "The public prompt does not provide reference answer: $referenceAnswer" }
+}
+if ($skill -notmatch 'Use these reference answers' -or $skill -notmatch 'use the reference profile' -or $agents -notmatch 'suggested/reference answer and its tradeoff') {
+    throw 'The skill or root instructions do not require suggested answers for every configuration question.'
+}
+$scenarios.Add('configuration-questions-include-reference-answers')
 
 if ($prompt -notmatch 'Treat my answers as preferences, not authorization' -or $prompt -notmatch 'Stop and wait for my explicit approval' -or $prompt -notmatch 'second explicit approval') {
     throw 'The public prompt does not enforce two distinct approval gates.'
@@ -43,7 +51,7 @@ $scenarios.Add('public-prompt-has-two-approval-gates')
 
 $consentPosition = $skill.IndexOf('## Begin with informed consent', [StringComparison]::Ordinal)
 $preflightPosition = $skill.IndexOf('## Run the read-only preflight after approval', [StringComparison]::Ordinal)
-if ($consentPosition -lt 0 -or $preflightPosition -le $consentPosition -or $skill -notmatch 'Do not assume a drive or path' -or $skill -notmatch 'Stop and obtain a second explicit approval') {
+if ($consentPosition -lt 0 -or $preflightPosition -le $consentPosition -or $skill -notmatch 'Do not assume a drive' -or $skill -notmatch 'Stop and obtain a second explicit approval') {
     throw 'The setup skill does not place informed consent before preflight and mutation.'
 }
 $scenarios.Add('setup-skill-enforces-consent-before-preflight')

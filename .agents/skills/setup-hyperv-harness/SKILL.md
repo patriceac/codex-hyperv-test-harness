@@ -16,8 +16,20 @@ Do not search for or reuse an unknown ISO, VHDX, credential, exported VM, or exe
 Before any clone, download, local command, elevation, or host mutation:
 
 1. Explain in detailed, plain language the backend's purpose and architecture; Hyper-V and host prerequisites; official ISO resolution and validation; unattended unactivated Windows 11 Pro guest; VM/VHDX/checkpoint layout; SYSTEM broker and scheduled tasks; locally generated credential; installed Codex skill and managed policy block; network isolation and scoped read-only host input; payload cache; evidence; local recovery bundle; verification; retry and cleanup behavior; expected disk, memory, time, and reboot impact; licensing boundary; and every condition that could replace or remove existing harness assets.
-2. Ask one compact group of questions for the exact non-root install directory, pool size from one to four, RAM and virtual processors per VM, display dimensions, idle timeout, guest language, target Windows account, automatic-restart preference, local-recovery-bundle preference, and existing assets that must be preserved. Do not assume a drive or path. Offer the established four-worker, 8-GiB, four-processor, 1920-by-1080, 600-second profile only as a recommendation the user may accept or change.
+2. Ask one compact group of questions for the exact non-root install directory, pool size from one to four, RAM and virtual processors per VM, display dimensions, idle timeout, guest language, target Windows account, automatic-restart preference, local-recovery-bundle preference, and existing assets that must be preserved. For every question, show the suggested/reference answer below and a short reason or tradeoff. Tell the user they may answer "use the reference profile" and name only exceptions. Never silently select a suggestion.
 3. Present an exact proposal with paths, VM names, per-VM and total resources, downloads, persistent machine changes, security boundaries, destructive possibilities, and verification steps. State that answering the questions did not authorize execution. Stop and wait for explicit approval.
+
+Use these reference answers:
+
+- Install root: `<user-selected-large-local-fixed-drive>:\VMs\Codex-Harness` with at least 200 GiB free. Do not assume a drive. If the user is unsure, offer an explicitly authorized read-only fixed-drive/free-space inventory before recommending a concrete path.
+- Pool: four workers for maximum supported concurrency and warm-spare behavior; reduce it for a constrained host.
+- Memory: 8 GiB per VM, up to 32 GiB for four simultaneously running workers plus host overhead.
+- Processors: four virtual processors per VM; reduce this when host CPU capacity is limited.
+- Display and idle policy: 1920 by 1080 and 600 seconds.
+- Language and target: `Auto` and the current Windows account that will use Codex.
+- Restart: allow automatic restart after work is saved (`NoRestart = false`); use `true` when the user wants to control timing.
+- Recovery: create the large, sensitive, faster local bundle (`SkipLocalRecoveryBundle = false`) when capacity permits.
+- Preservation: preserve all existing assets and keep `ForceRebuild = false`; replacement always needs separate destructive approval.
 
 Do not treat a general request such as "restore it" or "set it up" as approval of the proposal. The approval must follow the explanation and proposed configuration.
 
