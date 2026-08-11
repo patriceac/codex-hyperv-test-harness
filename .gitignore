@@ -1,0 +1,32 @@
+# Generated installation media and VM state
+*.iso
+*.vhd
+*.vhdx
+*.avhdx
+*.vmcx
+*.vmrs
+*.vmgs
+
+# Build outputs: all shipped executables are rebuilt from source
+*.exe
+*.dll
+*.msi
+*.pdb
+src/Software/Harness/seed-build/
+
+# Credentials and generated broker state
+src/Software/Harness/private/
+src/Software/Harness/pool-definition.json
+src/Software/Harness/*-status.json
+
+# Local verification output
+artifacts/
+*.log
+*.tmp
+
+# Editors and operating systems
+.vs/
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

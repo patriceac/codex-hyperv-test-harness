@@ -1,0 +1,12 @@
+[
+  {
+    "type": "wait_result_file",
+    "path": "{OUTDIR}\\host-input-result.json",
+    "timeoutMs": 120000
+  },
+  {
+    "type": "wait_process_exit",
+    "timeoutMs": 120000,
+    "expectedExitCode": 0
+  }
+]

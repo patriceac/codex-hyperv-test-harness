@@ -1,0 +1,17 @@
+[
+  {
+    "type": "wait_window",
+    "timeoutMs": 30000
+  },
+  {
+    "type": "screenshot",
+    "name": "before-process-exit.png",
+    "timeoutMs": 30000,
+    "attempts": 5
+  },
+  {
+    "type": "wait_process_exit",
+    "timeoutMs": 30000,
+    "expectedExitCode": 7
+  }
+]

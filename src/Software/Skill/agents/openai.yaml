@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hyper-V Executable Testing"
+  short_description: "Run Windows executables safely in the test VM"
+  default_prompt: "Use $hyperv-test-executables to run and verify this Windows executable in the isolated Hyper-V VM."

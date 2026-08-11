@@ -1,0 +1,26 @@
+name: validate
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  source-and-contracts:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Audit public payload
+        shell: powershell
+        run: .\setup\Test-PublicRepository.ps1
+      - name: Parse, rebuild, and run deterministic contracts
+        shell: powershell
+        run: .\setup\Test-Source.ps1
+      - name: Exercise plan-only recovery route
+        shell: powershell
+        run: |
+          $plan = .\setup\Install.ps1 -PlanOnly -InstallRoot "$env:RUNNER_TEMP\Codex-Harness" -AllowLowResources
+          if ($plan.GuestEdition -notmatch 'Professional') { throw 'Plan did not select Windows 11 Pro.' }

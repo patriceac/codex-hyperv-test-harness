@@ -1,0 +1,25 @@
+[
+  {
+    "type": "wait_window",
+    "timeoutMs": 30000
+  },
+  {
+    "type": "wait_result_file",
+    "path": "{OUTDIR}\\canary-result.json",
+    "timeoutMs": 30000
+  },
+  {
+    "type": "wait",
+    "ms": 300000
+  },
+  {
+    "type": "screenshot",
+    "name": "contract-failed-result.png",
+    "timeoutMs": 30000,
+    "attempts": 5
+  },
+  {
+    "type": "wait",
+    "ms": 300000
+  }
+]

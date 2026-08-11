@@ -1,0 +1,7 @@
+[
+  {
+    "type": "wait_result_file",
+    "path": "{OUTDIR}\\child-ready.json",
+    "timeoutMs": 30000
+  }
+]
