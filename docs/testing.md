@@ -11,7 +11,7 @@ The guest `InputProbe.exe` had the same source-provenance gap. Its C# source and
 ## Test layers
 
 1. `setup\Test-PublicRepository.ps1` enforces the public source boundary.
-2. `setup\Test-Source.ps1` parses every PowerShell file, compiles four canaries plus the guest probe, creates and mounts an IMAPI ISO, and runs 101 deterministic scenarios across queue atomicity, canonical broker ACL enforcement and audit, fail-closed installation rollback, lifecycle truthfulness, cancellation/reporting, guest protocol, evidence retries, warm-spare behavior, pool fault recovery, host-input safety, token expansion, metadata-only payload fingerprint reuse, transport selection, and runner contract validation.
+2. `setup\Test-Source.ps1` parses every PowerShell file, compiles four canaries plus the guest probe, creates and mounts an IMAPI ISO, and runs 109 deterministic scenarios across guided-recovery consent, queue atomicity, canonical broker ACL enforcement and audit, fail-closed installation rollback, lifecycle truthfulness, cancellation/reporting, guest protocol, evidence retries, warm-spare behavior, pool fault recovery, host-input safety, token expansion, metadata-only payload fingerprint reuse, transport selection, and runner contract validation.
 3. `Get-OfficialWindows11Iso.ps1 -ResolveOnly` proves that the current Microsoft page can issue an x64 multi-edition link without downloading eight gigabytes in routine source CI.
 4. `setup\Verify.ps1` runs the privileged installed-pool audit and a visual canary through the Hyper-V broker. It never launches the canary on the physical host.
 5. Live host-input and four-way concurrency tests remain installed under `Software\Harness\tests`; they require an actual Hyper-V pool and are not suitable for GitHub-hosted CI.

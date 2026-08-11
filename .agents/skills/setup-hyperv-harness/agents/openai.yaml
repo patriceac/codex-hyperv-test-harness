@@ -1,4 +1,4 @@
 interface:
   display_name: "Set Up Hyper-V Test Harness"
-  short_description: "Rebuild the isolated Windows executable-test backend"
-  default_prompt: "Use $setup-hyperv-harness to preflight and rebuild this Hyper-V executable-test backend from official Microsoft media."
+  short_description: "Review and rebuild the isolated Hyper-V backend"
+  default_prompt: "Use $setup-hyperv-harness to explain this rebuild, gather my configuration, and wait for my approval before making changes."

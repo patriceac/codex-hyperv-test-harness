@@ -12,12 +12,21 @@ This repository rebuilds a privileged Hyper-V executable-test backend. Use the r
 - Treat `-ForceRebuild` as destructive. Use it only when the user explicitly authorizes replacing this harness's named VMs.
 - Preserve unrelated user files, Hyper-V VMs, virtual switches, Codex instructions, and skills. The installer updates only its managed policy block.
 
+## Informed-consent gate
+
+- Begin installation or disaster recovery in review-only mode. Before cloning or making any local change, use read-only access to explain the architecture, prerequisites, downloads, resource footprint, persistent host changes, security boundaries, reboot behavior, recovery output, verification, licensing boundary, and destructive possibilities.
+- Ask the user for an exact non-root install directory, pool size, VM memory and processor count, display size, idle timeout, language, target account, restart preference, local-recovery preference, and preservation requirements. Do not assume that `D:` or another drive exists. Defaults may be described as reference values but never silently selected.
+- Present the complete proposed configuration and effects. Configuration answers are not approval. Stop and wait for explicit approval before cloning, downloading, or running local commands.
+- After approval, run only the public audit and plan-only preflight with the selected values passed explicitly. Show their results and obtain a second explicit approval before elevation, feature enablement, media download, reboot, task registration, VM/VHDX work, broker installation, Codex changes, or any other mutation.
+- A later `-ForceRebuild` decision remains a separate destructive approval. Neither earlier confirmation authorizes replacement of existing harness assets.
+
 ## Rebuild workflow
 
-1. Run `setup\Test-PublicRepository.ps1` and `setup\Install.ps1 -PlanOnly`.
-2. Run `INSTALL.cmd`, or `setup\Install.ps1` when a terminal is preferred. The default install root is `D:\Disk\VMs\Codex-Harness`; pass `-InstallRoot` to change it.
-3. If Hyper-V must be enabled, let the registered `SYSTEM` task resume after restart. Read `Live\Setup\setup-state.json`; do not restart the installation from scratch while it is active.
-4. Require the `Ready` terminal state and run `VERIFY.cmd`.
-5. Use `REFRESH-LOCAL-RECOVERY.cmd` after intentional baseline or harness changes.
+1. Complete the informed-consent gate and record every selected parameter.
+2. After the first approval, run `setup\Test-PublicRepository.ps1` and `setup\Install.ps1 -PlanOnly` with an explicit `-InstallRoot` and the selected sizing, display, timeout, language, restart, and recovery options.
+3. Show the exact plan. After the second approval, run `setup\Install.ps1` with the same explicit parameters; never use an unparameterized command in a Codex-guided rebuild.
+4. If Hyper-V must be enabled, let the registered `SYSTEM` task resume after restart. Read `<chosen-install-root>\Live\Setup\setup-state.json`; do not restart the installation from scratch while it is active.
+5. Require the `Ready` terminal state and run `setup\Verify.ps1 -InstallRoot <chosen-install-root>`.
+6. Use `setup\Refresh-LocalRecovery.ps1 -InstallRoot <chosen-install-root>` after intentional baseline or harness changes.
 
 The installer must resolve the current x64 multi-edition Windows 11 ISO through Microsoft's official download page, validate Microsoft media, enumerate `install.wim` or `install.esd`, and select the sole `EditionId=Professional` image. Never replace this with a fixed release URL, third-party mirror, hard-coded image index, or activation automation.

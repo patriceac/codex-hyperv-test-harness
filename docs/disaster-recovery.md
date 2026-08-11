@@ -6,11 +6,12 @@ The GitHub repository is the recovery seed. It does not need the original VHDX, 
 
 On a reimaged Windows 11 Pro, Enterprise, or Education host:
 
-1. Install Codex and sign into GitHub if needed. The repository is public, so cloning does not require a token.
-2. Ask Codex to clone the repository and follow the root `AGENTS.md` plus `$setup-hyperv-harness` skill. The prompt in the README is sufficient.
-3. Save open work, then approve the single Windows elevation prompt. If Hyper-V is newly enabled, the installer restarts automatically unless `-NoRestart` was supplied.
-4. Monitor `D:\Disk\VMs\Codex-Harness\Live\Setup\setup-state.json`. A registered SYSTEM task owns post-restart continuation; do not launch a competing installer.
-5. Require `Phase=Ready` and `Success=true` in `setup-result.json`. Those terminal states are published only after the internal privileged audit and isolated canary pass. `VERIFY.cmd` is available as a later independent recheck and requests a separate elevation.
+1. Install Codex. The repository is public, so read-only inspection and cloning do not require a GitHub token.
+2. Give Codex the informed-consent prompt in the README. Codex must inspect the public instructions without cloning, explain the complete rebuild and its risks, ask for the user's configuration, present an exact proposal, and wait. No drive or resource profile is assumed.
+3. After the user explicitly approves that proposal, Codex may clone the repository and run only the public audit and plan-only preflight with the chosen values. Review their exact output and give a second explicit approval before any mutating installation step.
+4. Save open work, then allow the approved Windows elevation. If Hyper-V is newly enabled, the installer restarts automatically unless the user selected `-NoRestart`.
+5. Monitor `<chosen-install-root>\Live\Setup\setup-state.json`. A registered SYSTEM task owns post-restart continuation; do not launch a competing installer.
+6. Require `Phase=Ready` and `Success=true` in `<chosen-install-root>\Live\Setup\setup-result.json`. Those terminal states are published only after the internal privileged audit and isolated canary pass. Run `setup\Verify.ps1 -InstallRoot <chosen-install-root>` for a later independent recheck.
 
 The longest steps are the Microsoft ISO download, unattended Windows installation, base VHDX conversion, and local recovery export. They are resumable at the host-feature boundary, while expensive completed media and baseline work are reused on a normal rerun.
 

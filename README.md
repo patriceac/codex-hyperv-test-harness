@@ -8,25 +8,49 @@ The repository contains the broker, guest agent, elastic pool of up to four VMs,
 
 Give Codex this prompt:
 
-> Clone `https://github.com/patriceac/codex-hyperv-test-harness`, read its root `AGENTS.md` and `$setup-hyperv-harness` skill, run the public-safety and plan checks, then rebuild and verify the Hyper-V executable-test backend. Use `D:\Disk\VMs\Codex-Harness` unless that drive is unavailable. Do not configure Windows activation or licensing.
+> I want to evaluate and possibly rebuild the isolated Hyper-V executable-test backend from `https://github.com/patriceac/codex-hyperv-test-harness`.
+>
+> Begin in review-only mode. Before cloning, downloading files, running local commands, requesting elevation, or changing this computer, inspect the public `README.md`, root `AGENTS.md`, `.agents/skills/setup-hyperv-harness/SKILL.md`, and `docs/disaster-recovery.md` through read-only web access.
+>
+> First explain in detailed, plain language what the proposed system does and what installing it would change. Cover Hyper-V enablement; official Windows 11 ISO acquisition and validation; unattended unactivated Windows 11 Pro installation; VM, VHDX, checkpoint, scheduled-task, SYSTEM-broker, local-credential, Codex skill/policy, payload-cache, networking, evidence, recovery-bundle, validation, cleanup, retry, disk-space, memory, time, elevation, and possible reboot behavior. Explain what remains isolated, what data is not published, what is never activated or licensed automatically, and when an existing harness could be replaced or removed.
+>
+> Then ask me, in one compact set of questions, for the exact non-root installation directory; pool size; RAM and virtual processors per VM; display resolution; idle shutdown time; guest language; target Windows account; whether an automatic restart is acceptable; whether to create the large local recovery bundle; and whether any existing harness VMs or files must be preserved. Do not assume that `D:` or any other drive exists. You may describe the project's reference profile (four workers, 8 GiB RAM and four processors each, 1920 by 1080, ten-minute idle shutdown), but do not select it for me.
+>
+> After I answer, present an exact proposed configuration, paths, resource totals, named machine changes, downloads, security boundaries, destructive possibilities, and verification plan. Treat my answers as preferences, not authorization. Stop and wait for my explicit approval of that proposal.
+>
+> Only after that approval may you clone the repository and run its public-safety audit and `-PlanOnly` preflight, using every chosen value explicitly. Show me the resulting plan and any discrepancy. Obtain a second explicit approval before any elevation, Hyper-V enablement, ISO or large-file download, reboot, scheduled-task registration, VM or VHDX creation/replacement, broker installation, Codex policy/skill change, or other mutation. Never configure Windows activation or licensing.
 
-Or do it manually from an Administrator-capable Windows account:
+Or perform the same review manually, choose the configuration yourself, and use explicit values from an Administrator-capable Windows account:
 
 ```powershell
 git clone https://github.com/patriceac/codex-hyperv-test-harness
 cd codex-hyperv-test-harness
-.\INSTALL.cmd
+$parameters = @{
+    InstallRoot = 'E:\HyperV\Codex-Harness' # Replace with your chosen non-root directory.
+    PoolSize = 4
+    VmMemoryGiB = 8
+    VmProcessorCount = 4
+    DisplayWidth = 1920
+    DisplayHeight = 1080
+    IdleTimeoutSeconds = 600
+    Language = 'Auto'
+}
+.\setup\Install.ps1 @parameters -PlanOnly
+# Review the plan before running the next line.
+.\setup\Install.ps1 @parameters
 ```
 
-`INSTALL.cmd` pauses before closing. Save open work before starting: if Hyper-V is disabled, the installer registers a narrow resume task and restarts Windows automatically unless `-NoRestart` is supplied. The installer requests elevation once, downloads the current official x64 multi-edition Windows 11 ISO through Microsoft's own download page, validates the media, finds `EditionId=Professional`, installs Windows 11 Pro unattended, builds the worker pool, installs the SYSTEM broker and Codex skill, performs its own elevated audit and isolated visual canary, and creates a faster local recovery bundle.
+`INSTALL.cmd` remains available as a pausing wrapper, but guided recovery must pass the user's selected values explicitly instead of relying on its compatibility defaults. Save open work before the approved installation starts: if Hyper-V is disabled, the installer registers a narrow resume task and restarts Windows automatically unless `-NoRestart` is supplied. The installer requests elevation once, downloads the current official x64 multi-edition Windows 11 ISO through Microsoft's own download page, validates the media, finds `EditionId=Professional`, installs Windows 11 Pro unattended, builds the worker pool, installs the SYSTEM broker and Codex skill, performs its own elevated audit and isolated visual canary, and creates a faster local recovery bundle.
 
 Windows activation and licensing are intentionally outside this project. The guest may remain unactivated until the user handles licensing.
 
-## Defaults
+## Reference profile and compatibility defaults
 
-| Setting | Default |
+Codex-guided recovery must ask the user to choose every value. The entries below describe the project's established profile and the fallback retained for manual script compatibility; they are not consent to use them.
+
+| Setting | Reference or compatibility value |
 |---|---:|
-| Install root | `D:\Disk\VMs\Codex-Harness` |
+| Install root | User-selected non-root directory; bare scripts retain `D:\Disk\VMs\Codex-Harness` only for compatibility |
 | Maximum workers | 4 |
 | Memory per VM | 8 GiB |
 | Virtual processors per VM | 4 |
