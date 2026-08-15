@@ -15,8 +15,8 @@ Do not search for or reuse an unknown ISO, VHDX, credential, exported VM, or exe
 
 Before any clone, download, local command, elevation, or host mutation:
 
-1. Explain in detailed, plain language the backend's purpose and architecture; Hyper-V and host prerequisites; official ISO resolution and validation; unattended unactivated Windows 11 Pro guest; VM/VHDX/checkpoint layout; SYSTEM broker and scheduled tasks; locally generated credential; installed Codex skill and managed policy block; network isolation and scoped read-only host input; payload cache; evidence; local recovery bundle; verification; retry and cleanup behavior; expected disk, memory, time, and reboot impact; licensing boundary; and every condition that could replace or remove existing harness assets.
-2. Ask one compact group of questions for the exact non-root install directory, pool size from one to four, RAM and virtual processors per VM, display dimensions, idle timeout, guest language, target Windows account, automatic-restart preference, local-recovery-bundle preference, and existing assets that must be preserved. For every question, show the suggested/reference answer below and a short reason or tradeoff. Tell the user they may answer "use the reference profile" and name only exceptions. Never silently select a suggestion.
+1. Explain in detailed, plain language the backend's purpose and architecture; Hyper-V and host prerequisites; official ISO resolution and validation; unattended unactivated Windows 11 Pro guest; temporary baseline-only update networking; non-preview Windows Update servicing; stable .NET SDK resolution and verification; VM/VHDX/checkpoint layout; SYSTEM broker and scheduled tasks; locally generated credential; installed Codex skill and managed policy block; network isolation and scoped read-only host input; payload cache; evidence; local recovery bundle; verification; retry and cleanup behavior; expected disk, memory, time, and reboot impact; licensing boundary; and every condition that could replace or remove existing harness assets.
+2. Ask one compact group of questions for the exact non-root install directory, pool size from one to four, RAM and virtual processors per VM, display dimensions, idle timeout, guest language, target Windows account, automatic-restart preference, local-recovery-bundle preference, existing assets that must be preserved, temporary guest-update switch, stable .NET channel and exact currently resolved SDK version, and Windows Update scope. For every question, show the suggested/reference answer below and a short reason or tradeoff. Tell the user they may answer "use the reference profile" and name only exceptions. Never silently select a suggestion.
 3. Present an exact proposal with paths, VM names, per-VM and total resources, downloads, persistent machine changes, security boundaries, destructive possibilities, and verification steps. State that answering the questions did not authorize execution. Stop and wait for explicit approval.
 
 Use these reference answers:
@@ -30,6 +30,9 @@ Use these reference answers:
 - Restart: allow automatic restart after work is saved (`NoRestart = false`); use `true` when the user wants to control timing.
 - Recovery: create the large, sensitive, faster local bundle (`SkipLocalRecoveryBundle = false`) when capacity permits.
 - Preservation: preserve all existing assets and keep `ForceRebuild = false`; replacement always needs separate destructive approval.
+- Temporary guest-update switch: `Default Switch`, for baseline-only outbound Microsoft update access without connecting workers; select another named switch only deliberately.
+- .NET: current stable LTS channel `10.0`, with the exact latest SDK version resolved from Microsoft's official release metadata during read-only planning; do not select previews.
+- Windows Update: applicable non-preview Microsoft software, security, quality, and Defender updates for the installed Windows 11 feature version; exclude optional drivers and feature-version upgrades.
 
 Do not treat a general request such as "restore it" or "set it up" as approval of the proposal. The approval must follow the explanation and proposed configuration.
 
@@ -48,6 +51,9 @@ $parameters = @{
     DisplayHeight = <PIXELS>
     IdleTimeoutSeconds = <SECONDS>
     Language = '<LANGUAGE_OR_AUTO>'
+    GuestUpdateSwitchName = '<EXPLICIT_HYPERV_SWITCH>'
+    DotNetChannel = '<STABLE_CHANNEL>'
+    ExpectedDotNetSdkVersion = '<EXACT_VERSION_RESOLVED_DURING_REVIEW>'
     TargetUserProfile = '<USER_SELECTED_WINDOWS_PROFILE_PATH>'
     TargetUserSid = '<USER_SELECTED_WINDOWS_ACCOUNT_SID>'
     NoRestart = <TRUE_OR_FALSE>
@@ -69,6 +75,7 @@ The installer is authorized to:
 - restart when Hyper-V enablement requires it, unless the user asked for `-NoRestart`;
 - use signed Microsoft Edge headlessly to resolve Microsoft's current Windows 11 x64 multi-edition ISO;
 - validate the ISO, select `EditionId=Professional`, install an unactivated guest unattended, and generate a random local guest credential;
+- temporarily connect only the new baseline to the approved switch, converge applicable non-preview Windows updates, install the approved stable .NET SDK after SHA-512 and Microsoft signature verification, then disconnect networking before sealing;
 - create the named baseline and the configured one-to-four disposable worker VMs below the chosen install root;
 - install the ACL-restricted SYSTEM broker, runtime skill, and managed Codex policy block;
 - run the visual canary only through the newly installed Hyper-V broker;
@@ -105,3 +112,7 @@ Never infer permission for `-ForceRebuild`. It removes only this harness's named
 ## Maintain
 
 After intentional baseline or backend changes, run `setup\Refresh-LocalRecovery.ps1 -InstallRoot '<USER_SELECTED_NON_ROOT_DIRECTORY>'`. Before any public push, rerun `setup\Test-PublicRepository.ps1`; no media, VM state, binaries, credentials, request evidence, or personal profile data may enter Git.
+
+For an intentional Windows/.NET baseline refresh, use `setup\Update-Images.ps1 -PlanOnly` with the exact existing install root, approved update switch, stable channel/version, target account, guest-restart mode, and recovery-preservation choice. Treat its canonical checkpoint and worker replacement as a rebuild: show the plan and obtain the second approval before elevation or downloads. Manual restart mode must apply a temporary scheduled-restart guard, report `ManualRebootPending`, restore all other transient state, and resume with `-AdoptCurrentBaseline` so the current guest disk is not replaced by the old checkpoint. The guard persists only while waiting for the user and its original values are restored after completion or cancellation. Use that same adoption flag when the user intentionally updated the current baseline by hand; it requires manual restart mode and retains the canonical checkpoint as rollback. A synchronous Windows Update operation must finish and WUA must report idle before cancellation or any restart decision. Only explicit Windows Update/CBS or verified installer signals authorize a restart; pending file renames alone do not. Launcher loss requests cooperative cancellation and must clean up networking, maintenance, broker, and touched pool state without force-killing the controller. The mutating run services the baseline, replaces and verifies workers sequentially, repairs the broker, runs the isolated canary, and deep-verifies the refreshed local recovery image. Source changes for GitHub cold recovery are audited and pushed only when that public mutation was included in the approved proposal.
+
+If a transactional rollback occurs after the updated checkpoint, immutable base, four workers, and privileged pool audit have all succeeded, prefer a reviewed `-ResumeUpdateId <EXACT_FAILED_UPDATE_ID>` plan over repeating guest servicing. Resume requires manual restart mode, an off baseline, the unchanged archived rollback definition, the retained failed checkpoint as a direct child of the canonical checkpoint, a successful `ReadyToSeal` servicing record, and audited disconnected VHD parent links. It must not boot or service the baseline. Re-register and boot-verify the retained workers one at a time, promote and restore the retained checkpoint only after they all pass, and rerun broker audit, isolated canary, and deep recovery verification. Preserve the same rollback guarantees if resume fails.

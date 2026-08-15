@@ -231,6 +231,18 @@ function Resolve-RequestStateWithLastReadable {
     $null
 }
 
+function Get-OptionalRequestStateValue {
+    param(
+        $RequestState,
+        [Parameter(Mandatory = $true)] [string] $PropertyName
+    )
+
+    if ($null -eq $RequestState) { return $null }
+    $property = $RequestState.PSObject.Properties[$PropertyName]
+    if ($null -eq $property) { return $null }
+    $property.Value
+}
+
 function Get-RequestLifecycleDisplay {
     param(
         $RequestState,
@@ -251,16 +263,23 @@ function Get-RequestLifecycleDisplay {
         }
     }
 
-    $sourceStatus = [string]$RequestState.Status
-    $message = if ([string]::IsNullOrWhiteSpace([string]$RequestState.Message)) { '' } else { ([string]$RequestState.Message).Trim() }
-    $workerId = if ($null -ne $RequestState.WorkerId) { [Nullable[int]]([int]$RequestState.WorkerId) } else { $FallbackWorkerId }
+    $sourceStatus = [string](Get-OptionalRequestStateValue -RequestState $RequestState -PropertyName 'Status')
+    $requestMessage = Get-OptionalRequestStateValue -RequestState $RequestState -PropertyName 'Message'
+    $requestWorkerId = Get-OptionalRequestStateValue -RequestState $RequestState -PropertyName 'WorkerId'
+    $queuePosition = Get-OptionalRequestStateValue -RequestState $RequestState -PropertyName 'QueuePosition'
+    $queueDepth = Get-OptionalRequestStateValue -RequestState $RequestState -PropertyName 'QueueDepth'
+    $applicationProcessId = Get-OptionalRequestStateValue -RequestState $RequestState -PropertyName 'ApplicationProcessId'
+    $guestActionIndex = Get-OptionalRequestStateValue -RequestState $RequestState -PropertyName 'GuestActionIndex'
+    $guestActionType = Get-OptionalRequestStateValue -RequestState $RequestState -PropertyName 'GuestActionType'
+    $message = if ([string]::IsNullOrWhiteSpace([string]$requestMessage)) { '' } else { ([string]$requestMessage).Trim() }
+    $workerId = if ($null -ne $requestWorkerId) { [Nullable[int]]([int]$requestWorkerId) } else { $FallbackWorkerId }
     $workerText = if ($null -ne $workerId) { "worker $([int]$workerId)" } else { 'the assigned worker' }
     $status = $sourceStatus
     $text = switch ($sourceStatus) {
         'Submitted' { "Submitted $RequestId." }
         'Queued' {
-            if ($null -ne $RequestState.QueuePosition -and $null -ne $RequestState.QueueDepth) {
-                "Queued at position $([int]$RequestState.QueuePosition) of $([int]$RequestState.QueueDepth): $RequestId."
+            if ($null -ne $queuePosition -and $null -ne $queueDepth) {
+                "Queued at position $([int]$queuePosition) of $([int]$queueDepth): $RequestId."
             }
             else { "Queued: $RequestId." }
         }
@@ -274,12 +293,12 @@ function Get-RequestLifecycleDisplay {
         'WaitingForGuestAgent' { "Waiting for guest agent: $message".Trim() }
         'LaunchingApplication' { "Launching application: $message".Trim() }
         'ApplicationRunning' {
-            $pidText = if ($null -ne $RequestState.ApplicationProcessId) { " PID $([int]$RequestState.ApplicationProcessId)" } else { '' }
+            $pidText = if ($null -ne $applicationProcessId) { " PID $([int]$applicationProcessId)" } else { '' }
             "Application running on $workerText${pidText}: $RequestId. $message".Trim()
         }
         'GuestAction' {
-            $actionText = if ($null -ne $RequestState.GuestActionIndex -and -not [string]::IsNullOrWhiteSpace([string]$RequestState.GuestActionType)) {
-                "$([int]$RequestState.GuestActionIndex) ($([string]$RequestState.GuestActionType))"
+            $actionText = if ($null -ne $guestActionIndex -and -not [string]::IsNullOrWhiteSpace([string]$guestActionType)) {
+                "$([int]$guestActionIndex) ($([string]$guestActionType))"
             }
             else { 'in progress' }
             "Guest action ${actionText}: $message".Trim()
@@ -311,11 +330,11 @@ function Get-RequestLifecycleDisplay {
         $status
         $message
         $(if ($null -ne $workerId) { [string][int]$workerId } else { '' })
-        $(if ($null -ne $RequestState.QueuePosition) { [string][int]$RequestState.QueuePosition } else { '' })
-        $(if ($null -ne $RequestState.QueueDepth) { [string][int]$RequestState.QueueDepth } else { '' })
-        $(if ($null -ne $RequestState.ApplicationProcessId) { [string][int]$RequestState.ApplicationProcessId } else { '' })
-        $(if ($null -ne $RequestState.GuestActionIndex) { [string][int]$RequestState.GuestActionIndex } else { '' })
-        [string]$RequestState.GuestActionType
+        $(if ($null -ne $queuePosition) { [string][int]$queuePosition } else { '' })
+        $(if ($null -ne $queueDepth) { [string][int]$queueDepth } else { '' })
+        $(if ($null -ne $applicationProcessId) { [string][int]$applicationProcessId } else { '' })
+        $(if ($null -ne $guestActionIndex) { [string][int]$guestActionIndex } else { '' })
+        [string]$guestActionType
     )
     [pscustomobject][ordered]@{
         Status = $status

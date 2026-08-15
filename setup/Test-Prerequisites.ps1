@@ -3,6 +3,9 @@ param(
     [string] $InstallRoot = 'D:\Disk\VMs\Codex-Harness',
     [ValidateRange(1, 4)] [int] $PoolSize = 4,
     [ValidateRange(2, 64)] [int] $VmMemoryGiB = 8,
+    [string] $GuestUpdateSwitchName = 'Default Switch',
+    [ValidatePattern('^\d+\.\d+$')] [string] $DotNetChannel = '10.0',
+    [string] $ExpectedDotNetSdkVersion,
     [switch] $AllowLowResources,
     [switch] $AsJson,
     [switch] $ReportOnly
@@ -88,10 +91,32 @@ try {
 catch { $mediaReachability = [ordered]@{ Error = $_.Exception.Message } }
 Add-Check -Name 'OfficialMediaPage' -Passed $mediaReachable -Required $true -Message $(if ($mediaReachable) { 'The official Microsoft Windows 11 download page is reachable.' } else { 'The official Microsoft Windows 11 download page is not reachable; check internet, proxy, and TLS settings.' }) -Details $mediaReachability
 
+$resolverCandidates = @(
+    (Join-Path $PSScriptRoot '..\src\Software\Harness\Resolve-DotNetSdkInstaller.ps1'),
+    (Join-Path (Split-Path -Parent $PSScriptRoot) 'Harness\Resolve-DotNetSdkInstaller.ps1')
+)
+$resolver = $resolverCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+$dotNetMetadata = $null
+$dotNetMetadataError = $null
+try {
+    if (-not $resolver) { throw 'The .NET SDK resolver is missing.' }
+    $dotNetMetadata = & $resolver -Channel $DotNetChannel -ExpectedVersion $ExpectedDotNetSdkVersion
+}
+catch { $dotNetMetadataError = $_.Exception.Message }
+Add-Check -Name 'DotNetReleaseMetadata' -Passed ($null -ne $dotNetMetadata) -Required $true -Message $(if ($dotNetMetadata) { "Official metadata resolved stable .NET SDK $($dotNetMetadata.Version)." } else { "Official .NET release metadata could not validate the approved SDK: $dotNetMetadataError" }) -Details $dotNetMetadata
+
 $feature = $null
 try { $feature = Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -ErrorAction Stop } catch { }
 $featureState = if ($feature) { [string]$feature.State } else { 'UnknownWithoutElevation' }
 Add-Check -Name 'HyperVFeature' -Passed $true -Required $false -Message $(if ($featureState -eq 'Enabled') { 'Hyper-V is enabled.' } elseif ($featureState -eq 'UnknownWithoutElevation') { 'Hyper-V feature state will be checked after elevation.' } else { 'Hyper-V is not enabled; the installer can enable it and resume after restart.' }) -Details $featureState
+
+$updateSwitch = $null
+try {
+    Import-Module Hyper-V -ErrorAction Stop
+    $updateSwitch = Get-VMSwitch -Name $GuestUpdateSwitchName -ErrorAction Stop
+}
+catch { }
+Add-Check -Name 'GuestUpdateSwitch' -Passed $true -Required $false -Message $(if ($updateSwitch) { "The explicitly selected guest-update switch '$GuestUpdateSwitchName' exists." } else { "The guest-update switch '$GuestUpdateSwitchName' will be verified after the approved elevation." }) -Details $(if ($updateSwitch) { [ordered]@{ Name = $updateSwitch.Name; SwitchType = [string]$updateSwitch.SwitchType } } else { $null })
 
 $result = [pscustomobject][ordered]@{
     Success = @($checks | Where-Object { $_.Required -and -not $_.Passed }).Count -eq 0

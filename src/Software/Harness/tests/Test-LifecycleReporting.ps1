@@ -6,6 +6,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
 
 function Get-ScriptAst {
     param([Parameter(Mandatory = $true)] [string] $Path)
@@ -36,12 +37,16 @@ function Assert-True {
 $runnerAst = Get-ScriptAst -Path $RunnerPath
 $brokerAst = Get-ScriptAst -Path $HostBrokerPath
 $queueAst = Get-ScriptAst -Path $QueueInspectorPath
-foreach ($name in @('Read-RequestStateSafe', 'Resolve-RequestStateWithLastReadable', 'Get-RequestLifecycleDisplay', 'Test-LifecycleProgressChanged')) { Import-AstFunction -Ast $runnerAst -Name $name }
+foreach ($name in @('Read-RequestStateSafe', 'Resolve-RequestStateWithLastReadable', 'Get-OptionalRequestStateValue', 'Get-RequestLifecycleDisplay', 'Test-LifecycleProgressChanged')) { Import-AstFunction -Ast $runnerAst -Name $name }
 foreach ($name in @('Write-JsonAtomic', 'Write-RequestState', 'Get-GuestLifecycleProgress')) { Import-AstFunction -Ast $brokerAst -Name $name }
 foreach ($name in @('Read-JsonSafe', 'Get-RequestDetails')) { Import-AstFunction -Ast $queueAst -Name $name }
 
 $scenarios = New-Object Collections.Generic.List[string]
 $requestId = 'lifecycle-contract-request'
+
+$minimalQueued = Get-RequestLifecycleDisplay -RequestState ([pscustomobject]@{ Status = 'Queued'; Message = 'waiting' }) -RequestId $requestId
+Assert-True ($minimalQueued.Status -eq 'Queued' -and $minimalQueued.Text -eq "Queued: $requestId.") 'A valid minimal queued state required optional queue/application/action properties.'
+$scenarios.Add('minimal-state-tolerates-missing-optional-properties-under-strict-mode')
 
 function Test-Path { throw [UnauthorizedAccessException]::new('synthetic atomic-replace ACL race') }
 $safeRead = Read-RequestStateSafe -Path 'synthetic-request-state.json'
@@ -123,6 +128,10 @@ $initiallyMissing = Resolve-RequestStateWithLastReadable -CurrentRequestState $n
 Assert-True ($null -eq $initiallyMissing) 'An initially missing request state did not preserve conservative fallback behavior.'
 $scenarios.Add('transient-state-read-keeps-last-truthful-stage')
 
+# The production runner imports HarnessPaths and therefore executes its
+# lifecycle renderer under strict mode.  Queue-inspector helpers below have a
+# separate compatibility contract and are tested under their normal mode.
+Set-StrictMode -Off
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('codex-lifecycle-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $testRoot | Out-Null
 try {

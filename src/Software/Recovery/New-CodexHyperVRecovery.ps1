@@ -159,6 +159,23 @@ try {
     $checksumPath = Join-Path $stagingRoot 'checksums.sha256'
     $checksumLines.ToArray() | Set-Content -LiteralPath $checksumPath -Encoding ASCII
     $checksumHash = (Get-FileHash -LiteralPath $checksumPath -Algorithm SHA256).Hash
+    $imageServicingStatusPath = Join-Path $ActiveBrokerRoot 'State\Management\baseline-servicing-status.json'
+    $imageServicing = $null
+    if (Test-Path -LiteralPath $imageServicingStatusPath -PathType Leaf) {
+        $servicingStatus = Get-Content -Raw -LiteralPath $imageServicingStatusPath | ConvertFrom-Json
+        if ([bool]$servicingStatus.Success) {
+            $imageServicing = [ordered]@{
+                StatusUpdatedUtc = [string]$servicingStatus.UpdatedUtc
+                Os = $servicingStatus.Details.After
+                DotNetSdks = @($servicingStatus.Details.ResolvedSdks | ForEach-Object {
+                    [ordered]@{ Channel = $_.Channel; Version = $_.Version; RuntimeVersion = $_.RuntimeVersion; ReleaseDate = $_.ReleaseDate; Sha512 = $_.Sha512 }
+                })
+                WindowsUpdatePassCount = @($servicingStatus.Details.WindowsUpdatePasses).Count
+                NetworkSwitchName = [string]$servicingStatus.Details.NetworkSwitchName
+                NetworkDisconnected = [bool]$servicingStatus.Details.NetworkDisconnected
+            }
+        }
+    }
     $manifest = [ordered]@{
         FormatVersion = 1
         BundleId = $bundleId
@@ -174,6 +191,7 @@ try {
         TotalBytes = [long](($files | Measure-Object -Property Length -Sum).Sum)
         ChecksumsSha256 = $checksumHash
         CredentialPolicy = 'Portable throwaway-VM credential; ACL restricted to SYSTEM and Administrators.'
+        ImageServicing = $imageServicing
         Files = $files.ToArray()
     }
     Write-CodexJsonAtomic -Path (Join-Path $stagingRoot 'manifest.json') -Value $manifest

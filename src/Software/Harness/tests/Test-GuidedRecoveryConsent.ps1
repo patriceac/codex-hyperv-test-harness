@@ -31,15 +31,15 @@ if ($prompt -match 'Use `D:\\' -or $prompt -notmatch 'Do not assume that `D:` or
 }
 $scenarios.Add('public-prompt-does-not-assume-a-drive')
 
-foreach ($requiredChoice in @('Pool size', 'Memory', 'Virtual processors', 'Display', 'Idle shutdown', 'Guest language', 'Target Windows account', 'Restart behavior', 'Local recovery bundle', 'Preservation')) {
+foreach ($requiredChoice in @('Pool size', 'Memory', 'Virtual processors', 'Display', 'Idle shutdown', 'Guest language', 'Target Windows account', 'Restart behavior', 'Local recovery bundle', 'Preservation', 'Temporary guest-update switch', '.NET SDK', 'Windows Update')) {
     if ($prompt.IndexOf($requiredChoice, [StringComparison]::OrdinalIgnoreCase) -lt 0) { throw "The public prompt does not collect required choice: $requiredChoice" }
 }
 $scenarios.Add('public-prompt-collects-basic-configuration')
 
-foreach ($referenceAnswer in @('"use the reference profile"', 'suggested: 4 workers', 'suggested: 8 GiB per VM', 'suggested: 4 per VM', 'suggested: 1920 by 1080', 'suggested: 600 seconds', 'suggested: `Auto`', 'suggested: the current account', 'NoRestart = false', 'SkipLocalRecoveryBundle = false', 'ForceRebuild = false', 'read-only fixed-drive and free-space inventory')) {
+foreach ($referenceAnswer in @('"use the reference profile"', 'suggested: 4 workers', 'suggested: 8 GiB per VM', 'suggested: 4 per VM', 'suggested: 1920 by 1080', 'suggested: 600 seconds', 'suggested: `Auto`', 'suggested: the current account', 'NoRestart = false', 'SkipLocalRecoveryBundle = false', 'ForceRebuild = false', 'suggested: `Default Switch`', 'suggested: stable LTS channel `10.0`', 'suggested: applicable non-preview Microsoft', 'read-only fixed-drive and free-space inventory')) {
     if (-not $prompt.Contains($referenceAnswer)) { throw "The public prompt does not provide reference answer: $referenceAnswer" }
 }
-if ($skill -notmatch 'Use these reference answers' -or $skill -notmatch 'use the reference profile' -or $agents -notmatch 'suggested/reference answer and its tradeoff') {
+if ($skill -notmatch 'Use these reference answers' -or $skill -notmatch 'use the reference profile' -or $skill -notmatch 'temporary guest-update switch' -or $skill -notmatch 'stable .NET channel' -or $agents -notmatch 'suggested/reference answer and its tradeoff') {
     throw 'The skill or root instructions do not require suggested answers for every configuration question.'
 }
 $scenarios.Add('configuration-questions-include-reference-answers')
@@ -61,7 +61,7 @@ if ($agents -notmatch '## Informed-consent gate' -or $agents -notmatch 'Configur
 }
 $scenarios.Add('root-agent-instructions-enforce-consent')
 
-if ($checklist -notmatch 'Do not assume a drive' -or $checklist -notmatch 'obtain a second approval before mutation' -or $disasterRecovery -notmatch 'No drive or resource profile is assumed' -or $disasterRecovery -notmatch '<chosen-install-root>') {
+if ($checklist -notmatch 'Do not assume a drive' -or $checklist -notmatch 'obtain a second approval before mutation' -or $checklist -notmatch 'stable .NET channel' -or $disasterRecovery -notmatch 'No drive or resource profile is assumed' -or $disasterRecovery -notmatch '<chosen-install-root>') {
     throw 'Recovery references do not carry the user-selected configuration through execution.'
 }
 $scenarios.Add('recovery-references-use-the-chosen-configuration')

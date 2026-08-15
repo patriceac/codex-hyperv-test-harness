@@ -8,6 +8,9 @@ param(
     [ValidateRange(60, 86400)] [int] $IdleTimeoutSeconds = 600,
     [ValidateRange(1024, 7680)] [int] $DisplayWidth = 1920,
     [ValidateRange(768, 4320)] [int] $DisplayHeight = 1080,
+    [string] $GuestUpdateSwitchName = 'Default Switch',
+    [ValidatePattern('^\d+\.\d+$')] [string] $DotNetChannel = '10.0',
+    [string] $ExpectedDotNetSdkVersion,
     [string] $TargetUserProfile,
     [string] $TargetUserSid,
     [string] $AttemptId,
@@ -130,9 +133,11 @@ function Get-ElevationArguments {
         '-PoolSize', [string]$PoolSize, '-VmMemoryGiB', [string]$VmMemoryGiB,
         '-VmProcessorCount', [string]$VmProcessorCount, '-IdleTimeoutSeconds', [string]$IdleTimeoutSeconds,
         '-DisplayWidth', [string]$DisplayWidth, '-DisplayHeight', [string]$DisplayHeight,
+        '-GuestUpdateSwitchName', ('"' + $GuestUpdateSwitchName + '"'), '-DotNetChannel', $DotNetChannel,
         '-TargetUserProfile', ('"' + $TargetUserProfile + '"'), '-TargetUserSid', $TargetUserSid,
         '-AttemptId', $AttemptId, '-NoElevation'
     )
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedDotNetSdkVersion)) { $arguments += @('-ExpectedDotNetSdkVersion', $ExpectedDotNetSdkVersion) }
     foreach ($switchName in @('Resume','NoRestart','SkipSmokeTest','SkipLocalRecoveryBundle','AllowLowResources','ForceRebuild','SkipGlobalPolicy')) {
         if ((Get-Variable -Name $switchName -ValueOnly)) { $arguments += '-' + $switchName }
     }
@@ -274,13 +279,21 @@ function Remove-ExistingHarnessVms {
 
 if ($PlanOnly) {
     $preflightPath = if ($runningFromCheckout) { Join-Path $PSScriptRoot 'Test-Prerequisites.ps1' } else { Join-Path $installedSetup 'Test-Prerequisites.ps1' }
-    $preflightJson = & $preflightPath -InstallRoot $InstallRoot -PoolSize $PoolSize -VmMemoryGiB $VmMemoryGiB -AllowLowResources:$AllowLowResources -AsJson -ReportOnly
+    $preflightJson = & $preflightPath -InstallRoot $InstallRoot -PoolSize $PoolSize -VmMemoryGiB $VmMemoryGiB -GuestUpdateSwitchName $GuestUpdateSwitchName -DotNetChannel $DotNetChannel -ExpectedDotNetSdkVersion $ExpectedDotNetSdkVersion -AllowLowResources:$AllowLowResources -AsJson -ReportOnly
     $workerNoun = if ($PoolSize -eq 1) { 'worker' } else { 'workers' }
     [pscustomobject][ordered]@{
         PlanOnly = $true; InstallRoot = $InstallRoot; SourceSoftware = $sourceSoftware
         TargetUserProfile = $TargetUserProfile; TargetUserSid = $TargetUserSid
         WindowsIso = 'Downloaded automatically from the official Microsoft Windows 11 page'
         GuestEdition = 'Windows 11 Pro selected dynamically by EditionId Professional'
+        GuestServicing = [ordered]@{
+            TemporaryNetworkSwitch = $GuestUpdateSwitchName
+            WindowsUpdate = 'Applicable non-preview Microsoft software, security, quality, and Defender updates for the installed feature version; no drivers or feature-version upgrade'
+            DotNetChannel = $DotNetChannel
+            ExpectedDotNetSdkVersion = if ([string]::IsNullOrWhiteSpace($ExpectedDotNetSdkVersion)) { 'Latest stable version resolved at execution' } else { $ExpectedDotNetSdkVersion }
+            Integrity = 'Official Microsoft HTTPS metadata, SHA-512, and Authenticode verification'
+            NetworkFinalState = 'Disconnected before the clean checkpoint is created'
+        }
         Pool = "$PoolSize $workerNoun, $VmMemoryGiB GiB each, ${DisplayWidth}x${DisplayHeight}, $IdleTimeoutSeconds second idle timeout"
         Licensing = 'Not configured; activation and licensing remain the user responsibility'
         Preflight = $preflightJson | ConvertFrom-Json
@@ -305,7 +318,7 @@ try {
 
     Write-SetupState -Phase 'Preflight' -Message 'Checking Windows, virtualization, storage, memory, and official-media prerequisites.'
     $preflightPath = if ($runningFromCheckout) { Join-Path $PSScriptRoot 'Test-Prerequisites.ps1' } else { Join-Path $installedSetup 'Test-Prerequisites.ps1' }
-    $preflightJson = & $preflightPath -InstallRoot $InstallRoot -PoolSize $PoolSize -VmMemoryGiB $VmMemoryGiB -AllowLowResources:$AllowLowResources -AsJson -ReportOnly
+    $preflightJson = & $preflightPath -InstallRoot $InstallRoot -PoolSize $PoolSize -VmMemoryGiB $VmMemoryGiB -GuestUpdateSwitchName $GuestUpdateSwitchName -DotNetChannel $DotNetChannel -ExpectedDotNetSdkVersion $ExpectedDotNetSdkVersion -AllowLowResources:$AllowLowResources -AsJson -ReportOnly
     $preflight = $preflightJson | ConvertFrom-Json
     if (-not [bool]$preflight.Success) {
         $failedChecks = @($preflight.Checks | Where-Object { $_.Required -and -not $_.Passed } | ForEach-Object { $_.Name }) -join ', '
@@ -366,7 +379,20 @@ try {
         Write-SetupState -Phase 'CreatingBaselineVm' -Message 'Creating the isolated generation-2 Windows 11 Pro baseline VM.'
         New-Item -ItemType Directory -Force -Path ([string]$layout.BaselineRoot) | Out-Null
         New-VM -Name ([string]$layout.BaselineVmName) -Generation 2 -NoVHD -MemoryStartupBytes ([long]$layout.VmMemoryBytes) -Path ([string]$layout.BaselineRoot) | Out-Null
-        & (Join-Path ([string]$layout.HarnessSourceRoot) 'Provision-Windows11Vm.ps1') -VmName ([string]$layout.BaselineVmName) -InstallIso ([string]$isoResult.IsoPath) -SeedIso ([string]$seed.IsoPath) -CredentialPath (Join-Path ([string]$layout.HarnessSourceRoot) 'private\guest-credential.json') -StatusPath (Join-Path $setupStateRoot 'provision-status.json') -ConfigPath $configPath
+        & (Join-Path ([string]$layout.HarnessSourceRoot) 'Provision-Windows11Vm.ps1') -VmName ([string]$layout.BaselineVmName) -InstallIso ([string]$isoResult.IsoPath) -SeedIso ([string]$seed.IsoPath) -CredentialPath (Join-Path ([string]$layout.HarnessSourceRoot) 'private\guest-credential.json') -StatusPath (Join-Path $setupStateRoot 'provision-status.json') -ConfigPath $configPath -DeferBaselineCheckpoint
+        Write-SetupState -Phase 'ServicingBaseline' -Message 'Applying current non-preview Windows updates and the approved latest stable .NET SDK before sealing the clean baseline.' -Details @{
+            GuestUpdateSwitchName = $GuestUpdateSwitchName
+            DotNetChannel = $DotNetChannel
+            ExpectedDotNetSdkVersion = $ExpectedDotNetSdkVersion
+        }
+        $guestServicing = & (Join-Path ([string]$layout.HarnessSourceRoot) 'Update-WindowsGuestImage.ps1') -VmName ([string]$layout.BaselineVmName) -ConfigPath $configPath -CredentialPath (Join-Path ([string]$layout.HarnessSourceRoot) 'private\guest-credential.json') -NetworkSwitchName $GuestUpdateSwitchName -DotNetChannel $DotNetChannel -ExpectedDotNetSdkVersion $ExpectedDotNetSdkVersion -StatusPath (Join-Path $setupStateRoot 'baseline-servicing-status.json')
+        if (-not [bool]$guestServicing.Success) { throw 'The new Windows baseline did not complete Windows and .NET servicing.' }
+        $managementServicingStatus = Join-Path ([string]$layout.BrokerRoot) 'State\Management\baseline-servicing-status.json'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $managementServicingStatus) | Out-Null
+        Copy-Item -LiteralPath (Join-Path $setupStateRoot 'baseline-servicing-status.json') -Destination $managementServicingStatus -Force
+        if ((Get-VM -Name ([string]$layout.BaselineVmName)).State -ne 'Off') { throw 'The serviced baseline must be off before checkpoint creation.' }
+        if (@(Get-VMNetworkAdapter -VMName ([string]$layout.BaselineVmName) | Where-Object { $_.SwitchName }).Count -gt 0) { throw 'The serviced baseline is still connected to a virtual switch.' }
+        Checkpoint-VM -VMName ([string]$layout.BaselineVmName) -SnapshotName ([string]$layout.BaselineCheckpointName)
         $baseline = Get-VM -Name ([string]$layout.BaselineVmName) -ErrorAction Stop
         $baselineCheckpoint = Get-VMSnapshot -VMName $baseline.Name -Name ([string]$layout.BaselineCheckpointName) -ErrorAction Stop
     }
@@ -418,6 +444,7 @@ try {
         ConfigPath = $configPath; BaselineVmId = [string]$baseline.Id; BaselineCheckpointId = [string]$baselineCheckpoint.Id
         SkillPath = $skillPath; PolicyPath = $policyPath; AuditPath = $auditPath; Smoke = $smoke
         LocalRecoveryManifest = $recovery; Canaries = $canaries; GuestTool = $guestTool; Iso = $isoResult
+        GuestServicing = if ($null -ne (Get-Variable -Name guestServicing -ValueOnly -ErrorAction SilentlyContinue)) { $guestServicing } else { $null }
         Licensing = 'Windows activation and licensing were intentionally not configured.'
     }
     Write-SetupState -Phase 'Ready' -Message 'The source-rebuilt Codex Hyper-V executable-test backend is ready.' -Details $details
