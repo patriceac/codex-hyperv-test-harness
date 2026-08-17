@@ -1,9 +1,12 @@
 [CmdletBinding()]
 param(
-    [string] $HostBrokerPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'HostBroker.ps1')
+    [string] $HostBrokerPath
 )
 
 $ErrorActionPreference = 'Stop'
+if ([string]::IsNullOrWhiteSpace($HostBrokerPath)) {
+    $HostBrokerPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'HostBroker.ps1'
+}
 $tokens = $null
 $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($HostBrokerPath, [ref]$tokens, [ref]$errors)
@@ -27,6 +30,10 @@ $targetPath = Join-Path $testRoot 'state.json'
 New-Item -ItemType Directory -Force -Path $testRoot | Out-Null
 $processes = New-Object Collections.Generic.List[object]
 $scenarios = New-Object Collections.Generic.List[string]
+# HostBroker is installed as a Windows PowerShell SYSTEM task. Exercise its
+# contention behavior in that exact runtime even when the umbrella source test
+# itself was launched from PowerShell 7.
+$testPowerShell = (Get-Command powershell.exe -ErrorAction Stop).Source
 try {
     Set-Item -LiteralPath 'Function:\script:Write-JsonAtomic' -Value ([scriptblock]::Create($writerBody))
     Write-JsonAtomic -Path $targetPath -Value ([ordered]@{ Writer = -1; Iteration = -1; Token = [Guid]::NewGuid().ToString('N') })
@@ -45,7 +52,7 @@ for (`$iteration = 0; `$iteration -lt 80; `$iteration++) {
 [IO.File]::WriteAllText('$($successPath.Replace("'", "''"))', 'ok')
 "@
         $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($workerCommand))
-        $process = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList @(
+        $process = Start-Process -FilePath $testPowerShell -ArgumentList @(
             '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', $encodedCommand
         ) -WindowStyle Hidden -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
         $processes.Add([pscustomobject]@{ Process = $process; StdOut = $stdoutPath; StdErr = $stderrPath; Success = $successPath })

@@ -33,9 +33,10 @@ $probePath = Join-Path $BrokerRoot 'State\GuestProbes'
 $payloadGcStatePath = Join-Path $BrokerRoot 'State\payload-cache-gc.json'
 $payloadLeasePath = Join-Path $BrokerRoot 'State\PayloadLeases'
 $hostInputStatePath = Join-Path $BrokerRoot 'State\HostInputs'
+$requestNetworkStatePath = Join-Path $BrokerRoot 'State\NetworkLeases'
 $fatalStatePath = Join-Path $BrokerRoot 'State\broker-fatal.json'
 
-foreach ($path in @($requestPath, $processingPath, $archivePath, $resultsPath, $stagingPath, $payloadManifestPath, $payloadCachePath, $payloadCacheTempPath, $payloadMountPath, $payloadChildrenPath, $cancellationPath, $cancelledPath, (Split-Path -Parent $statePath), $probePath, $payloadLeasePath, $hostInputStatePath)) {
+foreach ($path in @($requestPath, $processingPath, $archivePath, $resultsPath, $stagingPath, $payloadManifestPath, $payloadCachePath, $payloadCacheTempPath, $payloadMountPath, $payloadChildrenPath, $cancellationPath, $cancelledPath, (Split-Path -Parent $statePath), $probePath, $payloadLeasePath, $hostInputStatePath, $requestNetworkStatePath)) {
     New-Item -ItemType Directory -Force -Path $path | Out-Null
 }
 
@@ -87,6 +88,11 @@ if (-not (Test-Path -LiteralPath $hostInputModulePath -PathType Leaf)) {
     throw "Host-input sharing module not found: $hostInputModulePath"
 }
 . $hostInputModulePath
+$requestNetworkModulePath = Join-Path $PSScriptRoot 'RequestNetwork.ps1'
+if (-not (Test-Path -LiteralPath $requestNetworkModulePath -PathType Leaf)) {
+    throw "Request-network module not found: $requestNetworkModulePath"
+}
+. $requestNetworkModulePath
 
 function Write-BrokerState {
     param(
@@ -1054,6 +1060,24 @@ function Invoke-GuestRequest {
     $hostInputGuestJobMappings = @()
     $hostInputCleanup = [pscustomobject][ordered]@{ Attempted = $false; Success = $true; Errors = @(); StateDeleted = $true }
     $hostInputSetupWatch = New-Object Diagnostics.Stopwatch
+    $requestNetworkDefinition = $null
+    $requestNetworkRuntime = $null
+    $requestNetworkAttachment = $null
+    $requestNetworkConnection = $null
+    $requestNetworkGuestEvidence = $null
+    $requestNetworkPrelaunchHostEvidence = $null
+    $requestNetworkLastHostEvidence = $null
+    $requestNetworkHostPolicyCheckCount = 0
+    $requestNetworkCleanup = [pscustomobject][ordered]@{
+        Attempted = $false
+        Success = $false
+        Errors = @('Request-network cleanup was not attempted.')
+        Disconnected = $false
+        AdapterRemoved = $false
+        SwitchRemoved = $false
+        StateDeleted = $false
+    }
+    $requestNetworkCleanupPerformed = $false
     $poolMode = [bool]$Config.PoolEnabled
     $workerId = if ($poolMode) { [Nullable[int]]([int]$Config.PoolWorkerId) } else { $null }
     $guestSessionReconnects = 0
@@ -1065,7 +1089,20 @@ function Invoke-GuestRequest {
     $errorScriptStackTrace = $null
     $errorPositionMessage = $null
     $failureKind = $null
-    $evidenceManifest = $null
+    $cleanupFailureObserved = $false
+    # Evidence is untrusted until each stage has completed and been validated.
+    # Keep an explicit pessimistic manifest so a cleanup/status failure cannot
+    # accidentally serialize missing evidence as an empty successful snapshot.
+    $evidenceManifest = [pscustomobject][ordered]@{
+        StageRoot = $null
+        EnumeratedFileCount = $null
+        CopiedFiles = @()
+        SkippedFiles = @()
+        EnumerationErrors = @()
+    }
+    $evidenceSnapshotSucceeded = $false
+    $evidenceTransferSucceeded = $false
+    $evidenceValidationSucceeded = $false
     $guestEvidenceStage = $null
     $evidenceSnapshotAttempts = 0
     $evidenceTransferAttempts = 0
@@ -1077,10 +1114,23 @@ function Invoke-GuestRequest {
     [CodexHostSession]::PreventSleep()
     try {
         $null = Recover-OrphanedHostInputResources -BrokerRoot $BrokerRoot -ExcludeRequestId $requestId
+        # Recovery is owner/identity-aware. Do not exclude the current
+        # RequestId: a crashed attempt can leave a stale lease with the same
+        # RequestId, and retries must reclaim it before reserving a new one.
+        $null = Recover-OrphanedRequestNetworkResources -BrokerRoot $BrokerRoot
         $failureStage = 'ValidatingRequest'
         Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
-        if ([string]$Request.Operation -ne 'RunGuestJob') {
-            throw "Unsupported operation: $($Request.Operation)"
+        $requestNetworkDefinition = Resolve-RequestNetworkProfile -Request $Request -Config $Config
+        if ([string]$requestNetworkDefinition.EffectiveProfile -eq 'None') {
+            $requestNetworkCleanup = [pscustomobject][ordered]@{
+                Attempted = $false
+                Success = $true
+                Errors = @()
+                Disconnected = $true
+                AdapterRemoved = $true
+                SwitchRemoved = $false
+                StateDeleted = $true
+            }
         }
         if ($Request.Payload) {
             $payloadManifest = Read-AndValidatePayloadManifest -Request $Request
@@ -1212,6 +1262,18 @@ function Invoke-GuestRequest {
             Update-PayloadGenerationLease -RequestId $inputRuntime.LeaseId -ParentVhdx ([string]$inputRuntime.Cache.ParentVhdx) -ChildVhdx ([string]$inputRuntime.Child.Path) -Stage 'Attached'
         }
 
+        if ([string]$requestNetworkDefinition.EffectiveProfile -ne 'None') {
+            $failureStage = 'PreparingNetwork'
+            Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
+            Write-BrokerState -Status 'PreparingNetwork' -RequestId $requestId -Message "Preparing the approved $($requestNetworkDefinition.EffectiveProfile) request network."
+            Write-RequestState -ResultRoot $RequestStateRoot -RequestId $requestId -Status 'PreparingNetwork' -Message "Reserving and securing the approved $($requestNetworkDefinition.EffectiveProfile) adapter before it is connected." -CreatedUtc $createdUtc -ClaimedUtc $ClaimedUtc -ExecutionDeadlineUtc $executionDeadlineUtc -WorkerId $workerId
+            $requestNetworkWorkerId = if ($poolMode) { [int]$workerId } else { 1 }
+            $requestNetworkRuntime = New-RequestNetworkRuntime -BrokerRoot $BrokerRoot -Definition $requestNetworkDefinition -RequestId $requestId -VmName $vmName -WorkerId $requestNetworkWorkerId
+            Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
+            $requestNetworkAttachment = Prepare-RequestVmNetwork -Runtime $requestNetworkRuntime -VmName $vmName
+            Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
+        }
+
         if ($hostInputShareDefinitions.Count -gt 0) {
             $failureStage = 'CreatingHostInputShares'
             Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
@@ -1241,6 +1303,24 @@ function Invoke-GuestRequest {
         $guestState = Wait-GuestSession -VmName $vmName -Credential $credential -NotBeforeUtc $vmStartUtc -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
 
         $session = Open-GuestSessionReliable -VmName $vmName -Credential $credential -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
+        if ($requestNetworkRuntime) {
+            $failureStage = 'VerifyingNetwork'
+            Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
+            Write-BrokerState -Status 'VerifyingNetwork' -RequestId $requestId -Message "Connecting, configuring, and attesting the approved $($requestNetworkRuntime.Profile) guest adapter."
+            Write-RequestState -ResultRoot $RequestStateRoot -RequestId $requestId -Status 'VerifyingNetwork' -Message 'Revalidating host policy, connecting the secured adapter last, and attesting exact guest address, route, DNS, and IPv6 state.' -CreatedUtc $createdUtc -ClaimedUtc $ClaimedUtc -ExecutionDeadlineUtc $executionDeadlineUtc -WorkerId $workerId
+            Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
+            $requestNetworkConnection = Connect-RequestVmNetwork -Runtime $requestNetworkRuntime -VmName $vmName -BrokerRoot $BrokerRoot
+            Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
+            $requestNetworkLastHostEvidence = $requestNetworkConnection.HostPolicyCheck
+            $requestNetworkHostPolicyCheckCount++
+            $activityCheck = { Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc }
+            $requestNetworkGuestEvidence = Initialize-GuestRequestNetwork -Session $session -Runtime $requestNetworkRuntime -ActivityCheck $activityCheck
+            Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
+            $requestNetworkPrelaunchHostEvidence = Assert-RequestNetworkHostPolicyCurrent -Runtime $requestNetworkRuntime -BrokerRoot $BrokerRoot
+            Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
+            $requestNetworkLastHostEvidence = $requestNetworkPrelaunchHostEvidence
+            $requestNetworkHostPolicyCheckCount++
+        }
         if ($hostInputShareRuntime) {
             $failureStage = 'MountingHostInputShares'
             Write-BrokerState -Status 'PreparingHostInputs' -RequestId $requestId -Message 'Configuring isolated host-only networking and guest read-only mappings.'
@@ -1362,6 +1442,13 @@ function Invoke-GuestRequest {
             catch { throw "assertResultEqualsJson is invalid JSON: $($_.Exception.Message)" }
         }
 
+        if ($requestNetworkRuntime) {
+            $failureStage = 'VerifyingNetwork'
+            Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
+            $requestNetworkLastHostEvidence = Assert-RequestNetworkHostPolicyCurrent -Runtime $requestNetworkRuntime -BrokerRoot $BrokerRoot
+            Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
+            $requestNetworkHostPolicyCheckCount++
+        }
         $failureStage = 'SubmittingGuestJob'
         $guestJobPath = Join-Path $ResultRoot ($requestId + '.json')
         Write-JsonAtomic -Path $guestJobPath -Value $job
@@ -1446,8 +1533,18 @@ function Invoke-GuestRequest {
         $agentMissingSinceUtc = $null
         $inboxFirstSeenUtc = $null
         $lifecycleMissingSinceUtc = $null
+        $nextNetworkHostPolicyCheckUtc = [DateTime]::UtcNow
         while ($true) {
             Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
+            if ($requestNetworkRuntime -and [DateTime]::UtcNow -ge $nextNetworkHostPolicyCheckUtc) {
+                $failureStage = 'VerifyingNetwork'
+                Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
+                $requestNetworkLastHostEvidence = Assert-RequestNetworkHostPolicyCurrent -Runtime $requestNetworkRuntime -BrokerRoot $BrokerRoot
+                Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
+                $requestNetworkHostPolicyCheckCount++
+                $nextNetworkHostPolicyCheckUtc = [DateTime]::UtcNow.AddSeconds(2)
+                $failureStage = 'WaitingForGuestJob'
+            }
             try {
                 if (-not $session -or [string]$session.State -ne 'Opened') {
                     if ($session) {
@@ -1591,6 +1688,33 @@ function Invoke-GuestRequest {
             Start-Sleep -Milliseconds 500
         }
 
+        if ($requestNetworkRuntime) {
+            $failureStage = 'VerifyingNetwork'
+            Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
+
+            # Guest-job completion is the network-use boundary. Revoke the
+            # request adapter before taking a potentially long evidence
+            # snapshot or publishing any best-effort status update.
+            $requestNetworkCleanup = Remove-RequestNetworkRuntime -Runtime $requestNetworkRuntime -BrokerRoot $BrokerRoot -SuppressErrors
+            if ($requestNetworkCleanup.Success) {
+                $requestNetworkCleanupPerformed = $true
+            }
+            Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
+            if (-not $requestNetworkCleanup.Success) {
+                $cleanupFailureObserved = $true
+                throw ('Request-network cleanup failed before evidence collection: ' + (@($requestNetworkCleanup.Errors) -join ' | '))
+            }
+            try {
+                Write-BrokerState -Status 'CollectingEvidence' -RequestId $requestId -Message 'Request network revoked; collecting a stable guest evidence snapshot.'
+            }
+            catch {
+            }
+            try {
+                Write-RequestState -ResultRoot $RequestStateRoot -RequestId $requestId -Status 'CollectingEvidence' -Message 'Request network revoked; creating a stable guest evidence snapshot.' -CreatedUtc $createdUtc -ClaimedUtc $ClaimedUtc -ExecutionDeadlineUtc $executionDeadlineUtc -WorkerId $workerId
+            }
+            catch {
+            }
+        }
         $failureStage = 'StagingGuestEvidence'
         Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
         Write-BrokerState -Status 'CollectingEvidence' -RequestId $requestId -Message 'Creating a stable guest evidence snapshot.'
@@ -1607,6 +1731,10 @@ function Invoke-GuestRequest {
                 }
                 $evidenceManifest = New-GuestEvidenceSnapshot -Session $session -GuestOutbox $guestOutbox -RequestId $requestId
                 $guestEvidenceStage = [string]$evidenceManifest.StageRoot
+                if ([string]::IsNullOrWhiteSpace($guestEvidenceStage)) {
+                    throw 'The guest evidence snapshot returned no stable stage root.'
+                }
+                $evidenceSnapshotSucceeded = $true
                 break
             }
             catch {
@@ -1650,6 +1778,7 @@ function Invoke-GuestRequest {
                 }
                 Copy-Item -Path "$guestEvidenceStage\*" -Destination $ResultRoot -FromSession $session -Recurse -Force -ErrorAction Stop
                 $evidenceCopied = $true
+                $evidenceTransferSucceeded = $true
                 break
             }
             catch {
@@ -1697,6 +1826,7 @@ function Invoke-GuestRequest {
             }
             throw "Guest agent reported failure: $($guestResult.Error)"
         }
+        $evidenceValidationSucceeded = $true
 
         $failureStage = 'CheckingCompletionLockState'
         Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
@@ -1707,9 +1837,6 @@ function Invoke-GuestRequest {
         $success = $true
     }
     catch {
-        if ([string]::IsNullOrWhiteSpace($failureKind)) {
-            $failureKind = if ($cancelled) { 'Cancelled' } elseif ($executionTimedOut) { 'ExecutionTimeout' } else { 'Harness' }
-        }
         $errorMessage = $_.Exception.Message
         $errorType = $_.Exception.GetType().FullName
         $errorFullyQualifiedId = $_.FullyQualifiedErrorId
@@ -1726,9 +1853,61 @@ function Invoke-GuestRequest {
         }
         $cancelled = $typedException -is [OperationCanceledException]
         $executionTimedOut = $typedException -is [TimeoutException]
+        if ([string]::IsNullOrWhiteSpace($failureKind)) {
+            $failureKind = if ($cancelled) { 'Cancelled' } elseif ($executionTimedOut) { 'ExecutionTimeout' } else { 'Harness' }
+        }
         $lockEvidenceAfter = Get-HostLockEvidence
     }
     finally {
+        if ($requestNetworkRuntime -and -not $requestNetworkCleanupPerformed) {
+            $failureStageBeforeCleanup = $failureStage
+            $requestNetworkCleanup.Attempted = $true
+            try {
+                # Revoke first. Status publication is deliberately best effort
+                # and must never run ahead of a still-connected adapter.
+                $cleanup = Remove-RequestNetworkRuntime -Runtime $requestNetworkRuntime -BrokerRoot $BrokerRoot -SuppressErrors
+                $requestNetworkCleanup = [pscustomobject][ordered]@{
+                    Attempted = $true
+                    Success = [bool]$cleanup.Success
+                    Errors = @($cleanup.Errors)
+                    Disconnected = [bool]$cleanup.Disconnected
+                    AdapterRemoved = [bool]$cleanup.AdapterRemoved
+                    SwitchRemoved = [bool]$cleanup.SwitchRemoved
+                    StateDeleted = [bool]$cleanup.StateDeleted
+                }
+                if (-not $cleanup.Success) { throw ($cleanup.Errors -join ' | ') }
+                $requestNetworkCleanupPerformed = $true
+                try {
+                    Write-BrokerState -Status 'CleaningNetwork' -RequestId $requestId -Message 'Request network revoked; completing guest cleanup.'
+                }
+                catch {
+                }
+                try {
+                    Write-RequestState -ResultRoot $RequestStateRoot -RequestId $requestId -Status 'CleaningNetwork' -Message 'Request network revoked; completing guest cleanup.' -CreatedUtc $createdUtc -ClaimedUtc $ClaimedUtc -ExecutionDeadlineUtc $executionDeadlineUtc -WorkerId $workerId
+                }
+                catch {
+                }
+                $failureStage = $failureStageBeforeCleanup
+            }
+            catch {
+                $cleanupFailureObserved = $true
+                $requestNetworkCleanup = [pscustomobject][ordered]@{
+                    Attempted = $true
+                    Success = $false
+                    Errors = if (@($requestNetworkCleanup.Errors).Count -gt 0) { @($requestNetworkCleanup.Errors) + @($_.Exception.Message) } else { @($_.Exception.Message) }
+                    Disconnected = [bool]$requestNetworkCleanup.Disconnected
+                    AdapterRemoved = [bool]$requestNetworkCleanup.AdapterRemoved
+                    SwitchRemoved = [bool]$requestNetworkCleanup.SwitchRemoved
+                    StateDeleted = [bool]$requestNetworkCleanup.StateDeleted
+                }
+                $cleanupMessage = "Could not revoke the request network: $($_.Exception.Message)"
+                $errorMessage = if ($errorMessage) { "$errorMessage $cleanupMessage" } else { $cleanupMessage }
+                $failureStage = 'CleaningNetwork'
+                $success = $false
+                try { Stop-TestVm -VmName $vmName -Immediate } catch { }
+            }
+        }
+
         if ($Request.StopAfter -and $session) {
             try {
                 Invoke-Command -Session $session -ErrorAction Stop -ScriptBlock {
@@ -1743,16 +1922,31 @@ function Invoke-GuestRequest {
             Remove-PSSession -Session $session -ErrorAction SilentlyContinue
         }
         if ($Request.StopAfter) {
-            Write-BrokerState -Status 'StoppingVm' -RequestId $requestId -Message 'Stopping the isolated guest before asynchronous worker recycling.'
-            Write-RequestState -ResultRoot $RequestStateRoot -RequestId $requestId -Status 'StoppingVm' -Message 'Stopping the isolated guest; the pool worker will recycle asynchronously.' -CreatedUtc $createdUtc -ClaimedUtc $ClaimedUtc -ExecutionDeadlineUtc $executionDeadlineUtc -WorkerId $workerId
+            # StoppingVm status publication is advisory. A request-state file
+            # can be in the middle of an atomic replacement (and broker-state
+            # publication can fail for the same reason); neither failure may
+            # skip the VM stop or the cleanup/inventory/result work below.
+            try {
+                Write-BrokerState -Status 'StoppingVm' -RequestId $requestId -Message 'Stopping the isolated guest before asynchronous worker recycling.'
+            }
+            catch {
+                $evidenceWarnings.Add("Could not publish StoppingVm broker state: $($_.Exception.Message)")
+            }
+            try {
+                Write-RequestState -ResultRoot $RequestStateRoot -RequestId $requestId -Status 'StoppingVm' -Message 'Stopping the isolated guest; the pool worker will recycle asynchronously.' -CreatedUtc $createdUtc -ClaimedUtc $ClaimedUtc -ExecutionDeadlineUtc $executionDeadlineUtc -WorkerId $workerId
+            }
+            catch {
+                $evidenceWarnings.Add("Could not publish StoppingVm request state: $($_.Exception.Message)")
+            }
             try {
                 Stop-TestVm -VmName $vmName -Immediate:(-not $success)
             }
             catch {
-                if (-not $errorMessage) {
-                    $errorMessage = "Could not stop test VM: $($_.Exception.Message)"
-                    $success = $false
-                }
+                $cleanupFailureObserved = $true
+                $stopMessage = "Could not stop test VM: $($_.Exception.Message)"
+                $errorMessage = if ($errorMessage) { "$errorMessage $stopMessage" } else { $stopMessage }
+                $failureStage = 'StoppingVm'
+                $success = $false
             }
         }
 
@@ -1772,6 +1966,7 @@ function Invoke-GuestRequest {
                 }
             }
             catch {
+                $cleanupFailureObserved = $true
                 $hostInputCleanup = [pscustomobject][ordered]@{
                     Attempted = $true
                     Success = $false
@@ -1797,6 +1992,7 @@ function Invoke-GuestRequest {
                     if (-not $inputRuntime.ChildDeleted) { throw "Read-only host input '$($inputRuntime.Definition.Name)' child still exists after cleanup." }
                 }
                 catch {
+                    $cleanupFailureObserved = $true
                     $cleanupMessage = "Could not detach read-only host input '$($inputRuntime.Definition.Name)' VHDX child: $($_.Exception.Message)"
                     $errorMessage = if ($errorMessage) { "$errorMessage $cleanupMessage" } else { $cleanupMessage }
                     $failureStage = 'CleaningHostInputs'
@@ -1805,8 +2001,17 @@ function Invoke-GuestRequest {
                 if ($success) { $failureStage = $failureStageBeforeCleanup }
             }
             if ($inputRuntime.LeaseCreated -and (-not $inputRuntime.Child -or $inputRuntime.ChildDeleted)) {
-                Remove-PayloadGenerationLease -RequestId $inputRuntime.LeaseId
-                $inputRuntime.LeaseCreated = $false
+                try {
+                    Remove-PayloadGenerationLease -RequestId $inputRuntime.LeaseId
+                    $inputRuntime.LeaseCreated = $false
+                }
+                catch {
+                    $cleanupFailureObserved = $true
+                    $cleanupMessage = "Could not release read-only host input '$($inputRuntime.Definition.Name)' payload lease: $($_.Exception.Message)"
+                    $errorMessage = if ($errorMessage) { "$errorMessage $cleanupMessage" } else { $cleanupMessage }
+                    $failureStage = 'CleaningHostInputs'
+                    $success = $false
+                }
             }
         }
 
@@ -1822,6 +2027,7 @@ function Invoke-GuestRequest {
                 }
             }
             catch {
+                $cleanupFailureObserved = $true
                 $cleanupMessage = "Could not detach and delete the disposable payload child: $($_.Exception.Message)"
                 $errorMessage = if ($errorMessage) { "$errorMessage $cleanupMessage" } else { $cleanupMessage }
                 $failureStage = 'CleaningPayloadChild'
@@ -1833,8 +2039,40 @@ function Invoke-GuestRequest {
         }
 
         if ($payloadLeaseCreated -and (-not $payloadChild -or $payloadChildDeleted)) {
-            Remove-PayloadGenerationLease -RequestId $requestId
-            $payloadLeaseCreated = $false
+            try {
+                Remove-PayloadGenerationLease -RequestId $requestId
+                $payloadLeaseCreated = $false
+            }
+            catch {
+                $cleanupFailureObserved = $true
+                $cleanupMessage = "Could not release the payload generation lease: $($_.Exception.Message)"
+                $errorMessage = if ($errorMessage) { "$errorMessage $cleanupMessage" } else { $cleanupMessage }
+                $failureStage = 'CleaningPayloadChild'
+                $success = $false
+            }
+        }
+
+        $finalConnectedNetworkAdapters = @()
+        $finalNetworkInventorySucceeded = $false
+        try {
+            $finalConnectedNetworkAdapters = @(Get-VMNetworkAdapter -VMName $vmName -ErrorAction Stop | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.SwitchName) } | ForEach-Object {
+                [ordered]@{ Name = [string]$_.Name; SwitchName = [string]$_.SwitchName; MacAddress = [string]$_.MacAddress }
+            })
+            $finalNetworkInventorySucceeded = $true
+            if ($finalConnectedNetworkAdapters.Count -gt 0) {
+                $cleanupFailureObserved = $true
+                $cleanupMessage = 'One or more VM network adapters remained connected after request cleanup.'
+                $errorMessage = if ($errorMessage) { "$errorMessage $cleanupMessage" } else { $cleanupMessage }
+                $failureStage = 'CleaningNetwork'
+                $success = $false
+            }
+        }
+        catch {
+            $cleanupFailureObserved = $true
+            $cleanupMessage = "Could not verify final VM network disconnection: $($_.Exception.Message)"
+            $errorMessage = if ($errorMessage) { "$errorMessage $cleanupMessage" } else { $cleanupMessage }
+            $failureStage = 'CleaningNetwork'
+            $success = $false
         }
 
         [CodexHostSession]::AllowSleep()
@@ -1845,19 +2083,41 @@ function Invoke-GuestRequest {
         }
         catch {
         }
-        if (-not $success -and [string]::IsNullOrWhiteSpace($failureKind)) {
-            $failureKind = if ($failureStage -in @('CleaningPayloadChild', 'CleaningHostInputs')) { 'HarnessCleanup' } else { 'Harness' }
+        if (-not $success) {
+            # Preserve typed cancellation/timeout outcomes even when cleanup
+            # also fails; the appended cleanup error still surfaces below.
+            if ($cancelled) {
+                $failureKind = 'Cancelled'
+            }
+            elseif ($executionTimedOut) {
+                $failureKind = 'ExecutionTimeout'
+            }
+            elseif ($cleanupFailureObserved) {
+                $failureKind = 'HarnessCleanup'
+            }
+            elseif ([string]::IsNullOrWhiteSpace($failureKind)) {
+                $failureKind = 'Harness'
+            }
         }
 
         $applicationTestFailed = $success -and $guestResult -and [bool]$guestResult.TestEvaluated -and -not [bool]$guestResult.TestPassed
-        $finalStatus = if ($applicationTestFailed) { 'TestFailed' } elseif ($success) { 'Completed' } elseif ($cancelled) { 'Cancelled' } elseif ($executionTimedOut) { 'ExecutionTimedOut' } else { 'Failed' }
+        $cleanupFailed = -not $success -and $cleanupFailureObserved
+        $finalStatus = if ($applicationTestFailed) { 'TestFailed' } elseif ($success) { 'Completed' } elseif ($cancelled) { 'Cancelled' } elseif ($executionTimedOut) { 'ExecutionTimedOut' } elseif ($cleanupFailed) { 'Failed' } else { 'Failed' }
         $finalMessage = if ($applicationTestFailed) {
             if (-not [string]::IsNullOrWhiteSpace([string]$guestResult.TestFailureMessage)) { [string]$guestResult.TestFailureMessage } else { 'The application assertion failed.' }
         }
         elseif ($success) { 'Terminal result is ready; evidence collection and VM cleanup completed.' }
         else { $errorMessage }
         if (-not $poolMode) {
-            Write-RequestState -ResultRoot $RequestStateRoot -RequestId $requestId -Status $finalStatus -Message $finalMessage -CreatedUtc $createdUtc -ClaimedUtc $ClaimedUtc -ExecutionDeadlineUtc $executionDeadlineUtc -WorkerId $workerId
+            try {
+                Write-RequestState -ResultRoot $RequestStateRoot -RequestId $requestId -Status $finalStatus -Message $finalMessage -CreatedUtc $createdUtc -ClaimedUtc $ClaimedUtc -ExecutionDeadlineUtc $executionDeadlineUtc -WorkerId $workerId
+            }
+            catch {
+                # Request-state publication is advisory. Never let a transient
+                # status-file race hide the terminal broker-result or a cleanup
+                # failure that has already been captured above.
+                $evidenceWarnings.Add("Could not publish final request state: $($_.Exception.Message)")
+            }
         }
 
         Write-JsonAtomic -Path (Join-Path $ResultRoot 'broker-result.json') -Value ([ordered]@{
@@ -1868,6 +2128,7 @@ function Invoke-GuestRequest {
             TestPassed = if ($guestResult -and $guestResult.TestEvaluated) { [bool]$guestResult.TestPassed } else { $null }
             OverallSucceeded = [bool]$success -and (-not ($guestResult -and $guestResult.TestEvaluated) -or [bool]$guestResult.TestPassed)
             FailureKind = if (-not $success) { $failureKind } elseif ($guestResult -and $guestResult.TestEvaluated -and -not [bool]$guestResult.TestPassed) { [string]$guestResult.TestFailureKind } else { $null }
+            CleanupFailure = [bool]$cleanupFailureObserved
             Error = $errorMessage
             FailureStage = if ($success) { $null } else { $failureStage }
             ErrorType = $errorType
@@ -1914,6 +2175,37 @@ function Invoke-GuestRequest {
             PayloadChildDeleted = $payloadChildDeleted
             HostInputSetupMilliseconds = [Math]::Round($hostInputSetupWatch.Elapsed.TotalMilliseconds, 3)
             HostInputCleanup = $hostInputCleanup
+            Network = [ordered]@{
+                ContractVersion = if ([string]$Request.Operation -eq 'RunGuestJobNetworkV1') { 1 } else { 0 }
+                RequestedProfile = if ($requestNetworkDefinition) { [string]$requestNetworkDefinition.RequestedProfile } else { 'None' }
+                EffectiveProfile = if ($requestNetworkDefinition) { [string]$requestNetworkDefinition.EffectiveProfile } else { 'None' }
+                Cohort = if ($requestNetworkDefinition -and [string]$requestNetworkDefinition.EffectiveProfile -eq 'IsolatedTestNet') { [string]$requestNetworkDefinition.Cohort } else { $null }
+                SwitchName = if ($requestNetworkRuntime) { [string]$requestNetworkRuntime.SwitchName } else { $null }
+                SwitchId = if ($requestNetworkRuntime) { [string]$requestNetworkRuntime.SwitchId } else { $null }
+                SwitchType = if ($requestNetworkRuntime) { [string]$requestNetworkRuntime.SwitchType } else { $null }
+                AdapterName = if ($requestNetworkRuntime) { [string]$requestNetworkRuntime.AdapterName } else { $null }
+                AdapterMacAddress = if ($requestNetworkRuntime) { [string]$requestNetworkRuntime.AdapterMacAddress } else { $null }
+                GuestAddress = if ($requestNetworkRuntime) { [string]$requestNetworkRuntime.GuestAddress } else { $null }
+                GatewayAddress = if ($requestNetworkRuntime) { [string]$requestNetworkRuntime.GatewayAddress } else { $null }
+                GatewayMacAddress = if ($requestNetworkRuntime) { [string]$requestNetworkRuntime.GatewayMacAddress } else { $null }
+                DnsServers = if ($requestNetworkRuntime) { @($requestNetworkRuntime.DnsServers) } else { @() }
+                EnforcedLocalAddress = if ($requestNetworkRuntime) { [string]$requestNetworkRuntime.EnforcedLocalAddress } else { $null }
+                AllowedRemoteAddress = if ($requestNetworkRuntime) { [string]$requestNetworkRuntime.AllowedRemoteAddress } else { $null }
+                AllowedRemoteMacAddress = if ($requestNetworkRuntime) { [string]$requestNetworkRuntime.AllowedRemoteMacAddress } else { $null }
+                DenyRemotePrefixes = if ($requestNetworkRuntime) { @($requestNetworkRuntime.DenyRemotePrefixes) } else { @() }
+                AdapterEnforcement = $requestNetworkAttachment
+                Connection = $requestNetworkConnection
+                HostPolicyChecks = [ordered]@{
+                    Count = $requestNetworkHostPolicyCheckCount
+                    Prelaunch = $requestNetworkPrelaunchHostEvidence
+                    Last = $requestNetworkLastHostEvidence
+                }
+                GuestAttestation = $requestNetworkGuestEvidence
+                Cleanup = $requestNetworkCleanup
+                FinalNetworkInventorySucceeded = [bool]$finalNetworkInventorySucceeded
+                FinalConnectedAdapters = if ($finalNetworkInventorySucceeded) { @($finalConnectedNetworkAdapters) } else { $null }
+                FinalAllAdaptersDisconnected = [bool]$finalNetworkInventorySucceeded -and $finalConnectedNetworkAdapters.Count -eq 0
+            }
             HostInputs = @(
                 foreach ($definition in $hostInputDefinitions) {
                     $inputName = [string]$definition.Name
@@ -1958,10 +2250,13 @@ function Invoke-GuestRequest {
             )
             EvidenceSnapshotAttempts = $evidenceSnapshotAttempts
             EvidenceTransferAttempts = $evidenceTransferAttempts
-            EvidenceFilesEnumerated = if ($evidenceManifest) { [int]$evidenceManifest.EnumeratedFileCount } else { 0 }
-            EvidenceFilesCopied = if ($evidenceManifest) { @($evidenceManifest.CopiedFiles).Count } else { 0 }
-            EvidenceFilesSkipped = if ($evidenceManifest) { @($evidenceManifest.SkippedFiles).Count } else { 0 }
-            EvidenceSkippedFiles = if ($evidenceManifest) { @($evidenceManifest.SkippedFiles) } else { @() }
+            EvidenceSnapshotSucceeded = [bool]$evidenceSnapshotSucceeded
+            EvidenceTransferSucceeded = [bool]$evidenceTransferSucceeded
+            EvidenceValidationSucceeded = [bool]$evidenceValidationSucceeded
+            EvidenceFilesEnumerated = if ($evidenceSnapshotSucceeded -and $null -ne $evidenceManifest.EnumeratedFileCount) { [int]$evidenceManifest.EnumeratedFileCount } else { $null }
+            EvidenceFilesCopied = if ($evidenceSnapshotSucceeded) { @($evidenceManifest.CopiedFiles).Count } else { $null }
+            EvidenceFilesSkipped = if ($evidenceSnapshotSucceeded) { @($evidenceManifest.SkippedFiles).Count } else { $null }
+            EvidenceSkippedFiles = if ($evidenceSnapshotSucceeded) { @($evidenceManifest.SkippedFiles) } else { $null }
             EvidenceWarnings = $evidenceWarnings.ToArray()
             GuestSessionReconnects = $guestSessionReconnects
             JobSubmissionAttempts = $jobSubmissionAttempts

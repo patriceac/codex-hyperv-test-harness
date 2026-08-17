@@ -5,8 +5,10 @@ flowchart LR
     C["Codex runner"] -->|"request JSON + canonical ArtifactPath"| B["ACL-protected SYSTEM broker"]
     B --> Q["queue and lifecycle state"]
     B --> P["incremental immutable payload VHDX cache"]
+    B --> N["request-scoped network profile and lease"]
     P --> D["per-run differencing child"]
     B --> W["elastic worker pool: 0 to 4"]
+    N --> W
     D --> W
     W --> G["interactive guest agent"]
     G --> A["application under test"]
@@ -22,6 +24,18 @@ The elastic pool starts at zero. Leasing a worker causes the broker to prepare o
 Payload files remain at the caller's `ArtifactPath`. The broker uses cheap metadata to identify likely changes and hashes only candidates, synchronizes additions/changes/deletions into an immutable VHDX cache, then attaches a new differencing child to the leased worker. Cleanup detaches and deletes that child. Ordinary build outputs and project locations are untouched.
 
 Large external fixture trees may be exposed for one request through the broker's read-only host-input transport instead of becoming payload copies. The mapping is scoped to the request and removed during cleanup.
+
+## Request-scoped network profiles
+
+Browser-faithful pure web tests should stay in a browser. Hyper-V is the boundary for native shell, tray, installer, WebView2, Windows-integration, or network-policy tests.
+
+`None` is the default profile and retains the existing `RunGuestJob` operation. Every non-`None` request uses `RunGuestJobNetworkV1`; this makes an older broker fail closed at operation validation instead of ignoring a newer JSON field. The other names are `IsolatedTestNet` for an explicit cohort on an installation-scoped private VM-only switch, `InternetOnly` for a pinned internal switch and the host's sole mapping-free WinNAT, and `TrustedLan` for an external switch pinned through its logical and physical identity with full LAN exposure. `InternetOnly` and `TrustedLan` remain disabled until their host configuration is separately approved and installed.
+
+`InternetOnly` uses two independent enforcement layers. Hyper-V private VLANs place every request adapter in `Isolated` mode and the sole host gateway adapter in `Promiscuous` mode with exact broker-pinned primary and secondary VLAN IDs, so guests cannot exchange Ethernet, ARP, broadcast, or multicast frames with peer guests. The promiscuous host gateway remains reachable for the Ethernet/ARP control traffic required to reach WinNAT; this profile does not claim that the host gateway is invisible at raw layer 2. Weighted extended switch ACLs then give the exact guest IPv4 source only stateful outbound TCP and UDP, place current host routes/addresses plus private, special, and NAT-prefix destinations ahead of those allows, and deny all other inbound and outbound IP traffic. Basic port ACLs are required to be empty so undocumented MAC-versus-IP precedence is not part of the boundary.
+
+The runner may send only the profile name, an applicable cohort, an allowlisted switch selector, and the explicit host-input coexistence flag. The SYSTEM broker resolves these against private configuration and rejects arbitrary switch, NAT, DNS, route, or firewall settings. A shared host input is incompatible with general networking: explicit `Share` is rejected, while `Auto` is resolved to an immutable VHDX when coexistence was explicitly allowed.
+
+For an authorized request, the broker records a per-request adapter lease in a SYSTEM/Administrators-only directory before VM-adapter mutation, creates and secures the adapter while it is disconnected, waits for the guest control channel, revalidates the approved switch/NAT/uplink, VLAN, ACL, and host-route boundary, then connects. Exact guest-visible state is attested before application launch and mutable host policy is rechecked during long runs. Cancellation, timeout, worker failure, broker restart, and normal completion all converge on the same cleanup: bind mutations to recorded VM/switch IDs, disconnect first, remove request-created state, verify every adapter is disconnected and the lease is deleted, and only then publish terminal evidence. Startup and periodic orphan reconciliation use the persisted lease and installation-scoped managed-switch ownership marker to finish interrupted cleanup; an unreadable or ambiguous authoritative inventory stops request processing instead of being treated as empty.
 
 ## Baseline servicing and recovery provenance
 

@@ -50,6 +50,20 @@ function Remove-WorkerPayloadAttachments {
     }
 }
 
+function Reset-WorkerNetworkIsolation {
+    $null = Recover-OrphanedRequestNetworkResources -BrokerRoot $BrokerRoot
+    Remove-ManagedRequestNetworkAdapters -VmName $vmName -BrokerRoot $BrokerRoot
+    Get-VMNetworkAdapter -VMName $vmName -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like 'CodexHostInput-*' } |
+        Remove-VMNetworkAdapter -ErrorAction SilentlyContinue
+    $connected = @(Get-VMNetworkAdapter -VMName $vmName -ErrorAction Stop | Where-Object {
+        -not [string]::IsNullOrWhiteSpace([string]$_.SwitchName)
+    })
+    if ($connected.Count -gt 0) {
+        throw "The pool refuses to continue while $vmName has a connected network adapter: $($connected.SwitchName -join ', ')."
+    }
+}
+
 function Reset-WorkerOperatingSystemDisk {
     if (-not (Test-Path -LiteralPath $baseVhdx -PathType Leaf)) {
         throw "Pool base VHDX is missing: $baseVhdx"
@@ -89,10 +103,16 @@ function Reset-WorkerOperatingSystemDisk {
 try {
     Import-Module Hyper-V
     $vm = Get-VM -Name $vmName -ErrorAction Stop
+    # Disconnect broker-managed request/host-input adapters before attempting
+    # to stop a worker. A stop can hang or fail while a guest/network teardown
+    # is in flight, so the isolation gate is intentionally repeated after the
+    # stop as well.
+    Reset-WorkerNetworkIsolation
     if ($vm.State -ne 'Off') {
         Stop-TestVm -VmName $vmName -Immediate
     }
 
+    Reset-WorkerNetworkIsolation
     Remove-WorkerPayloadAttachments
 
     if ($Mode -eq 'Stop') {
@@ -128,11 +148,7 @@ try {
         }) | Out-Null
     }
 
-    Get-VMNetworkAdapter -VMName $vmName -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'CodexHostInput-*' } | Remove-VMNetworkAdapter -ErrorAction SilentlyContinue
-    $connected = @(Get-VMNetworkAdapter -VMName $vmName | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.SwitchName) })
-    if ($connected.Count -gt 0) {
-        throw 'The pool refuses to start a worker whose network adapter is connected.'
-    }
+    Reset-WorkerNetworkIsolation
 
     $vmStartUtc = [DateTime]::UtcNow
     Start-VM -Name $vmName -ErrorAction Stop | Out-Null
@@ -165,9 +181,32 @@ try {
     }) | Out-Null
 }
 catch {
-    try { Stop-TestVm -VmName $vmName -Immediate } catch { }
+    $failureMessage = $_.Exception.Message
+    # Even when the initial stop or state update fails, retry network
+    # disconnection and then retry the stop. Never publish a recyclable worker
+    # while a managed adapter may still be connected.
+    $initialNetworkResetFailed = $false
+    try { Reset-WorkerNetworkIsolation }
+    catch {
+        $initialNetworkResetFailed = $true
+        $failureMessage = "$failureMessage Network reset also failed: $($_.Exception.Message)"
+    }
+    $stopSucceeded = $false
+    try {
+        Stop-TestVm -VmName $vmName -Immediate
+        $stopSucceeded = $true
+    }
+    catch {
+        $failureMessage = "$failureMessage VM stop also failed: $($_.Exception.Message)"
+    }
+    if ($initialNetworkResetFailed -and $stopSucceeded) {
+        # The VM stop can release an adapter lock held by the guest. Retry
+        # immediately after that successful stop, before publishing a fault.
+        try { Reset-WorkerNetworkIsolation }
+        catch { $failureMessage = "$failureMessage Final network reset also failed: $($_.Exception.Message)" }
+    }
     $latest = Read-PoolWorkerState -BrokerRoot $BrokerRoot -WorkerId $WorkerId
-    $faultPatch = New-PoolFaultStatePatch -State $latest -Config $config -ErrorMessage $_.Exception.Message
+    $faultPatch = New-PoolFaultStatePatch -State $latest -Config $config -ErrorMessage $failureMessage
     Update-PoolWorkerState -BrokerRoot $BrokerRoot -WorkerId $WorkerId -ExpectedOperationId $OperationId -RequireExpectation -Patch $faultPatch | Out-Null
     exit 1
 }

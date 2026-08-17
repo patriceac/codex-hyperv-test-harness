@@ -40,7 +40,11 @@ if (-not $SkipIsoSmoke) {
 
 $excluded = @('Test-HostInputHostIntegration.ps1','Test-HyperVPoolConcurrency.ps1')
 $testResults = New-Object Collections.Generic.List[object]
-foreach ($test in @(Get-ChildItem -LiteralPath (Join-Path $softwareRoot 'Harness\tests') -File -Filter '*.ps1' | Where-Object Name -notin $excluded | Sort-Object Name)) {
+$deterministicTests = @(
+    Get-ChildItem -LiteralPath (Join-Path $softwareRoot 'Harness\tests') -File -Filter '*.ps1' | Where-Object Name -notin $excluded
+    Get-Item -LiteralPath (Join-Path $softwareRoot 'Recovery\Test-RecoveryInstallContract.ps1') -ErrorAction Stop
+) | Sort-Object FullName
+foreach ($test in $deterministicTests) {
     $output = @(& $test.FullName)
     $summary = $null
     if ($output.Count -gt 0) {

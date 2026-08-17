@@ -69,6 +69,7 @@ $softwareRoot = Split-Path -Parent $harnessRoot
 $repositoryRoot = Split-Path -Parent (Split-Path -Parent $softwareRoot)
 $setupRoot = Join-Path $repositoryRoot 'setup'
 $wrapper = Get-Content -Raw -LiteralPath (Join-Path $setupRoot 'Update-Images.ps1')
+$userIntegration = Get-Content -Raw -LiteralPath (Join-Path $softwareRoot 'UserIntegration\Install-CodexUserIntegration.ps1')
 $watcherPath = Join-Path $setupRoot 'Watch-ImageUpdateLauncher.ps1'
 $watcher = Get-Content -Raw -LiteralPath $watcherPath
 $inertControllerPath = $PSCommandPath
@@ -113,6 +114,91 @@ if ($wrapper -notmatch 'ExpectedDotNetSdkVersion' -or $wrapper -notmatch 'Preser
     throw 'Image maintenance does not pin the SDK version or preserve the prior recovery generation.'
 }
 $scenarios.Add('plan-covers-live-local-and-github-recovery')
+
+foreach ($wrapperContract in @(
+    "Join-Path `$checkoutSoftware 'UserIntegration\Install-CodexUserIntegration.ps1'",
+    '-SkipGlobalPolicy',
+    "@('-ProfileArtifactsPrepared', '-PreparedSkillFingerprint', `$PreparedSkillFingerprint)",
+    "Join-Path `$installedSoftware 'UserIntegration\Install-CodexUserIntegration.ps1'",
+    '-FingerprintOnly',
+    'Prepared runtime skill does not match the sanitized source staged for elevated image maintenance.',
+    'PreparedByTargetUser = $true'
+)) {
+    if ($wrapper.IndexOf($wrapperContract, [StringComparison]::Ordinal) -lt 0) { throw "Image maintenance is missing the least-privilege user-integration contract: $wrapperContract" }
+}
+
+$wrapperTokens = $null
+$wrapperParseErrors = $null
+$wrapperAst = [Management.Automation.Language.Parser]::ParseInput($wrapper, [ref]$wrapperTokens, [ref]$wrapperParseErrors)
+if ($wrapperParseErrors.Count -gt 0) { throw "Image-maintenance wrapper source did not parse: $($wrapperParseErrors[0].Message)" }
+$userIntegrationTokens = $null
+$userIntegrationParseErrors = $null
+$userIntegrationAst = [Management.Automation.Language.Parser]::ParseInput($userIntegration, [ref]$userIntegrationTokens, [ref]$userIntegrationParseErrors)
+if ($userIntegrationParseErrors.Count -gt 0) { throw "User-integration source did not parse: $($userIntegrationParseErrors[0].Message)" }
+$userIntegrationFunctionNames = @($userIntegrationAst.FindAll({
+        param($candidate)
+        $candidate -is [Management.Automation.Language.FunctionDefinitionAst]
+    }, $true) | ForEach-Object { $_.Name })
+foreach ($requiredFunctionName in @('Install-RuntimeSkillForCurrentUser', 'Get-ContentTreeFingerprint')) {
+    if ($userIntegrationFunctionNames -notcontains $requiredFunctionName) { throw "User-integration AST is missing the least-privilege function: $requiredFunctionName" }
+}
+
+$profilePreparationPosition = $wrapper.IndexOf('$profileArtifacts = & $userIntegrationScript', [StringComparison]::Ordinal)
+$profilePreparedPosition = $wrapper.IndexOf('$ProfileArtifactsPrepared = $true', $profilePreparationPosition, [StringComparison]::Ordinal)
+$fingerprintAssignmentPosition = $wrapper.IndexOf('$PreparedSkillFingerprint = [string]$profileArtifacts.SkillFingerprint', $profilePreparedPosition, [StringComparison]::Ordinal)
+$elevationProcessPosition = $wrapper.IndexOf("Start-Process -FilePath 'powershell.exe'", $fingerprintAssignmentPosition, [StringComparison]::Ordinal)
+$elevatedGuardPosition = $wrapper.IndexOf('if (-not $ProfileArtifactsPrepared', $elevationProcessPosition, [StringComparison]::Ordinal)
+$elevatedFingerprintPosition = $wrapper.IndexOf('$preparedSource = & $installedUserIntegrationScript', $elevatedGuardPosition, [StringComparison]::Ordinal)
+$canaryPosition = $wrapper.IndexOf('$canaries = @(&', $elevatedFingerprintPosition, [StringComparison]::Ordinal)
+$imageUpdatePosition = $wrapper.IndexOf('$result = & (Join-Path $installedSoftware', $canaryPosition, [StringComparison]::Ordinal)
+if ($elevationPosition -lt 0 -or $profilePreparationPosition -le $elevationPosition -or
+    $profilePreparedPosition -le $profilePreparationPosition -or $fingerprintAssignmentPosition -le $profilePreparedPosition -or
+    $elevationProcessPosition -le $fingerprintAssignmentPosition -or $elevatedGuardPosition -le $elevationProcessPosition -or
+    $elevatedFingerprintPosition -le $elevatedGuardPosition -or $canaryPosition -le $elevatedFingerprintPosition -or
+    $imageUpdatePosition -le $canaryPosition) {
+    throw 'User-profile artifacts are not prepared by the unelevated parent and fingerprint-verified before elevated image work.'
+}
+
+$obsoleteRuntimeFunctionAsts = @($wrapperAst.FindAll({
+        param($candidate)
+        $candidate -is [Management.Automation.Language.FunctionDefinitionAst] -and $candidate.Name -eq 'Install-RuntimeSkillTransactional'
+    }, $true))
+if ($obsoleteRuntimeFunctionAsts.Count -gt 0 -or $wrapper.IndexOf('RuntimeSkillStage-', [StringComparison]::Ordinal) -ge 0 -or
+    $wrapper.IndexOf('RuntimeSkillBackup-', [StringComparison]::Ordinal) -ge 0) {
+    throw 'The elevated wrapper still contains the obsolete target-profile runtime-skill transaction.'
+}
+$scenarios.Add('user-profile-integration-prepares-artifacts-before-elevation')
+
+$helperContracts = @(
+    'function Install-RuntimeSkillForCurrentUser',
+    'function Get-ContentTreeFingerprint',
+    'if ($FingerprintOnly)',
+    'SkillFingerprint = [string]$skillFingerprint.Fingerprint',
+    'if (Test-Administrator) { throw',
+    'TargetUserSid must match the current unelevated user.',
+    'TargetUserProfile must match the current unelevated user profile.',
+    'Assert-NoReparsePointChain -Path $profile'
+)
+foreach ($helperContract in $helperContracts) {
+    if ($userIntegration.IndexOf($helperContract, [StringComparison]::Ordinal) -lt 0) { throw "User-integration helper is missing the least-privilege contract: $helperContract" }
+}
+$fingerprintOnlyPosition = $userIntegration.IndexOf('if ($FingerprintOnly)', [StringComparison]::Ordinal)
+$fingerprintReturnPosition = $userIntegration.IndexOf('return', $fingerprintOnlyPosition, [StringComparison]::Ordinal)
+$helperAdminGuardPosition = $userIntegration.IndexOf('if (Test-Administrator)', $fingerprintReturnPosition, [StringComparison]::Ordinal)
+$helperMutationPosition = $userIntegration.IndexOf('$skillResult = Install-RuntimeSkillForCurrentUser', $helperAdminGuardPosition, [StringComparison]::Ordinal)
+if ($fingerprintOnlyPosition -lt 0 -or $fingerprintReturnPosition -le $fingerprintOnlyPosition -or
+    $helperAdminGuardPosition -le $fingerprintReturnPosition -or $helperMutationPosition -le $helperAdminGuardPosition) {
+    throw 'Fingerprint-only user integration does not return before administrator/profile mutation checks.'
+}
+$elevatedHelperLine = @($wrapper -split "`r?`n" | Where-Object { $_ -match '\$preparedSource\s*=\s*&\s*\$installedUserIntegrationScript' })
+if ($elevatedHelperLine.Count -ne 1 -or $elevatedHelperLine[0] -notmatch '-FingerprintOnly') {
+    throw 'The elevated phase must invoke user integration only in fingerprint-verification mode.'
+}
+$profileHelperLine = @($wrapper -split "`r?`n" | Where-Object { $_ -match '\$profileArtifacts\s*=\s*&\s*\$userIntegrationScript' })
+if ($profileHelperLine.Count -ne 1 -or $profileHelperLine[0] -notmatch '-SkipGlobalPolicy') {
+    throw 'The unelevated parent must invoke user integration for profile artifacts before elevation.'
+}
+$scenarios.Add('elevated-phase-verifies-protected-source-without-profile-mutation')
 
 foreach ($networkContract in @('Connect-VMNetworkAdapter', 'Disconnect-VMNetworkAdapter', 'Enable-GuestTemporaryDhcp', 'Restore-GuestNetworkConfiguration', 'MatchesOriginal = $true', 'Wait-GuestUpdateConnectivity', 'Invoke-UpdateSearchWithRetry', '8024001E', "Type='Software'", 'BrowseOnly', 'FeatureUpgrade', 'FailedUpdates', 'Microsoft Corporation', 'SHA512', 'WU_E_DS_UNKNOWNSERVICE', 'ServerSelection 2')) {
     if ($guestServicing.IndexOf($networkContract, [StringComparison]::OrdinalIgnoreCase) -lt 0) { throw "Guest servicing is missing contract: $networkContract" }
@@ -293,6 +379,80 @@ if ($deferPosition -lt 0 -or $servicingPosition -le $deferPosition -or $checkpoi
 if ($installer -notmatch 'GuestUpdateSwitchName' -or $installer -notmatch 'ExpectedDotNetSdkVersion' -or $installer -notmatch 'NetworkFinalState') {
     throw 'Cold-rebuild planning does not carry the approved guest update network and SDK pin.'
 }
+$coldSdkGuardPosition = $installer.IndexOf("if (-not `$Resume -and [string]::IsNullOrWhiteSpace(`$ExpectedDotNetSdkVersion))", [StringComparison]::Ordinal)
+$sdkForwardPosition = $installer.IndexOf("'-ExpectedDotNetSdkVersion', `$ExpectedDotNetSdkVersion", [StringComparison]::Ordinal)
+if ($coldSdkGuardPosition -lt 0 -or $sdkForwardPosition -lt 0 -or $sdkForwardPosition -le $coldSdkGuardPosition -or
+    $installer.IndexOf("-notmatch '^\d+\.\d+\.\d+$'", [StringComparison]::Ordinal) -lt 0) {
+    throw 'Cold Install does not require and forward an exact non-empty .NET SDK version.'
+}
+$scenarios.Add('cold-install-requires-exact-sdk-version-before-elevation')
+
+foreach ($sourceProtectionContract in @('Get-PreparedSourceFingerprint', 'Protect-StagedSourceTree', 'PreparedSourceFingerprint', 'SYSTEM/Administrators-only ACL', 'TargetUserSid', '(OI)(CI)(RX)', 'The staged Software/Setup source changed between unelevated preparation and elevation.')) {
+    if ($installer.IndexOf($sourceProtectionContract, [StringComparison]::Ordinal) -lt 0) { throw "Cold-install source staging is missing: $sourceProtectionContract" }
+}
+$protectionFunctionPosition = $installer.IndexOf('function Protect-StagedSourceTree', [StringComparison]::Ordinal)
+$targetReadExecuteGrantPosition = $installer.IndexOf('"$client`:(OI)(CI)(RX)"', $protectionFunctionPosition, [StringComparison]::Ordinal)
+$protectionCommandPosition = $installer.IndexOf('icacls.exe $full', $protectionFunctionPosition, [StringComparison]::Ordinal)
+if ($protectionFunctionPosition -lt 0 -or $protectionCommandPosition -lt $protectionFunctionPosition -or $targetReadExecuteGrantPosition -lt $protectionCommandPosition) {
+    throw 'Staged source ACL does not explicitly grant the approved target user read/execute access.'
+}
+$scenarios.Add('cold-install-protects-and-fingerprints-staged-source')
+
+$fingerprintAstTokens = $null
+$fingerprintAstErrors = $null
+$fingerprintAst = [Management.Automation.Language.Parser]::ParseInput($installer, [ref]$fingerprintAstTokens, [ref]$fingerprintAstErrors)
+$fingerprintFunctionNames = @('Assert-NoAlternateDataStreams', 'Assert-NoReparsePointChain', 'Assert-SourceTreeSafeForPrivilegedCopy', 'Get-SourceTreeFingerprint', 'Get-PreparedSourceFingerprint')
+$fingerprintFunctions = @($fingerprintAst.FindAll({
+        param($candidate)
+        $candidate -is [Management.Automation.Language.FunctionDefinitionAst] -and $candidate.Name -in $fingerprintFunctionNames
+    }, $true))
+if ($fingerprintAstErrors.Count -gt 0 -or $fingerprintFunctions.Count -ne $fingerprintFunctionNames.Count) {
+    throw 'The source fingerprint helper functions could not be extracted for deterministic execution.'
+}
+$fingerprintScript = [ScriptBlock]::Create((@($fingerprintFunctions | Sort-Object { $fingerprintFunctionNames.IndexOf($_.Name) } | ForEach-Object { $_.Extent.Text }) -join "`n") + "`nGet-PreparedSourceFingerprint -SoftwareRoot `$args[0] -SetupRoot `$args[1]")
+$fingerprintTestRoot = Join-Path ([IO.Path]::GetTempPath()) ('codex-source-fingerprint-contract-' + [Guid]::NewGuid().ToString('N'))
+try {
+    $checkoutSoftwareRoot = Join-Path $fingerprintTestRoot 'checkout-software'
+    $checkoutSetupRoot = Join-Path $fingerprintTestRoot 'checkout-setup'
+    $stagedSoftwareRoot = Join-Path $fingerprintTestRoot 'staged-software'
+    $stagedSetupRoot = Join-Path $stagedSoftwareRoot 'Setup'
+    New-Item -ItemType Directory -Force -Path $checkoutSoftwareRoot, $checkoutSetupRoot, $stagedSoftwareRoot, $stagedSetupRoot | Out-Null
+    Set-Content -LiteralPath (Join-Path $checkoutSoftwareRoot 'source.txt') -Value 'source' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $checkoutSetupRoot 'Test-Prerequisites.ps1') -Value 'setup' -Encoding UTF8
+    Copy-Item -LiteralPath (Join-Path $checkoutSoftwareRoot 'source.txt') -Destination $stagedSoftwareRoot -Force
+    Copy-Item -LiteralPath (Join-Path $checkoutSetupRoot 'Test-Prerequisites.ps1') -Destination $stagedSetupRoot -Force
+    $checkoutFingerprint = & $fingerprintScript $checkoutSoftwareRoot $checkoutSetupRoot
+    $stagedFingerprint = & $fingerprintScript $stagedSoftwareRoot $stagedSetupRoot
+    if (-not [string]::Equals([string]$checkoutFingerprint, [string]$stagedFingerprint, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The staged Software/Setup fingerprint differs only because Setup is nested under Software.'
+    }
+    Add-Content -LiteralPath (Join-Path $stagedSetupRoot 'Test-Prerequisites.ps1') -Value 'mismatch' -Encoding UTF8
+    $mismatchedFingerprint = & $fingerprintScript $stagedSoftwareRoot $stagedSetupRoot
+    if ([string]::Equals([string]$checkoutFingerprint, [string]$mismatchedFingerprint, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The staged source fingerprint did not detect a modified nested Setup file.'
+    }
+}
+finally {
+    Remove-Item -LiteralPath $fingerprintTestRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+$scenarios.Add('staged-source-fingerprint-equality-and-mismatch-are-executable')
+$installerAdminPosition = $installer.IndexOf('if (-not (Test-Administrator))', [StringComparison]::Ordinal)
+$installerStagingPosition = $installer.IndexOf("Write-SetupState -Phase 'StagingSource'", $installerAdminPosition, [StringComparison]::Ordinal)
+$installerFingerprintPosition = $installer.IndexOf('$stagedSourceFingerprint = Get-PreparedSourceFingerprint', $installerStagingPosition, [StringComparison]::Ordinal)
+$installerProtectionPosition = $installer.IndexOf('Protect-StagedSourceTree -Path $installedSetup', $installerFingerprintPosition, [StringComparison]::Ordinal)
+$installerPreflightPosition = $installer.IndexOf("Write-SetupState -Phase 'Preflight'", $installerProtectionPosition, [StringComparison]::Ordinal)
+$installerStagedPreflightPathPosition = $installer.IndexOf('$preflightPath = Join-Path $installedSetup', $installerPreflightPosition, [StringComparison]::Ordinal)
+$mutableElevatedPreflightPosition = $installer.IndexOf('$preflightPath = if ($runningFromCheckout)', $installerAdminPosition, [StringComparison]::Ordinal)
+if ($installerStagingPosition -lt 0 -or $installerFingerprintPosition -le $installerStagingPosition -or
+    $installerProtectionPosition -le $installerFingerprintPosition -or $installerPreflightPosition -le $installerProtectionPosition -or
+    $installerStagedPreflightPathPosition -le $installerPreflightPosition -or $mutableElevatedPreflightPosition -ge 0) {
+    throw 'Elevated Install still runs prerequisites from mutable checkout before staged-source protection.'
+}
+$scenarios.Add('elevated-preflight-runs-only-after-protected-staging')
+foreach ($resumeCleanupContract in @('$resumeTaskRegistered', '$resumeHandoffCommitted', 'Unregister-ResumeTaskIfOwned', 'Unregister-ResultRunOnceIfOwned', 'if (-not $resumeHandoffCommitted)')) {
+    if ($installer.IndexOf($resumeCleanupContract, [StringComparison]::Ordinal) -lt 0) { throw "Cold-install resume cleanup is missing: $resumeCleanupContract" }
+}
+$scenarios.Add('cold-install-removes-resume-on-uncommitted-handoff')
 $scenarios.Add('cold-rebuild-services-before-sealing')
 
 $candidatePosition = $imageUpdate.IndexOf('Checkpoint-VM -VMName $baselineVm.Name -SnapshotName $candidateCheckpointName', [StringComparison]::Ordinal)

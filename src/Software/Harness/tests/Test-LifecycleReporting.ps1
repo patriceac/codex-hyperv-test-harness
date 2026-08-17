@@ -1,12 +1,25 @@
 [CmdletBinding()]
 param(
-    [string] $RunnerPath = (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'Skill\scripts\Invoke-HyperVExecutableTest.ps1'),
-    [string] $HostBrokerPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'HostBroker.ps1'),
-    [string] $QueueInspectorPath = (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'Skill\scripts\Get-HyperVExecutableTestQueue.ps1')
+    [string] $RunnerPath,
+    [string] $HostBrokerPath,
+    [string] $QueueInspectorPath
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+# Resolve script-relative defaults after parameter binding. Windows
+# PowerShell 5.1 can evaluate default expressions before $PSScriptRoot is
+# initialized, producing empty paths when this test is invoked without args.
+if ([string]::IsNullOrWhiteSpace($RunnerPath)) {
+    $RunnerPath = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'Skill\scripts\Invoke-HyperVExecutableTest.ps1'
+}
+if ([string]::IsNullOrWhiteSpace($HostBrokerPath)) {
+    $HostBrokerPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'HostBroker.ps1'
+}
+if ([string]::IsNullOrWhiteSpace($QueueInspectorPath)) {
+    $QueueInspectorPath = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'Skill\scripts\Get-HyperVExecutableTestQueue.ps1'
+}
 
 function Get-ScriptAst {
     param([Parameter(Mandatory = $true)] [string] $Path)
@@ -58,6 +71,8 @@ $preRunningStates = @(
     [pscustomobject]@{ Status = 'Claimed'; Message = 'Worker claimed request.'; WorkerId = 2 },
     [pscustomobject]@{ Status = 'StagingGuestPayload'; Message = 'Syncing payload.'; WorkerId = 2 },
     [pscustomobject]@{ Status = 'PreparingHostInputs'; Message = 'Preparing read-only host inputs.'; WorkerId = 2 },
+    [pscustomobject]@{ Status = 'PreparingNetwork'; Message = 'Securing adapter.'; WorkerId = 2 },
+    [pscustomobject]@{ Status = 'VerifyingNetwork'; Message = 'Attesting guest network.'; WorkerId = 2 },
     [pscustomobject]@{ Status = 'PreparingVm'; Message = 'Preparing VM.'; WorkerId = 2 },
     [pscustomobject]@{ Status = 'StartingVm'; Message = 'Starting VM.'; WorkerId = 2 },
     [pscustomobject]@{ Status = 'WaitingForGuestAgent'; Message = 'Waiting for agent.'; WorkerId = 2 },
@@ -70,6 +85,10 @@ foreach ($state in $preRunningStates) {
     Assert-True ($display.Text -notmatch '(?i)\brunning\b') "Pre-confirmation output used running wording for $($state.Status): $($display.Text)"
 }
 $scenarios.Add('pre-confirmation-stages-never-say-running')
+
+$cleaningNetwork = Get-RequestLifecycleDisplay -RequestState ([pscustomobject]@{ Status = 'CleaningNetwork'; Message = 'Disconnecting adapter.'; WorkerId = 2 }) -RequestId $requestId -ProcessingPresent:$true
+Assert-True ($cleaningNetwork.Text -eq 'Revoking request network: Disconnecting adapter.') 'Request-network cleanup was not rendered as an explicit revocation stage.'
+$scenarios.Add('network-lifecycle-stages-rendered')
 
 $withoutLease = [pscustomobject]@{
     ApplicationLease = $null
