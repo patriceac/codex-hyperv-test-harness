@@ -385,7 +385,7 @@ try {
     catch {
         $vlan = Get-VMNetworkAdapterVlan -VMNetworkAdapter $management[0] -ErrorAction Stop
         if ([string]$vlan.OperationMode -ne 'Untagged') { throw 'InternetOnly gateway VLAN changed after approval.' }
-        Set-VMNetworkAdapterVlan -VMNetworkAdapter $management[0] -Promiscuous -PrimaryVlanId $InternetPrimaryVlanId -SecondaryVlanId $InternetSecondaryVlanId -ErrorAction Stop
+        Set-VMNetworkAdapterVlan -VMNetworkAdapter $management[0] -Promiscuous -PrimaryVlanId $InternetPrimaryVlanId -SecondaryVlanIdList ([string]$InternetSecondaryVlanId) -ErrorAction Stop
         $journal.GatewayVlanChangedFromUntagged = $true
         Write-InfraJsonAtomic $journalPath $journal
     }

@@ -99,7 +99,7 @@ foreach ($requiredInfrastructureContract in @(
     'NoMutationPerformed',
     'New-VMSwitch @createInternet',
     'New-VMSwitch @createTrusted',
-    'Set-VMNetworkAdapterVlan -VMNetworkAdapter $management[0] -Promiscuous',
+    'Set-VMNetworkAdapterVlan -VMNetworkAdapter $management[0] -Promiscuous -PrimaryVlanId $InternetPrimaryVlanId -SecondaryVlanIdList ([string]$InternetSecondaryVlanId)',
     'New-NetNat -Name $InternetNatName',
     'Preserve all unrelated switches, NATs, VMs, adapters, routes, and firewall rules.',
     'PreparedForBrokerPolicyPlan',
