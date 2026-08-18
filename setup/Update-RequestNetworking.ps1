@@ -131,6 +131,7 @@ function Read-RequestNetworkingPolicy {
 function Get-RequestNetworkingSourceIdentity {
     $relativePaths = @(
         'HostBroker.ps1',
+        'PayloadCache.ps1',
         'PoolBroker.ps1',
         'PoolLifecycle.ps1',
         'Install-PoolHostBroker.ps1',

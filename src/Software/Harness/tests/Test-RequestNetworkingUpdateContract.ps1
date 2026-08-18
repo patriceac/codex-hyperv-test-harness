@@ -54,9 +54,10 @@ Assert-True (
     $text.Contains('CurrentConfigSha256') -and
     $text.Contains('PolicySha256') -and
     $text.Contains('SourceSha256') -and
+    $text.Contains("'PayloadCache.ps1'") -and
     $text.Contains('DefaultRoutes') -and
     $text.Contains('no longer matches current source, configuration, queue, routes, or host infrastructure')
-) 'The exact plan fingerprint does not bind source, policy, configuration, queue, routes, and host identities.'
+) 'The exact plan fingerprint does not bind every changed runtime source file, policy, configuration, queue, routes, and host identities.'
 Assert-True ($text.Contains('must remain outside the public repository')) 'Private host policy is not rejected from the public checkout.'
 $scenarios.Add('approved-fingerprint-binds-private-policy-and-host-state')
 
