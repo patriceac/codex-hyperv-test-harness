@@ -1033,6 +1033,8 @@ Assert-True (
     $guestIsolatedFirewallAttest -gt $guestIsolatedFirewallScope -and
     $guestInitText.Contains('-Direction Inbound -Action Allow -Enabled True -Profile Any -Protocol Any') -and
     $guestInitText.Contains("(`$GuestAddress + '/32')") -and
+    $guestInitText.Contains("`$networkPrefixParts[0] + '/255.255.255.0'") -and
+    $guestInitText.Contains('$remoteAddressIsExact') -and
     $guestInitText.Contains('Exact observation: $firewallDiagnostic') -and
     $guestInitText.Contains("Scope = 'DisposableGuestRun'")
 ) 'IsolatedTestNet does not install and exactly attest disposable, interface-bound same-cohort guest ingress.'

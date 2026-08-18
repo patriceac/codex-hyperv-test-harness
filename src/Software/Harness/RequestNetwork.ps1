@@ -2079,13 +2079,22 @@ function Initialize-GuestRequestNetwork {
                 [string]::Equals($localAddresses[0], $GuestAddress, [StringComparison]::OrdinalIgnoreCase) -or
                 [string]::Equals($localAddresses[0], ($GuestAddress + '/32'), [StringComparison]::OrdinalIgnoreCase)
             )
+            $networkPrefixParts = @($NetworkPrefix.Split('/'))
+            if ($networkPrefixParts.Count -ne 2 -or $networkPrefixParts[1] -ne '24') {
+                throw 'IsolatedTestNet received a non-canonical guest firewall network prefix.'
+            }
+            $providerDottedNetworkPrefix = $networkPrefixParts[0] + '/255.255.255.0'
+            $remoteAddressIsExact = $remoteAddresses.Count -eq 1 -and (
+                [string]::Equals($remoteAddresses[0], $NetworkPrefix, [StringComparison]::OrdinalIgnoreCase) -or
+                [string]::Equals($remoteAddresses[0], $providerDottedNetworkPrefix, [StringComparison]::OrdinalIgnoreCase)
+            )
             $firewallRuleIsExact = (
                 $enabledName -eq 'True' -and
                 $directionName -eq 'Inbound' -and
                 $actionName -eq 'Allow' -and
                 $addressFilters.Count -eq 1 -and $interfaceFilters.Count -eq 1 -and
                 $localAddressIsExact -and
-                $remoteAddresses.Count -eq 1 -and [string]::Equals($remoteAddresses[0], $NetworkPrefix, [StringComparison]::OrdinalIgnoreCase) -and
+                $remoteAddressIsExact -and
                 $interfaceAliases.Count -eq 1 -and [string]::Equals($interfaceAliases[0], [string]$adapter.InterfaceAlias, [StringComparison]::Ordinal)
             )
             if (-not $firewallRuleIsExact) {
