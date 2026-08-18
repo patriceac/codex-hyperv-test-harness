@@ -991,6 +991,28 @@ Assert-True (
 ) 'Connected request-network attachments are not bound to a live lease owner and status.'
 
 Assert-True ($moduleText.Contains('BoundaryAttested = $true') -and $moduleText.Contains('did not attest exactly the configured IPv4 address and prefix') -and $moduleText.Contains('did not attest a disabled IPv6 binding') -and $moduleText.Contains('permanent pinned gateway neighbor')) 'Guest networking does not require exact address, IPv6, route, DNS, and neighbor attestation.'
+$guestInitText = $moduleText.Substring(
+    $moduleText.IndexOf('function Initialize-GuestRequestNetwork', [StringComparison]::Ordinal),
+    $moduleText.IndexOf('function ConvertFrom-RequestNetworkLeaseState', [StringComparison]::Ordinal) - $moduleText.IndexOf('function Initialize-GuestRequestNetwork', [StringComparison]::Ordinal)
+)
+$guestPreferredReady = $guestInitText.IndexOf('if ($addresses.Count -eq 0) { throw "Guest $Profile network did not obtain a preferred IPv4 address." }', [StringComparison]::Ordinal)
+$guestNeighborCreate = $guestInitText.IndexOf('New-NetNeighbor -InterfaceIndex $adapter.ifIndex', [StringComparison]::Ordinal)
+$guestDnsEnable = $guestInitText.IndexOf('Set-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -ServerAddresses @($DnsServers)', [StringComparison]::Ordinal)
+$guestNeighborDeadline = $guestInitText.IndexOf('$neighborDeadline = [DateTime]::UtcNow.AddSeconds(5)', [StringComparison]::Ordinal)
+$guestNeighborExactState = $guestInitText.IndexOf("[string]::Equals(`$observedGatewayStateName, 'Permanent', [StringComparison]::Ordinal)", [StringComparison]::Ordinal)
+$guestNeighborNumericState = $guestInitText.IndexOf('$observedGatewayStateValue -eq 6', [StringComparison]::Ordinal)
+$guestNeighborDiagnostic = $guestInitText.IndexOf('Exact observation: $diagnostic', [StringComparison]::Ordinal)
+Assert-True (
+    $guestPreferredReady -ge 0 -and
+    $guestNeighborCreate -gt $guestPreferredReady -and
+    $guestNeighborDeadline -gt $guestNeighborCreate -and
+    $guestNeighborExactState -gt $guestNeighborDeadline -and
+    $guestNeighborNumericState -gt $guestNeighborExactState -and
+    $guestNeighborDiagnostic -gt $guestNeighborNumericState -and
+    $guestDnsEnable -gt $guestNeighborDiagnostic -and
+    $guestInitText.Contains('lost the attested permanent pinned gateway neighbor before guest launch')
+) 'InternetOnly does not pin the gateway after address convergence, before DNS, with bounded exact provider attestation and diagnostics.'
+$scenarios.Add('internet-gateway-neighbor-is-pinned-after-address-convergence')
 Assert-True (
     $moduleText.Contains('Get-RequestNetworkExpectedGuestRoutePrefixes') -and
     $moduleText.Contains('$connectedRoutes') -and

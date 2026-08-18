@@ -2018,12 +2018,9 @@ function Initialize-GuestRequestNetwork {
             if ($Profile -eq 'InternetOnly') { $addressParameters.DefaultGateway = [string]$GatewayAddress }
             New-NetIPAddress @addressParameters | Out-Null
             if ($Profile -eq 'InternetOnly') {
-                Set-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -ServerAddresses @($DnsServers) -ErrorAction Stop
                 $normalizedGatewayMac = ($GatewayMacAddress -replace '[:-]', '').ToUpperInvariant()
                 if ($normalizedGatewayMac -notmatch '^[0-9A-F]{12}$') { throw 'InternetOnly received an invalid pinned gateway MAC address.' }
                 $formattedGatewayMac = ($normalizedGatewayMac -replace '(.{2})(?!$)', '$1-')
-                Get-NetNeighbor -InterfaceIndex $adapter.ifIndex -IPAddress $GatewayAddress -ErrorAction SilentlyContinue | Remove-NetNeighbor -Confirm:$false -ErrorAction SilentlyContinue
-                New-NetNeighbor -InterfaceIndex $adapter.ifIndex -IPAddress $GatewayAddress -LinkLayerAddress $formattedGatewayMac -State Permanent -ErrorAction Stop | Out-Null
             }
             else {
                 Set-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -ResetServerAddresses -ErrorAction Stop
@@ -2040,13 +2037,81 @@ function Initialize-GuestRequestNetwork {
         } while ($addresses.Count -eq 0 -and [DateTime]::UtcNow -lt $readyDeadline)
         if ($addresses.Count -eq 0) { throw "Guest $Profile network did not obtain a preferred IPv4 address." }
 
+        $gatewayNeighbors = @()
+        if ($Profile -eq 'InternetOnly') {
+            # Address configuration can reset the neighbor table while the new address
+            # transitions to Preferred. Pin the gateway only after that transition, and
+            # do not expose broker-approved DNS until the exact pin is attested.
+            Get-NetNeighbor -InterfaceIndex $adapter.ifIndex -IPAddress $GatewayAddress -ErrorAction SilentlyContinue |
+                Remove-NetNeighbor -Confirm:$false -ErrorAction SilentlyContinue
+            New-NetNeighbor -InterfaceIndex $adapter.ifIndex -IPAddress $GatewayAddress -LinkLayerAddress $formattedGatewayMac -State Permanent -ErrorAction Stop | Out-Null
+
+            $gatewayNeighborAttested = $false
+            $gatewayNeighborQueryError = $null
+            $neighborDeadline = [DateTime]::UtcNow.AddSeconds(5)
+            do {
+                try {
+                    $gatewayNeighbors = @(Get-NetNeighbor -InterfaceIndex $adapter.ifIndex -IPAddress $GatewayAddress -ErrorAction Stop)
+                    $gatewayNeighborQueryError = $null
+                }
+                catch {
+                    $gatewayNeighbors = @()
+                    $gatewayNeighborQueryError = [pscustomobject][ordered]@{
+                        Type = $_.Exception.GetType().FullName
+                        FullyQualifiedErrorId = [string]$_.FullyQualifiedErrorId
+                    }
+                }
+                if ($gatewayNeighbors.Count -eq 1) {
+                    $observedGatewayMac = (([string]$gatewayNeighbors[0].LinkLayerAddress) -replace '[:-]', '').ToUpperInvariant()
+                    $observedGatewayStateName = [string]$gatewayNeighbors[0].State
+                    $observedGatewayStateValue = $null
+                    try { $observedGatewayStateValue = [int]$gatewayNeighbors[0].State } catch { $observedGatewayStateValue = $null }
+                    $gatewayStateIsPermanent = (
+                        [string]::Equals($observedGatewayStateName, 'Permanent', [StringComparison]::Ordinal) -or
+                        $observedGatewayStateValue -eq 6
+                    )
+                    $gatewayNeighborAttested = (
+                        [string]::Equals([string]$gatewayNeighbors[0].IPAddress, $GatewayAddress, [StringComparison]::Ordinal) -and
+                        $observedGatewayMac -eq $normalizedGatewayMac -and
+                        $gatewayStateIsPermanent
+                    )
+                }
+                if (-not $gatewayNeighborAttested -and [DateTime]::UtcNow -lt $neighborDeadline) {
+                    Start-Sleep -Milliseconds 250
+                }
+            } while (-not $gatewayNeighborAttested -and [DateTime]::UtcNow -lt $neighborDeadline)
+
+            if (-not $gatewayNeighborAttested) {
+                $neighborSummary = @($gatewayNeighbors | ForEach-Object {
+                    $stateValue = $null
+                    try { $stateValue = [int]$_.State } catch { $stateValue = $null }
+                    [ordered]@{
+                        IPAddress = [string]$_.IPAddress
+                        LinkLayerAddress = [string]$_.LinkLayerAddress
+                        StateName = [string]$_.State
+                        StateValue = $stateValue
+                        StateType = if ($null -ne $_.State) { $_.State.GetType().FullName } else { $null }
+                    }
+                })
+                $diagnostic = [ordered]@{
+                    ExpectedIPAddress = [string]$GatewayAddress
+                    ExpectedLinkLayerAddress = [string]$formattedGatewayMac
+                    InterfaceIndex = [int]$adapter.ifIndex
+                    ObservedCount = [int]$gatewayNeighbors.Count
+                    Observed = $neighborSummary
+                    QueryError = $gatewayNeighborQueryError
+                } | ConvertTo-Json -Depth 6 -Compress
+                throw "InternetOnly did not attest the permanent pinned gateway neighbor after bounded convergence. Exact observation: $diagnostic"
+            }
+            Set-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -ServerAddresses @($DnsServers) -ErrorAction Stop
+        }
+
         $allAddresses = @(Get-NetIPAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 -ErrorAction Stop)
         $routes = @(Get-NetRoute -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 -ErrorAction Stop | Select-Object DestinationPrefix, NextHop, RouteMetric)
         $defaultRoutes = @($routes | Where-Object DestinationPrefix -eq '0.0.0.0/0')
         $connectedRoutes = @($routes | Where-Object { [string]$_.DestinationPrefix -in @($ExpectedConnectedPrefixes) })
         $dns = @(Get-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 -ErrorAction Stop | ForEach-Object { @($_.ServerAddresses) })
         $ipv6Bindings = @(Get-NetAdapterBinding -InterfaceDescription ([string]$adapter.InterfaceDescription) -ComponentID ms_tcpip6 -ErrorAction Stop)
-        $gatewayNeighbors = if ($Profile -eq 'InternetOnly') { @(Get-NetNeighbor -InterfaceIndex $adapter.ifIndex -IPAddress $GatewayAddress -ErrorAction Stop) } else { @() }
         if ($Profile -ne 'TrustedLan') {
             if ($allAddresses.Count -ne 1 -or $addresses.Count -ne 1 -or
                 -not [string]::Equals([string]$addresses[0].IPAddress, $GuestAddress, [StringComparison]::Ordinal) -or
@@ -2082,12 +2147,17 @@ function Initialize-GuestRequestNetwork {
             if ($dns.Count -ne @($DnsServers).Count -or @($DnsServers | Where-Object { $dns -notcontains [string]$_ }).Count -gt 0) {
                 throw 'InternetOnly did not attest exactly the broker-approved DNS server set.'
             }
-            $normalizedGatewayMac = ($GatewayMacAddress -replace '[:-]', '').ToUpperInvariant()
+            $gatewayNeighbors = @(Get-NetNeighbor -InterfaceIndex $adapter.ifIndex -IPAddress $GatewayAddress -ErrorAction Stop)
+            $finalGatewayStateName = if ($gatewayNeighbors.Count -eq 1) { [string]$gatewayNeighbors[0].State } else { $null }
+            $finalGatewayStateValue = $null
+            if ($gatewayNeighbors.Count -eq 1) {
+                try { $finalGatewayStateValue = [int]$gatewayNeighbors[0].State } catch { $finalGatewayStateValue = $null }
+            }
             if ($gatewayNeighbors.Count -ne 1 -or
                 -not [string]::Equals([string]$gatewayNeighbors[0].IPAddress, $GatewayAddress, [StringComparison]::Ordinal) -or
                 (([string]$gatewayNeighbors[0].LinkLayerAddress) -replace '[:-]', '').ToUpperInvariant() -ne $normalizedGatewayMac -or
-                [string]$gatewayNeighbors[0].State -ne 'Permanent') {
-                throw 'InternetOnly did not attest the permanent pinned gateway neighbor.'
+                (-not [string]::Equals($finalGatewayStateName, 'Permanent', [StringComparison]::Ordinal) -and $finalGatewayStateValue -ne 6)) {
+                throw 'InternetOnly lost the attested permanent pinned gateway neighbor before guest launch.'
             }
         }
         [pscustomobject][ordered]@{
