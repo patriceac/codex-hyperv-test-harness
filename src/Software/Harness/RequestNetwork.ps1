@@ -1875,22 +1875,32 @@ function Reset-GuestRequestNetworkResidue {
     $remoteJob = Invoke-Command -Session $Session -AsJob -ErrorAction Stop -ScriptBlock {
         param($PinnedGatewayAddress)
 
+        function Get-BrokerOwnedPersistentDefaultRoute {
+            $routeErrors = @()
+            $routes = @(
+                Get-NetRoute -AddressFamily IPv4 -PolicyStore PersistentStore -ErrorAction SilentlyContinue -ErrorVariable +routeErrors |
+                    Where-Object {
+                        [string]::Equals([string]$_.DestinationPrefix, '0.0.0.0/0', [StringComparison]::Ordinal) -and
+                        [string]::Equals([string]$_.NextHop, $PinnedGatewayAddress, [StringComparison]::Ordinal)
+                    }
+            )
+            $unexpectedErrors = @($routeErrors | Where-Object {
+                -not [string]::Equals([string]$_.FullyQualifiedErrorId, 'CmdletizationQuery_NotFound,Get-NetRoute', [StringComparison]::Ordinal)
+            })
+            if ($unexpectedErrors.Count -gt 0) {
+                throw ('Persistent guest route inventory failed: ' + (($unexpectedErrors | ForEach-Object { $_.Exception.Message }) -join '; '))
+            }
+            $routes
+        }
+
         $matchingRoutes = @(
-            Get-NetRoute -AddressFamily IPv4 -PolicyStore PersistentStore -ErrorAction Stop |
-                Where-Object {
-                    [string]::Equals([string]$_.DestinationPrefix, '0.0.0.0/0', [StringComparison]::Ordinal) -and
-                    [string]::Equals([string]$_.NextHop, $PinnedGatewayAddress, [StringComparison]::Ordinal)
-                }
+            Get-BrokerOwnedPersistentDefaultRoute
         )
         foreach ($route in $matchingRoutes) {
             Remove-NetRoute -InputObject $route -Confirm:$false -ErrorAction Stop
         }
         $remainingRoutes = @(
-            Get-NetRoute -AddressFamily IPv4 -PolicyStore PersistentStore -ErrorAction Stop |
-                Where-Object {
-                    [string]::Equals([string]$_.DestinationPrefix, '0.0.0.0/0', [StringComparison]::Ordinal) -and
-                    [string]::Equals([string]$_.NextHop, $PinnedGatewayAddress, [StringComparison]::Ordinal)
-                }
+            Get-BrokerOwnedPersistentDefaultRoute
         )
         if ($remainingRoutes.Count -ne 0) {
             throw 'The exact broker-owned InternetOnly persistent default route remained after guest cleanup.'
