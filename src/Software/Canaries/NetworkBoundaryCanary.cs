@@ -570,15 +570,29 @@ internal static class NetworkBoundaryCanary
         }
         bool resolved = false;
         string detail;
-        try
+        IPAddress[] addresses = null;
+        Exception resolutionError = null;
+        int timeoutMilliseconds = Math.Max(250, options.GetInt("timeout-ms", DefaultTimeoutMilliseconds));
+        var resolverThread = new Thread(new ThreadStart(delegate
         {
-            IPAddress[] addresses = Dns.GetHostAddresses(host);
-            resolved = addresses != null && addresses.Length > 0;
-            detail = "Resolved " + addresses.Length.ToString(CultureInfo.InvariantCulture) + " address(es).";
+            try { addresses = Dns.GetHostAddresses(host); }
+            catch (Exception exception) { resolutionError = exception; }
+        }));
+        resolverThread.IsBackground = true;
+        resolverThread.Start();
+        bool completed = resolverThread.Join(timeoutMilliseconds);
+        if (!completed)
+        {
+            detail = "TimeoutException: DNS resolution timed out after " + timeoutMilliseconds.ToString(CultureInfo.InvariantCulture) + " ms.";
         }
-        catch (Exception exception)
+        else if (resolutionError != null)
         {
-            detail = exception.GetType().Name + ": " + exception.Message;
+            detail = resolutionError.GetType().Name + ": " + resolutionError.Message;
+        }
+        else
+        {
+            resolved = addresses != null && addresses.Length > 0;
+            detail = "Resolved " + (addresses == null ? 0 : addresses.Length).ToString(CultureInfo.InvariantCulture) + " address(es).";
         }
         AddCheck(result, name, kind, true, expectedSuccess ? resolved : !resolved,
             (expectedSuccess ? "Expected DNS resolution. " : "Expected DNS failure. ") + detail);

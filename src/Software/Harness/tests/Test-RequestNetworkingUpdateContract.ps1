@@ -16,10 +16,12 @@ $scriptPath = Join-Path $RepositoryRoot 'setup\Update-RequestNetworking.ps1'
 $infrastructurePath = Join-Path $RepositoryRoot 'setup\Prepare-RequestNetworkInfrastructure.ps1'
 $setupSkillPath = Join-Path $RepositoryRoot '.agents\skills\setup-hyperv-harness\SKILL.md'
 $recoveryVerifierPath = Join-Path $RepositoryRoot 'src\Software\Recovery\Test-CodexHyperVRecovery.ps1'
+$networkCanaryPath = Join-Path $RepositoryRoot 'src\Software\Canaries\NetworkBoundaryCanary.cs'
 $text = Get-Content -Raw -LiteralPath $scriptPath
 $infrastructureText = Get-Content -Raw -LiteralPath $infrastructurePath
 $setupSkillText = Get-Content -Raw -LiteralPath $setupSkillPath
 $recoveryVerifierText = Get-Content -Raw -LiteralPath $recoveryVerifierPath
+$networkCanaryText = Get-Content -Raw -LiteralPath $networkCanaryPath
 $tokens = $null
 $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors)
@@ -91,6 +93,13 @@ Assert-True (
     $text.Contains("Join-Path `$checkoutRecoveryRoot 'Test-CodexHyperVRecovery.ps1'")
 ) 'The live update does not source-bind, stage, and preserve rollback for its network canary and recovery verifier.'
 $scenarios.Add('live-update-carries-network-canary-and-recovery-contract')
+
+Assert-True (
+    $networkCanaryText.Contains('resolverThread.IsBackground = true') -and
+    $networkCanaryText.Contains('resolverThread.Join(timeoutMilliseconds)') -and
+    $networkCanaryText.Contains('DNS resolution timed out after')
+) 'The live network canary does not bound disconnected DNS probes by its declared timeout.'
+$scenarios.Add('network-canary-bounds-dns-probes')
 
 Assert-True ($setupSkillText.Contains('Update-RequestNetworking.ps1') -and $setupSkillText.Contains('approved fingerprint') -and $setupSkillText.Contains('separate approval')) 'The setup skill does not preserve the two-gate request-network workflow.'
 Assert-True ($recoveryVerifierText.Contains("'Software\Setup\Update-RequestNetworking.ps1'")) 'Recovery verification does not require the request-network updater.'
