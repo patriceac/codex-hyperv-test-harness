@@ -414,6 +414,7 @@ $backupRoot = Join-Path ([string]$layout.LiveRoot) ('Setup\RequestNetworkUpdateB
 $backupRoot = Assert-RequestNetworkingPathWithinRoot -Path $backupRoot -Root $InstallRoot -Context 'Request-network rollback root'
 $installedSourceMutated = $false
 $skillExisted = Test-Path -LiteralPath $skillDestination -PathType Container
+$auditEvidencePath = Join-Path $backupRoot 'post-deployment-pool-audit.json'
 
 try {
     New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
@@ -446,7 +447,17 @@ try {
     New-Item -ItemType Directory -Force -Path $skillDestination | Out-Null
     Copy-Item -Path (Join-Path $installedSkillSourceRoot '*') -Destination $skillDestination -Recurse -Force
     $auditStatusPath = Join-Path ([string]$layout.BrokerRoot) 'State\Management\request-network-pool-audit.json'
-    & (Join-Path $installedHarnessRoot 'Audit-HyperVTestPool.ps1') -BrokerRoot ([string]$layout.BrokerRoot) -ConfigPath $installedConfigPath -StatusPath $auditStatusPath -ClientSid $TargetUserSid
+    try {
+        & (Join-Path $installedHarnessRoot 'Audit-HyperVTestPool.ps1') -BrokerRoot ([string]$layout.BrokerRoot) -ConfigPath $installedConfigPath -StatusPath $auditStatusPath -ClientSid $TargetUserSid
+    }
+    finally {
+        # The management status directory is deliberately unreadable by the
+        # client account. Preserve the complete privileged audit beside the
+        # rollback material before a failure restores the previous broker.
+        if (Test-Path -LiteralPath $auditStatusPath -PathType Leaf) {
+            Copy-Item -LiteralPath $auditStatusPath -Destination $auditEvidencePath -Force
+        }
+    }
     $audit = Get-Content -Raw -LiteralPath $auditStatusPath | ConvertFrom-Json
     if (-not [bool]$audit.Success) { throw 'The post-deployment privileged pool audit failed.' }
 
@@ -457,6 +468,7 @@ try {
         RequestNetworkPolicy = $policy
         BrokerInstallStatusPath = $statusPath
         Audit = $audit
+        AuditEvidencePath = $auditEvidencePath
         RollbackMaterialPath = $backupRoot
         RecoveryRefreshRequired = $true
         LiveProfileCanariesRequired = $true

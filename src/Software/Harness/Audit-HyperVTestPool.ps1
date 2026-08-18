@@ -248,6 +248,12 @@ try {
     $isolatedPolicyValid = $false
     $internetPolicyValid = $false
     $trustedLanPolicyValid = $false
+    $internetPolicyAudit = [ordered]@{
+        Enabled = $false
+        Checks = [ordered]@{}
+        GatewayVlan = $null
+        GatewayVlanError = $null
+    }
     if ($requestNetworkPolicyVersioned) {
         try {
             $isolatedSettings = Get-RequestNetworkObjectPropertyValue -Value $requestNetworkPolicy -Name 'IsolatedTestNet'
@@ -275,10 +281,26 @@ try {
             [string]::Equals([string]$_.SwitchName, [string]$internetSettings.SwitchName, [StringComparison]::Ordinal)
         })
         $internetManagementAdapters = @(Get-VMNetworkAdapter -ManagementOS -SwitchName ([string]$internetSettings.SwitchName) -ErrorAction Stop)
-        $internetGatewayVlan = @(if ($internetManagementAdapters.Count -eq 1) {
-            Get-VMNetworkAdapterVlan -VMNetworkAdapter $internetManagementAdapters[0] -ErrorAction Stop
+        $internetGatewayVlan = $null
+        $internetGatewayVlanValid = $false
+        $internetGatewayVlanError = $null
+        if ($internetManagementAdapters.Count -eq 1) {
+            try {
+                # Use the same canonical management-OS query and normalization
+                # as request preparation and runtime revalidation. Duplicating
+                # the raw Hyper-V object interpretation here caused the audit
+                # to disagree with an approval-ready infrastructure plan.
+                $internetGatewayVlan = Assert-RequestNetworkInternetVlan `
+                    -Adapter $internetManagementAdapters[0] `
+                    -PrimaryVlanId ([int]$internetSettings.PrimaryVlanId) `
+                    -SecondaryVlanId ([int]$internetSettings.SecondaryVlanId) `
+                    -PrivateVlanMode Promiscuous `
+                    -ManagementOS
+                $internetGatewayVlanValid = $true
+            }
+            catch { $internetGatewayVlanError = $_.Exception.Message }
         }
-        else { @() })
+        else { $internetGatewayVlanError = 'InternetOnly does not have exactly one management-OS adapter.' }
         $internetGatewayMac = if ($internetManagementAdapters.Count -eq 1) { (([string]$internetManagementAdapters[0].MacAddress) -replace '[:-]', '').ToUpperInvariant() } else { '' }
         $internetHostAdapters = @(Get-NetAdapter -IncludeHidden -ErrorAction Stop | Where-Object {
             (([string]$_.MacAddress) -replace '[:-]', '').ToUpperInvariant() -eq $internetGatewayMac
@@ -287,27 +309,32 @@ try {
             Get-NetIPAddress -InterfaceIndex ([int]$internetHostAdapters[0].ifIndex) -AddressFamily IPv4 -IPAddress ([string]$internetSettings.GatewayAddress) -ErrorAction Stop
         }
         else { @() })
-        $internetPolicyValid =
-            $internetSwitches.Count -eq 1 -and
-            [string]$internetSwitches[0].SwitchType -eq 'Internal' -and
-            [string]::Equals([string]$internetSwitches[0].Id, [string]$internetSettings.SwitchId, [StringComparison]::OrdinalIgnoreCase) -and
-            $allInternetNats.Count -eq 1 -and $internetNats.Count -eq 1 -and
-            [string]::Equals([string]$internetNats[0].InternalIPInterfaceAddressPrefix, [string]$internetSettings.NatPrefix, [StringComparison]::OrdinalIgnoreCase) -and
-            $internetNatPolicyValid -and
-            $internetStaticMappings.Count -eq 0 -and
-            @($internetVmAdapters | Where-Object { [string]$_.Name -notlike 'CodexRequestNet-*' }).Count -eq 0 -and
-            $internetManagementAdapters.Count -eq 1 -and $internetHostAdapters.Count -eq 1 -and $internetGatewayAddresses.Count -eq 1 -and
-            $internetGatewayVlan.Count -eq 1 -and
-            [string]$internetGatewayVlan[0].OperationMode -eq 'Private' -and
-            [string]$internetGatewayVlan[0].PrivateVlanMode -eq 'Promiscuous' -and
-            [int]$internetGatewayVlan[0].PrimaryVlanId -eq [int]$internetSettings.PrimaryVlanId -and
-            @($internetGatewayVlan[0].SecondaryVlanIdList).Count -eq 1 -and
-            [int](@($internetGatewayVlan[0].SecondaryVlanIdList)[0]) -eq [int]$internetSettings.SecondaryVlanId -and
-            [int]$internetSettings.PrimaryVlanId -ge 1 -and [int]$internetSettings.PrimaryVlanId -le 4094 -and
-            [int]$internetSettings.SecondaryVlanId -ge 1 -and [int]$internetSettings.SecondaryVlanId -le 4094 -and
-            [int]$internetSettings.PrimaryVlanId -ne [int]$internetSettings.SecondaryVlanId -and
-            [int]$internetSettings.PrefixLength -eq 24 -and
-            @($internetSettings.DnsServers).Count -gt 0
+        $internetPolicyChecks = [ordered]@{
+            SwitchCount = $internetSwitches.Count -eq 1
+            SwitchType = $internetSwitches.Count -eq 1 -and [string]$internetSwitches[0].SwitchType -eq 'Internal'
+            SwitchId = $internetSwitches.Count -eq 1 -and [string]::Equals([string]$internetSwitches[0].Id, [string]$internetSettings.SwitchId, [StringComparison]::OrdinalIgnoreCase)
+            SoleNat = $allInternetNats.Count -eq 1 -and $internetNats.Count -eq 1
+            NatPrefix = $internetNats.Count -eq 1 -and [string]::Equals([string]$internetNats[0].InternalIPInterfaceAddressPrefix, [string]$internetSettings.NatPrefix, [StringComparison]::OrdinalIgnoreCase)
+            NatPolicy = $internetNatPolicyValid
+            NoStaticMappings = $internetStaticMappings.Count -eq 0
+            NoForeignVmAdapters = @($internetVmAdapters | Where-Object { [string]$_.Name -notlike 'CodexRequestNet-*' }).Count -eq 0
+            ManagementAdapter = $internetManagementAdapters.Count -eq 1
+            HostAdapter = $internetHostAdapters.Count -eq 1
+            GatewayAddress = $internetGatewayAddresses.Count -eq 1
+            GatewayVlan = $internetGatewayVlanValid
+            PrimaryVlanRange = [int]$internetSettings.PrimaryVlanId -ge 1 -and [int]$internetSettings.PrimaryVlanId -le 4094
+            SecondaryVlanRange = [int]$internetSettings.SecondaryVlanId -ge 1 -and [int]$internetSettings.SecondaryVlanId -le 4094
+            DistinctVlans = [int]$internetSettings.PrimaryVlanId -ne [int]$internetSettings.SecondaryVlanId
+            PrefixLength = [int]$internetSettings.PrefixLength -eq 24
+            DnsServers = @($internetSettings.DnsServers).Count -gt 0
+        }
+        $internetPolicyValid = @($internetPolicyChecks.GetEnumerator() | Where-Object { -not [bool]$_.Value }).Count -eq 0
+        $internetPolicyAudit = [ordered]@{
+            Enabled = $true
+            Checks = $internetPolicyChecks
+            GatewayVlan = $internetGatewayVlan
+            GatewayVlanError = $internetGatewayVlanError
+        }
     }
     elseif ($requestNetworkPolicyVersioned) {
         $internetPolicyValid = $true
@@ -455,6 +482,7 @@ try {
             PoolIdleTimeoutSeconds = [int]$brokerConfig.PoolIdleTimeoutSeconds
             ClientSid = $resolvedClientSid
             RequestNetworkPolicy = $requestNetworkPolicy
+            InternetOnlyPolicyAudit = $internetPolicyAudit
             AclChecks = $aclResults
         }
         Checks = $checks

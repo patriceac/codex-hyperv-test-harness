@@ -71,6 +71,9 @@ Assert-True (
 ) 'Rollback is not armed before the first source overlay or does not restore a partially changed broker.'
 Assert-True (
     $text.Contains('Audit-HyperVTestPool.ps1') -and
+    $text.Contains("'post-deployment-pool-audit.json'") -and
+    $text.Contains('Copy-Item -LiteralPath $auditStatusPath -Destination $auditEvidencePath -Force') -and
+    $text.Contains('AuditEvidencePath = $auditEvidencePath') -and
     $text.Contains('RollbackMaterialPath = $backupRoot') -and
     -not $text.Contains('Remove-Item -LiteralPath $backupRoot -Recurse -Force') -and
     $text.Contains('RecoveryRefreshRequired = $true') -and
