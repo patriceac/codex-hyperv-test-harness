@@ -967,17 +967,25 @@ Assert-True (
 ) 'Guest route attestation does not reject extra routes or return the exact route set.'
 $scenarios.Add('guest-routes-are-exact-and-returned')
 $residueCleanupStart = $moduleText.IndexOf('function Reset-GuestRequestNetworkResidue', [StringComparison]::Ordinal)
-$residuePersistentQuery = $moduleText.IndexOf("Get-CimInstance -Namespace 'root/StandardCimv2' -ClassName 'MSFT_NetRoute' -Filter 'AddressFamily = 2 AND Store = 0' -ErrorAction Stop", $residueCleanupStart, [StringComparison]::Ordinal)
-$residueExactDestination = $moduleText.IndexOf("[string]::Equals([string]`$_.DestinationPrefix, '0.0.0.0/0', [StringComparison]::Ordinal)", $residuePersistentQuery, [StringComparison]::Ordinal)
-$residueExactGateway = $moduleText.IndexOf('[string]::Equals([string]$_.NextHop, $PinnedGatewayAddress, [StringComparison]::Ordinal)', $residueExactDestination, [StringComparison]::Ordinal)
+$residuePersistentQuery = $moduleText.IndexOf("Get-NetRoute -AddressFamily IPv4 -PolicyStore PersistentStore -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue -ErrorVariable +routeErrors", $residueCleanupStart, [StringComparison]::Ordinal)
+$residueExactGateway = $moduleText.IndexOf('[string]::Equals([string]$_.NextHop, $PinnedGatewayAddress, [StringComparison]::Ordinal)', $residuePersistentQuery, [StringComparison]::Ordinal)
+$residueNotFoundId = $moduleText.IndexOf("`$fullyQualifiedErrorId.StartsWith('CmdletizationQuery_NotFound'", $residueExactGateway, [StringComparison]::Ordinal)
+$residueNotFoundCategory = $moduleText.IndexOf("[string]::Equals(`$category, 'ObjectNotFound'", $residueNotFoundId, [StringComparison]::Ordinal)
+$residueNotFoundReason = $moduleText.IndexOf("[string]::Equals(`$reason, 'CimJobException'", $residueNotFoundCategory, [StringComparison]::Ordinal)
+$residueNotFoundTarget = $moduleText.IndexOf("`$targetName -in @('IPv4', 'MSFT_NetRoute')", $residueNotFoundReason, [StringComparison]::Ordinal)
+$residueUnexpectedFailure = $moduleText.IndexOf('$unexpectedErrors.Count -gt 0', $residueNotFoundTarget, [StringComparison]::Ordinal)
 $residueRemove = $moduleText.IndexOf('Remove-NetRoute -InputObject $route -Confirm:$false -ErrorAction Stop', $residueExactGateway, [StringComparison]::Ordinal)
 $residueRequery = $moduleText.IndexOf('Get-BrokerOwnedPersistentDefaultRoute', $residueRemove, [StringComparison]::Ordinal)
 Assert-True (
     $residueCleanupStart -ge 0 -and
     $residuePersistentQuery -gt $residueCleanupStart -and
-    $residueExactDestination -gt $residuePersistentQuery -and
-    $residueExactGateway -gt $residueExactDestination -and
-    $residueRemove -gt $residueExactGateway -and
+    $residueExactGateway -gt $residuePersistentQuery -and
+    $residueNotFoundId -gt $residueExactGateway -and
+    $residueNotFoundCategory -gt $residueNotFoundId -and
+    $residueNotFoundReason -gt $residueNotFoundCategory -and
+    $residueNotFoundTarget -gt $residueNotFoundReason -and
+    $residueUnexpectedFailure -gt $residueNotFoundTarget -and
+    $residueRemove -gt $residueUnexpectedFailure -and
     $residueRequery -gt $residueRemove -and
     $brokerText.Contains('ResidueCleanup = $requestNetworkResidueCleanup')
 ) 'Guest residue cleanup is not limited to the exact broker-owned persistent InternetOnly default route or is not attested.'

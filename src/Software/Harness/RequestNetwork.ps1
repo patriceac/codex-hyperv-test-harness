@@ -1876,16 +1876,30 @@ function Reset-GuestRequestNetworkResidue {
         param($PinnedGatewayAddress)
 
         function Get-BrokerOwnedPersistentDefaultRoute {
-            # MSFT_NetRoute.Store is 0 for PersistentStore and 1 for
-            # ActiveStore. Direct CIM enumeration returns an empty collection
-            # without Get-NetRoute's localized not-found error.
-            @(
-                Get-CimInstance -Namespace 'root/StandardCimv2' -ClassName 'MSFT_NetRoute' -Filter 'AddressFamily = 2 AND Store = 0' -ErrorAction Stop |
+            $routeErrors = @()
+            $routes = @(
+                Get-NetRoute -AddressFamily IPv4 -PolicyStore PersistentStore -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue -ErrorVariable +routeErrors |
                     Where-Object {
-                        [string]::Equals([string]$_.DestinationPrefix, '0.0.0.0/0', [StringComparison]::Ordinal) -and
                         [string]::Equals([string]$_.NextHop, $PinnedGatewayAddress, [StringComparison]::Ordinal)
                     }
             )
+            $unexpectedErrors = @($routeErrors | Where-Object {
+                $fullyQualifiedErrorId = [string]$_.FullyQualifiedErrorId
+                $category = [string]$_.CategoryInfo.Category
+                $reason = [string]$_.CategoryInfo.Reason
+                $targetName = [string]$_.CategoryInfo.TargetName
+                -not (
+                    $fullyQualifiedErrorId.StartsWith('CmdletizationQuery_NotFound', [StringComparison]::Ordinal) -and
+                    $fullyQualifiedErrorId.EndsWith(',Get-NetRoute', [StringComparison]::Ordinal) -and
+                    [string]::Equals($category, 'ObjectNotFound', [StringComparison]::Ordinal) -and
+                    [string]::Equals($reason, 'CimJobException', [StringComparison]::Ordinal) -and
+                    $targetName -in @('IPv4', 'MSFT_NetRoute')
+                )
+            })
+            if ($unexpectedErrors.Count -gt 0) {
+                throw ('Persistent guest route inventory failed: ' + (($unexpectedErrors | ForEach-Object { $_.Exception.Message }) -join '; '))
+            }
+            $routes
         }
 
         $matchingRoutes = @(
