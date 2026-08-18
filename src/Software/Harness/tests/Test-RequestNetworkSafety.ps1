@@ -1023,21 +1023,26 @@ Assert-True (
 ) 'InternetOnly does not pin the gateway after address convergence, create only an active-store default route before DNS, or return scalar neighbor evidence.'
 $scenarios.Add('internet-gateway-neighbor-is-pinned-after-address-convergence')
 $guestIsolatedFirewallName = $guestInitText.IndexOf("'CodexHarness-Isolated-' + (Get-RequestNetworkHash", [StringComparison]::Ordinal)
+$guestIsolatedConnectionProfile = $guestInitText.IndexOf('Set-NetConnectionProfile -InterfaceIndex $adapter.ifIndex -NetworkCategory Private', [StringComparison]::Ordinal)
 $guestIsolatedFirewallCreate = $guestInitText.IndexOf('New-NetFirewallRule -Name $GuestFirewallRuleName', [StringComparison]::Ordinal)
 $guestIsolatedFirewallScope = $guestInitText.IndexOf('-InterfaceAlias ([string]$adapter.InterfaceAlias) -LocalAddress $GuestAddress -RemoteAddress $NetworkPrefix', [StringComparison]::Ordinal)
 $guestIsolatedFirewallAttest = $guestInitText.IndexOf('IsolatedTestNet did not attest its exact broker-owned same-cohort guest firewall boundary.', [StringComparison]::Ordinal)
 Assert-True (
     $guestIsolatedFirewallName -ge 0 -and
-    $guestIsolatedFirewallCreate -gt $guestPreferredReady -and
+    $guestIsolatedConnectionProfile -gt $guestPreferredReady -and
+    $guestIsolatedFirewallCreate -gt $guestIsolatedConnectionProfile -and
     $guestIsolatedFirewallScope -gt $guestIsolatedFirewallCreate -and
     $guestIsolatedFirewallAttest -gt $guestIsolatedFirewallScope -and
-    $guestInitText.Contains('-Direction Inbound -Action Allow -Enabled True -Profile Any -Protocol Any') -and
+    $guestInitText.Contains('-Direction Inbound -Action Allow -Enabled True -Profile Private -Protocol Any') -and
+    $guestInitText.Contains('Get-NetFirewallRule -PolicyStore ActiveStore -Name $GuestFirewallRuleName') -and
+    $guestInitText.Contains("`$enforcementName -like '*Enforced*'") -and
+    $guestInitText.Contains('ConnectionProfileCategory = [string]$connectionProfiles[0].NetworkCategory') -and
     $guestInitText.Contains("(`$GuestAddress + '/32')") -and
     $guestInitText.Contains("`$networkPrefixParts[0] + '/255.255.255.0'") -and
     $guestInitText.Contains('$remoteAddressIsExact') -and
     $guestInitText.Contains('Exact observation: $firewallDiagnostic') -and
     $guestInitText.Contains("Scope = 'DisposableGuestRun'")
-) 'IsolatedTestNet does not install and exactly attest disposable, interface-bound same-cohort guest ingress.'
+) 'IsolatedTestNet does not activate and exactly attest disposable, Private-profile, interface-bound same-cohort guest ingress.'
 $scenarios.Add('isolated-same-cohort-ingress-is-request-scoped-and-attested')
 Assert-True (
     $moduleText.Contains('Get-RequestNetworkExpectedGuestRoutePrefixes') -and

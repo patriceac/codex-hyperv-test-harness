@@ -2055,6 +2055,19 @@ function Initialize-GuestRequestNetwork {
             if ([string]::IsNullOrWhiteSpace($GuestFirewallRuleName) -or $GuestFirewallRuleName -notmatch '^CodexHarness-Isolated-[0-9a-f]{24}$') {
                 throw 'IsolatedTestNet received an invalid broker-owned guest firewall rule name.'
             }
+            $connectionProfiles = @()
+            $connectionProfileDeadline = [DateTime]::UtcNow.AddSeconds(10)
+            do {
+                $connectionProfiles = @(Get-NetConnectionProfile -InterfaceIndex $adapter.ifIndex -ErrorAction SilentlyContinue)
+                if ($connectionProfiles.Count -gt 1) { throw 'The isolated request adapter resolved to multiple guest connection profiles.' }
+                if ($connectionProfiles.Count -eq 0) { Start-Sleep -Milliseconds 250 }
+            } while ($connectionProfiles.Count -eq 0 -and [DateTime]::UtcNow -lt $connectionProfileDeadline)
+            if ($connectionProfiles.Count -ne 1) { throw 'The isolated request adapter did not obtain one guest connection profile.' }
+            Set-NetConnectionProfile -InterfaceIndex $adapter.ifIndex -NetworkCategory Private -ErrorAction Stop
+            $connectionProfiles = @(Get-NetConnectionProfile -InterfaceIndex $adapter.ifIndex -ErrorAction Stop)
+            if ($connectionProfiles.Count -ne 1 -or [string]$connectionProfiles[0].NetworkCategory -ne 'Private') {
+                throw 'The isolated request adapter did not attest its request-scoped Private guest connection category.'
+            }
             $existingRules = @(Get-NetFirewallRule -Name $GuestFirewallRuleName -ErrorAction SilentlyContinue)
             if ($existingRules.Count -gt 1) { throw 'The broker-owned isolated guest firewall rule did not resolve uniquely before creation.' }
             if ($existingRules.Count -eq 1) {
@@ -2062,10 +2075,10 @@ function Initialize-GuestRequestNetwork {
             }
             New-NetFirewallRule -Name $GuestFirewallRuleName -DisplayName $GuestFirewallRuleName `
                 -Description 'Ephemeral broker-owned same-cohort ingress for an isolated executable test.' `
-                -Direction Inbound -Action Allow -Enabled True -Profile Any -Protocol Any `
+                -Direction Inbound -Action Allow -Enabled True -Profile Private -Protocol Any `
                 -InterfaceAlias ([string]$adapter.InterfaceAlias) -LocalAddress $GuestAddress -RemoteAddress $NetworkPrefix -ErrorAction Stop | Out-Null
 
-            $createdRules = @(Get-NetFirewallRule -Name $GuestFirewallRuleName -ErrorAction Stop)
+            $createdRules = @(Get-NetFirewallRule -PolicyStore ActiveStore -Name $GuestFirewallRuleName -ErrorAction Stop)
             if ($createdRules.Count -ne 1) { throw 'The broker-owned isolated guest firewall rule did not resolve uniquely after creation.' }
             $addressFilters = @($createdRules[0] | Get-NetFirewallAddressFilter -ErrorAction Stop)
             $interfaceFilters = @($createdRules[0] | Get-NetFirewallInterfaceFilter -ErrorAction Stop)
@@ -2075,6 +2088,8 @@ function Initialize-GuestRequestNetwork {
             $enabledName = [string]$createdRules[0].Enabled
             $directionName = [string]$createdRules[0].Direction
             $actionName = [string]$createdRules[0].Action
+            $profileName = [string]$createdRules[0].Profile
+            $enforcementName = [string]$createdRules[0].EnforcementStatus
             $localAddressIsExact = $localAddresses.Count -eq 1 -and (
                 [string]::Equals($localAddresses[0], $GuestAddress, [StringComparison]::OrdinalIgnoreCase) -or
                 [string]::Equals($localAddresses[0], ($GuestAddress + '/32'), [StringComparison]::OrdinalIgnoreCase)
@@ -2092,6 +2107,8 @@ function Initialize-GuestRequestNetwork {
                 $enabledName -eq 'True' -and
                 $directionName -eq 'Inbound' -and
                 $actionName -eq 'Allow' -and
+                $profileName -eq 'Private' -and
+                $enforcementName -like '*Enforced*' -and
                 $addressFilters.Count -eq 1 -and $interfaceFilters.Count -eq 1 -and
                 $localAddressIsExact -and
                 $remoteAddressIsExact -and
@@ -2103,6 +2120,8 @@ function Initialize-GuestRequestNetwork {
                     Enabled = $enabledName
                     Direction = $directionName
                     Action = $actionName
+                    Profile = $profileName
+                    EnforcementStatus = $enforcementName
                     AddressFilterCount = [int]$addressFilters.Count
                     InterfaceFilterCount = [int]$interfaceFilters.Count
                     LocalAddresses = @($localAddresses)
@@ -2119,6 +2138,9 @@ function Initialize-GuestRequestNetwork {
                 Direction = [string]$createdRules[0].Direction
                 Action = [string]$createdRules[0].Action
                 Enabled = [string]$createdRules[0].Enabled
+                Profile = $profileName
+                EnforcementStatus = $enforcementName
+                ConnectionProfileCategory = [string]$connectionProfiles[0].NetworkCategory
                 InterfaceAlias = [string]$interfaceAliases[0]
                 LocalAddress = [string]$localAddresses[0]
                 RemoteAddress = [string]$remoteAddresses[0]
