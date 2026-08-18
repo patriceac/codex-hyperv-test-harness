@@ -622,14 +622,20 @@ function Invoke-PoolBrokerLoop {
     }
     Recover-PoolBrokerState
     $null = Recover-OrphanedHostInputResources -BrokerRoot $BrokerRoot
+    $null = Recover-OrphanedRequestNetworkResources -BrokerRoot $BrokerRoot
     $nextCleanupUtc = [DateTime]::MinValue
     $nextHostInputCleanupUtc = [DateTime]::UtcNow.AddSeconds(2)
+    $nextRequestNetworkCleanupUtc = [DateTime]::UtcNow.AddSeconds(2)
 
     while ($true) {
         Reap-PoolProcesses
         if ([DateTime]::UtcNow -ge $nextHostInputCleanupUtc) {
             $null = Recover-OrphanedHostInputResources -BrokerRoot $BrokerRoot
             $nextHostInputCleanupUtc = [DateTime]::UtcNow.AddSeconds(2)
+        }
+        if ([DateTime]::UtcNow -ge $nextRequestNetworkCleanupUtc) {
+            $null = Recover-OrphanedRequestNetworkResources -BrokerRoot $BrokerRoot
+            $nextRequestNetworkCleanupUtc = [DateTime]::UtcNow.AddSeconds(2)
         }
         Reconcile-PoolRecoveryRequests
         Complete-PoolQueuedTerminalRequests

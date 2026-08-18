@@ -30,6 +30,7 @@ else {
 
 $forbiddenExtensions = @('.iso','.vhd','.vhdx','.avhdx','.vmcx','.vmrs','.vmgs','.exe','.dll','.msi','.pfx','.p12','.key')
 $forbiddenNames = @('guest-credential.json','pool-definition.json','pool-provision-status.json','pool-broker-install-status.json')
+$forbiddenNamePatterns = @('*request-network-policy*.json','*request-network-plan*.json','*request-network-deployment*.json','*trusted-lan-endpoint-inventory*.json')
 $textExtensions = @('.ps1','.psm1','.psd1','.md','.txt','.json','.yaml','.yml','.xml','.cmd','.cs','.gitignore','.gitattributes')
 $secretPatterns = [ordered]@{
     'LiteralUserProfilePath' = 'C:\\Users\\(?!Public(?:\\|\b)|Default(?: User)?(?:\\|\b)|All Users(?:\\|\b)|<[^>]+>)[^\\\s`"'']+'
@@ -43,6 +44,7 @@ foreach ($file in $files) {
     $relative = $file.FullName.Substring($RepositoryRoot.Length).TrimStart('\').Replace('\','/')
     if ($forbiddenExtensions -contains $file.Extension.ToLowerInvariant()) { Add-Violation $relative 'ForbiddenBinaryOrImage' "Public source must not contain $($file.Extension) files." }
     if ($forbiddenNames -contains $file.Name.ToLowerInvariant()) { Add-Violation $relative 'GeneratedPrivateState' 'Generated broker or credential state must not be published.' }
+    if (@($forbiddenNamePatterns | Where-Object { $file.Name -like $_ }).Count -gt 0) { Add-Violation $relative 'PrivateRequestNetworkState' 'Host-specific request-network policies, plans, deployment receipts, and endpoint inventories must not be published.' }
     if ($file.FullName -match '[\\/]private[\\/]') { Add-Violation $relative 'PrivateDirectory' 'Files below a private directory must not be published.' }
     if ($file.Length -gt 10MB) { Add-Violation $relative 'UnexpectedLargeFile' "File is $($file.Length) bytes; public source files must remain under 10 MiB." }
     $isText = $textExtensions -contains $file.Extension.ToLowerInvariant() -or $file.Name -in @('.gitignore','.gitattributes')

@@ -18,6 +18,10 @@ src/Software/Harness/seed-build/
 src/Software/Harness/private/
 src/Software/Harness/pool-definition.json
 src/Software/Harness/*-status.json
+*request-network-policy*.json
+*request-network-plan*.json
+*request-network-deployment*.json
+*trusted-lan-endpoint-inventory*.json
 
 # Local verification output
 artifacts/

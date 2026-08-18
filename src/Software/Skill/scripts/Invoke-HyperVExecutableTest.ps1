@@ -11,6 +11,9 @@ param(
     [Alias('HostInput')] [hashtable[]] $ReadOnlyHostInput = @(),
     [ValidateRange(1048576, 1099511627776)] [long] $HostInputColdShareThresholdBytes = 1073741824,
     [ValidateRange(1048576, 1099511627776)] [long] $HostInputIncrementalShareThresholdBytes = 268435456,
+    [ValidateSet('None', 'IsolatedTestNet', 'InternetOnly', 'TrustedLan')] [string] $NetworkProfile = 'None',
+    [string] $NetworkCohort,
+    [switch] $AllowNetworkWithHostInputs,
     [switch] $RequireHostLocked,
     [ValidateRange(5, 86400)] [int] $QueueTimeoutSeconds = 1800,
     [Alias('TimeoutSeconds')] [ValidateRange(10, 7200)] [int] $ExecutionTimeoutSeconds = 900,
@@ -24,6 +27,40 @@ $BrokerRoot = Resolve-HyperVBrokerRoot -BrokerRoot $BrokerRoot
 
 if (-not [string]::IsNullOrWhiteSpace($ActionsPath) -and -not [string]::IsNullOrWhiteSpace($ActionsJson)) {
     throw 'Specify ActionsPath or ActionsJson, not both.'
+}
+
+$networkCohortSpecified = $PSBoundParameters.ContainsKey('NetworkCohort')
+$normalizedNetworkCohort = $null
+if ($networkCohortSpecified) {
+    if ([string]::IsNullOrWhiteSpace($NetworkCohort)) {
+        throw 'NetworkCohort must be nonblank when specified.'
+    }
+    $normalizedNetworkCohort = $NetworkCohort.Trim()
+    if ($normalizedNetworkCohort.Length -gt 64 -or $normalizedNetworkCohort -notmatch '^[A-Za-z0-9._-]+$') {
+        throw 'NetworkCohort must contain at most 64 letters, digits, dots, underscores, or hyphens.'
+    }
+}
+
+switch ($NetworkProfile) {
+    'None' {
+        if ($networkCohortSpecified) { throw 'NetworkProfile None does not accept NetworkCohort.' }
+        if ($AllowNetworkWithHostInputs) { throw 'NetworkProfile None does not accept AllowNetworkWithHostInputs.' }
+    }
+    'IsolatedTestNet' {
+        if (-not $networkCohortSpecified) { throw 'NetworkProfile IsolatedTestNet requires NetworkCohort.' }
+    }
+    'InternetOnly' {
+        if ($networkCohortSpecified) { throw 'NetworkProfile InternetOnly does not accept NetworkCohort.' }
+    }
+    'TrustedLan' {
+        if ($networkCohortSpecified) { throw 'NetworkProfile TrustedLan does not accept NetworkCohort.' }
+    }
+}
+
+$networkContract = [ordered]@{
+    Profile = [string]$NetworkProfile
+    Cohort = $normalizedNetworkCohort
+    AllowHostInputs = [bool]$AllowNetworkWithHostInputs
 }
 
 $artifact = Get-Item -LiteralPath $ArtifactPath -ErrorAction Stop
@@ -288,6 +325,8 @@ function Get-RequestLifecycleDisplay {
         'Assigned' { "Assigned to ${workerText}: $RequestId. $message".Trim() }
         'StagingGuestPayload' { "Staging guest payload: $message".Trim() }
         'PreparingHostInputs' { "Preparing read-only host inputs: $message".Trim() }
+        'PreparingNetwork' { "Preparing request network: $message".Trim() }
+        'VerifyingNetwork' { "Verifying request network: $message".Trim() }
         'PreparingVm' { "Preparing VM: $message".Trim() }
         'StartingVm' { "Starting VM: $message".Trim() }
         'WaitingForGuestAgent' { "Waiting for guest agent: $message".Trim() }
@@ -305,6 +344,7 @@ function Get-RequestLifecycleDisplay {
         }
         'AwaitingGuestCompletion' { "Waiting for guest completion: $message".Trim() }
         'CollectingEvidence' { "Collecting evidence: $message".Trim() }
+        'CleaningNetwork' { "Revoking request network: $message".Trim() }
         'StoppingVm' { "Stopping VM / recycling ${workerText}: $message".Trim() }
         'RetryPendingRecycle' { "Recycling failed capture worker before one retry: $message".Trim() }
         'GuestAgentRecovery' { "Waiting for guest-agent recovery: $message".Trim() }
@@ -800,6 +840,16 @@ foreach ($declaration in @($ReadOnlyHostInput)) {
 if ($hostInputDeclarations.Count -gt 8) {
     throw 'A request may expose at most eight read-only host inputs.'
 }
+$networkEnabled = $NetworkProfile -ne 'None'
+if ($networkEnabled -and $hostInputDeclarations.Count -gt 0) {
+    if (-not $AllowNetworkWithHostInputs) {
+        throw 'AllowNetworkWithHostInputs is required when a non-None NetworkProfile is combined with ReadOnlyHostInput.'
+    }
+    $explicitShare = @($hostInputDeclarations | Where-Object { [string]$_.RequestedMode -eq 'Share' } | Select-Object -First 1)
+    if ($explicitShare.Count -gt 0) {
+        throw "ReadOnlyHostInput '$($explicitShare[0].Name)' explicitly requests Share, which cannot be combined with a non-None NetworkProfile. Use Auto or Vhdx."
+    }
+}
 $hostInputTokenNames = @($hostInputDeclarations | ForEach-Object { [string]$_.TokenName })
 
 if (-not [string]::IsNullOrWhiteSpace($ActionsPath)) {
@@ -1020,7 +1070,15 @@ try {
         $inputDirectoryCount = @($inputInventory.Directories).Count
         $warmCache = Test-PayloadCacheWarm -PayloadId $inputPayloadId -CanonicalPath $inputPath
 
-        $selection = Select-HostInputTransport -RequestedMode ([string]$hostInput.RequestedMode) -WarmCache ([bool]$warmCache) -Inventory $inputInventory -FileCount $inputFileCount -ColdShareThresholdBytes $HostInputColdShareThresholdBytes -IncrementalShareThresholdBytes $HostInputIncrementalShareThresholdBytes
+        $selection = if ($networkEnabled -and [string]$hostInput.RequestedMode -eq 'Auto') {
+            [pscustomobject][ordered]@{
+                Transport = 'Vhdx'
+                Reason = 'Auto was forced to immutable VHDX transport because the request enables general networking.'
+            }
+        }
+        else {
+            Select-HostInputTransport -RequestedMode ([string]$hostInput.RequestedMode) -WarmCache ([bool]$warmCache) -Inventory $inputInventory -FileCount $inputFileCount -ColdShareThresholdBytes $HostInputColdShareThresholdBytes -IncrementalShareThresholdBytes $HostInputIncrementalShareThresholdBytes
+        }
         $selectedTransport = [string]$selection.Transport
         $selectionReason = [string]$selection.Reason
 
@@ -1133,7 +1191,7 @@ try {
     $queueDeadlineUtc = $createdUtc.AddSeconds($QueueTimeoutSeconds)
     $request = [ordered]@{
         RequestId = $requestId
-        Operation = 'RunGuestJob'
+        Operation = if ($networkEnabled) { 'RunGuestJobNetworkV1' } else { 'RunGuestJob' }
         CreatedUtc = $createdUtc.ToString('o')
         QueueTimeoutSeconds = $QueueTimeoutSeconds
         ExecutionTimeoutSeconds = $ExecutionTimeoutSeconds
@@ -1156,6 +1214,7 @@ try {
             HashesReused = [int]$payloadManifest.HashesReused
         }
         HostInputs = $preparedHostInputs
+        Network = $networkContract
         Job = $job
     }
 
@@ -1296,6 +1355,7 @@ try {
             PayloadFilesHashed = [int]$payloadManifest.FilesHashed
             PayloadHashesReused = [int]$payloadManifest.HashesReused
             HostInputs = @($preparedHostInputs)
+            Network = $networkContract
             ExecutableRelativePath = $relativeExecutable
             Status = $terminalStatus
             Cancelled = -not $queueTimedOutBeforeStart
@@ -1399,6 +1459,7 @@ try {
             PayloadParentVhdx = [string]$brokerResult.PayloadParentVhdx
             PayloadChildDeleted = [bool]$brokerResult.PayloadChildDeleted
             HostInputs = if ($brokerResult.HostInputs) { @($brokerResult.HostInputs) } else { @() }
+            Network = if ($brokerResult.Network) { $brokerResult.Network } else { $networkContract }
             ExecutableRelativePath = $relativeExecutable
             Status = $finalStatus
             QueueTimeoutSeconds = $QueueTimeoutSeconds

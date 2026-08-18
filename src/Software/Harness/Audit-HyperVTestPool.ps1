@@ -10,6 +10,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'HarnessPaths.ps1')
+. (Join-Path $PSScriptRoot 'RequestNetwork.ps1')
 $layout = Get-CodexHarnessConfig -ConfigPath $ConfigPath
 if ([string]::IsNullOrWhiteSpace($DefinitionPath)) { $DefinitionPath = Join-Path ([string]$layout.HarnessSourceRoot) 'pool-definition.json' }
 if ([string]::IsNullOrWhiteSpace($BrokerRoot)) { $BrokerRoot = [string]$layout.BrokerRoot }
@@ -163,6 +164,7 @@ try {
     $sourceProcessor = Get-VMProcessor -VMName $sourceVm.Name -ErrorAction Stop
     $sourceMemory = Get-VMMemory -VMName $sourceVm.Name -ErrorAction Stop
     $sourceVideo = Get-VMVideo -VMName $sourceVm.Name -ErrorAction Stop
+    $sourceNetworkAdapters = @(Get-VMNetworkAdapter -VMName $sourceVm.Name -ErrorAction Stop)
     $baseFile = Get-Item -LiteralPath $basePath -Force -ErrorAction Stop
     $baseVhd = Get-VHD -Path $basePath -ErrorAction Stop
 
@@ -197,6 +199,7 @@ try {
                     Name = $_.Name
                     SwitchName = [string]$_.SwitchName
                     Connected = -not [string]::IsNullOrWhiteSpace([string]$_.SwitchName)
+                    ManagedRequestNetwork = [string]$_.Name -like 'CodexRequestNet-*'
                 }
             })
             DiskCount = $drives.Count
@@ -208,8 +211,20 @@ try {
         })
     }
 
+    # Keep the residue audit authoritative for every VM on the host. The pool
+    # definition is not an authority for Hyper-V inventory: an adapter left on
+    # an unconfigured VM is still harness residue and must fail the audit.
+    $allVms = @(Get-VM -ErrorAction Stop)
+    $allVmNetworkAdapters = @(Get-VMNetworkAdapter -All -ErrorAction Stop)
+
     $payloadChildFiles = @(Get-ChildItem -LiteralPath $payloadChildrenRoot -Filter '*.vhdx' -File -Force -ErrorAction SilentlyContinue)
     $payloadLeaseFiles = @(Get-ChildItem -LiteralPath (Join-Path $BrokerRoot 'State\PayloadLeases') -Filter '*.json' -File -Force -ErrorAction SilentlyContinue)
+    $requestNetworkLeaseFiles = @(Get-ChildItem -LiteralPath (Join-Path $BrokerRoot 'State\NetworkLeases') -Filter '*.json' -File -Force -ErrorAction Stop)
+    $managedRequestNetworkAdapters = @($allVmNetworkAdapters | Where-Object { [string]$_.Name -like 'CodexRequestNet-*' })
+    $requestNetworkInstallationScope = Get-RequestNetworkInstallationScope -BrokerRoot $BrokerRoot
+    $managedRequestNetworkSwitches = @(Get-VMSwitch -ErrorAction Stop | Where-Object {
+        [string]$_.Notes -like ('CodexHarnessRequestNetwork:' + $requestNetworkInstallationScope + ':*')
+    })
     $queuedFiles = @(Get-ChildItem -LiteralPath (Join-Path $BrokerRoot 'Requests') -Filter '*.json' -File -Force -ErrorAction SilentlyContinue)
     $processingFiles = @(Get-ChildItem -LiteralPath (Join-Path $BrokerRoot 'Processing') -Filter '*.json' -File -Force -ErrorAction SilentlyContinue)
     $cacheEntries = @(Get-ChildItem -LiteralPath (Join-Path $BrokerRoot 'PayloadCache') -Directory -Force -ErrorAction SilentlyContinue | Where-Object Name -Match '^[A-Fa-f0-9]{64}$')
@@ -219,11 +234,114 @@ try {
     $brokerState = if (Test-Path -LiteralPath $brokerStatePath -PathType Leaf) { Get-Content -LiteralPath $brokerStatePath -Raw | ConvertFrom-Json } else { $null }
     $configPath = Join-Path $BrokerRoot 'Private\config.json'
     $brokerConfig = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+    $requestNetworkPolicy = $null
+    $requestNetworkPolicyVersioned = $false
+    try {
+        # This is the shared runtime validator. In particular, a string such
+        # as "false" is not a Boolean and therefore cannot enable a profile in
+        # the audit path through PowerShell truthiness.
+        $requestNetworkPolicy = Get-RequestNetworkPolicy -Config $brokerConfig
+        $requestNetworkPolicyVersioned = $true
+    }
+    catch { $requestNetworkPolicy = $null }
+
+    $isolatedPolicyValid = $false
+    $internetPolicyValid = $false
+    $trustedLanPolicyValid = $false
+    if ($requestNetworkPolicyVersioned) {
+        try {
+            $isolatedSettings = Get-RequestNetworkObjectPropertyValue -Value $requestNetworkPolicy -Name 'IsolatedTestNet'
+            $null = Get-RequestNetworkIPv4Prefix24 -Prefix ([string]$isolatedSettings.NetworkPrefix) -Context 'IsolatedTestNet.NetworkPrefix'
+            $isolatedPolicyValid = -not $isolatedSettings.Enabled -or [string]$isolatedSettings.SwitchPrefix -match '^[A-Za-z0-9._-]{1,80}$'
+        }
+        catch { $isolatedPolicyValid = $false }
+    }
+    if ($requestNetworkPolicyVersioned -and $requestNetworkPolicy.InternetOnly.Enabled) {
+        $internetSettings = Get-RequestNetworkObjectPropertyValue -Value $requestNetworkPolicy -Name 'InternetOnly'
+        $null = Get-RequestNetworkIPv4Prefix24 -Prefix ([string]$internetSettings.NatPrefix) -Context 'InternetOnly.NatPrefix'
+        $internetSwitches = @(Get-VMSwitch -Name ([string]$internetSettings.SwitchName) -ErrorAction Stop)
+        $allInternetNats = @(Get-NetNat -ErrorAction Stop)
+        $internetNats = @($allInternetNats | Where-Object { [string]::Equals([string]$_.Name, [string]$internetSettings.NatName, [StringComparison]::Ordinal) })
+        $internetStaticMappings = @(Get-RequestNetworkNatStaticMappings -NatName ([string]$internetSettings.NatName))
+        $internetNatPolicyValid = $false
+        if ($internetNats.Count -eq 1) {
+            try {
+                $expectedNatPolicy = Get-RequestNetworkExpectedNatPolicy -Settings $internetSettings
+                $internetNatPolicyValid = Assert-RequestNetworkNatPolicy -Nat $internetNats[0] -ExpectedPolicy $expectedNatPolicy -ExpectedInternalPrefix ([string]$internetSettings.NatPrefix)
+            }
+            catch { $internetNatPolicyValid = $false }
+        }
+        $internetVmAdapters = @($allVmNetworkAdapters | Where-Object {
+            [string]::Equals([string]$_.SwitchName, [string]$internetSettings.SwitchName, [StringComparison]::Ordinal)
+        })
+        $internetManagementAdapters = @(Get-VMNetworkAdapter -ManagementOS -SwitchName ([string]$internetSettings.SwitchName) -ErrorAction Stop)
+        $internetGatewayVlan = @(if ($internetManagementAdapters.Count -eq 1) {
+            Get-VMNetworkAdapterVlan -VMNetworkAdapter $internetManagementAdapters[0] -ErrorAction Stop
+        }
+        else { @() })
+        $internetGatewayMac = if ($internetManagementAdapters.Count -eq 1) { (([string]$internetManagementAdapters[0].MacAddress) -replace '[:-]', '').ToUpperInvariant() } else { '' }
+        $internetHostAdapters = @(Get-NetAdapter -IncludeHidden -ErrorAction Stop | Where-Object {
+            (([string]$_.MacAddress) -replace '[:-]', '').ToUpperInvariant() -eq $internetGatewayMac
+        })
+        $internetGatewayAddresses = @(if ($internetHostAdapters.Count -eq 1) {
+            Get-NetIPAddress -InterfaceIndex ([int]$internetHostAdapters[0].ifIndex) -AddressFamily IPv4 -IPAddress ([string]$internetSettings.GatewayAddress) -ErrorAction Stop
+        }
+        else { @() })
+        $internetPolicyValid =
+            $internetSwitches.Count -eq 1 -and
+            [string]$internetSwitches[0].SwitchType -eq 'Internal' -and
+            [string]::Equals([string]$internetSwitches[0].Id, [string]$internetSettings.SwitchId, [StringComparison]::OrdinalIgnoreCase) -and
+            $allInternetNats.Count -eq 1 -and $internetNats.Count -eq 1 -and
+            [string]::Equals([string]$internetNats[0].InternalIPInterfaceAddressPrefix, [string]$internetSettings.NatPrefix, [StringComparison]::OrdinalIgnoreCase) -and
+            $internetNatPolicyValid -and
+            $internetStaticMappings.Count -eq 0 -and
+            @($internetVmAdapters | Where-Object { [string]$_.Name -notlike 'CodexRequestNet-*' }).Count -eq 0 -and
+            $internetManagementAdapters.Count -eq 1 -and $internetHostAdapters.Count -eq 1 -and $internetGatewayAddresses.Count -eq 1 -and
+            $internetGatewayVlan.Count -eq 1 -and
+            [string]$internetGatewayVlan[0].OperationMode -eq 'Private' -and
+            [string]$internetGatewayVlan[0].PrivateVlanMode -eq 'Promiscuous' -and
+            [int]$internetGatewayVlan[0].PrimaryVlanId -eq [int]$internetSettings.PrimaryVlanId -and
+            @($internetGatewayVlan[0].SecondaryVlanIdList).Count -eq 1 -and
+            [int](@($internetGatewayVlan[0].SecondaryVlanIdList)[0]) -eq [int]$internetSettings.SecondaryVlanId -and
+            [int]$internetSettings.PrimaryVlanId -ge 1 -and [int]$internetSettings.PrimaryVlanId -le 4094 -and
+            [int]$internetSettings.SecondaryVlanId -ge 1 -and [int]$internetSettings.SecondaryVlanId -le 4094 -and
+            [int]$internetSettings.PrimaryVlanId -ne [int]$internetSettings.SecondaryVlanId -and
+            [int]$internetSettings.PrefixLength -eq 24 -and
+            @($internetSettings.DnsServers).Count -gt 0
+    }
+    elseif ($requestNetworkPolicyVersioned) {
+        $internetPolicyValid = $true
+    }
+    if ($requestNetworkPolicyVersioned -and $requestNetworkPolicy.TrustedLan.Enabled) {
+        $allowedSwitches = @($requestNetworkPolicy.TrustedLan.AllowedSwitches)
+        $trustedLanPolicyValid = $allowedSwitches.Count -gt 0
+        foreach ($allowedSwitch in $allowedSwitches) {
+            $matches = @(Get-VMSwitch -Name ([string]$allowedSwitch.Name) -ErrorAction Stop)
+            $descriptions = @(if ($matches.Count -eq 1) {
+                $matches[0].NetAdapterInterfaceDescriptions | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+            }
+            else { @() })
+            if ($descriptions.Count -eq 0 -and $matches.Count -eq 1 -and -not [string]::IsNullOrWhiteSpace([string]$matches[0].NetAdapterInterfaceDescription)) {
+                $descriptions = @([string]$matches[0].NetAdapterInterfaceDescription)
+            }
+            if ($matches.Count -ne 1 -or [string]$matches[0].SwitchType -ne 'External' -or
+                -not [string]::Equals([string]$matches[0].Id, [string]$allowedSwitch.Id, [StringComparison]::OrdinalIgnoreCase) -or
+                [bool]$matches[0].EmbeddedTeamingEnabled -or $descriptions.Count -ne 1 -or
+                -not [string]::Equals([string]$matches[0].NetAdapterInterfaceGuid, [string]$allowedSwitch.NetAdapterInterfaceGuid, [StringComparison]::OrdinalIgnoreCase) -or
+                -not [string]::Equals([string]$descriptions[0], [string]$allowedSwitch.NetAdapterInterfaceDescription, [StringComparison]::Ordinal) -or
+                $allowedSwitch.AllowManagementOS -isnot [bool] -or [bool]$matches[0].AllowManagementOS -ne [bool]$allowedSwitch.AllowManagementOS) {
+                $trustedLanPolicyValid = $false
+            }
+        }
+    }
+    elseif ($requestNetworkPolicyVersioned) {
+        $trustedLanPolicyValid = $true
+    }
     $resolvedClientSid = if (-not [string]::IsNullOrWhiteSpace($ClientSid)) { $ClientSid } elseif (-not [string]::IsNullOrWhiteSpace([string]$brokerConfig.ClientSid)) { [string]$brokerConfig.ClientSid } else { [Security.Principal.WindowsIdentity]::GetCurrent().User.Value }
     try { [void][Security.Principal.SecurityIdentifier]::new($resolvedClientSid) } catch { throw "Invalid broker client SID: $resolvedClientSid" }
     $brokerTask = Get-ScheduledTask -TaskName ([string]$layout.BrokerTaskName) -ErrorAction SilentlyContinue
 
-    $installedFiles = @('HostBroker.ps1', 'PayloadCache.ps1', 'HostInputShare.ps1', 'PoolCommon.ps1', 'PoolBroker.ps1', 'PoolLifecycle.ps1', 'HostWorker.ps1')
+    $installedFiles = @('HostBroker.ps1', 'PayloadCache.ps1', 'HostInputShare.ps1', 'RequestNetwork.ps1', 'PoolCommon.ps1', 'PoolBroker.ps1', 'PoolLifecycle.ps1', 'HostWorker.ps1')
     $privateRoot = Join-Path $BrokerRoot 'Private'
     $aclTargets = New-Object Collections.Generic.List[object]
     $aclTargets.Add([pscustomobject]@{ Path = $BrokerRoot; ClientMode = 'ReadExecute'; ClientInherits = $false })
@@ -234,6 +352,7 @@ try {
     foreach ($path in @((Join-Path $BrokerRoot 'State'), (Join-Path $BrokerRoot 'PayloadCache'), (Join-Path $BrokerRoot 'PayloadCacheTemp'), (Join-Path $BrokerRoot 'PayloadMounts'), (Join-Path $BrokerRoot 'PayloadChildren'), (Join-Path $BrokerRoot 'Pool'))) {
         $aclTargets.Add([pscustomobject]@{ Path = $path; ClientMode = 'ReadExecute'; ClientInherits = $true })
     }
+    $aclTargets.Add([pscustomobject]@{ Path = Join-Path $BrokerRoot 'State\NetworkLeases'; ClientMode = 'None'; ClientInherits = $false })
     foreach ($name in $installedFiles) {
         $aclTargets.Add([pscustomobject]@{ Path = Join-Path $BrokerRoot $name; ClientMode = 'Read'; ClientInherits = $false })
     }
@@ -272,6 +391,10 @@ try {
             $_.DisplayResolutionType -ne 'Single'
         }).Count -eq 0
         AllWorkerNetworksDisconnected = @($workers | ForEach-Object { $_.NetworkAdapters } | Where-Object Connected).Count -eq 0
+        SourceNetworkDisconnected = @($sourceNetworkAdapters | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.SwitchName) }).Count -eq 0
+        NoRequestNetworkLeases = $requestNetworkLeaseFiles.Count -eq 0
+        NoManagedRequestNetworkAdapters = $managedRequestNetworkAdapters.Count -eq 0
+        NoManagedRequestNetworkSwitches = $managedRequestNetworkSwitches.Count -eq 0
         AllOsChildrenUseSharedBase = @($workers | Where-Object { -not $_.OsChildExists -or -not $_.OsParentMatchesBase }).Count -eq 0
         NoAttachedPayloadChildren = @($workers | ForEach-Object { $_.AttachedPayloadChildren }).Count -eq 0
         NoPayloadChildFiles = $payloadChildFiles.Count -eq 0
@@ -281,6 +404,10 @@ try {
         BrokerTaskRunning = $brokerTask -and [string]$brokerTask.State -eq 'Running'
         BrokerHeartbeatPresent = $brokerState -and -not [string]::IsNullOrWhiteSpace([string]$brokerState.HeartbeatUtc)
         IdleTimeoutMatchesExpected = [int]$brokerConfig.PoolIdleTimeoutSeconds -eq $ExpectedIdleTimeoutSeconds
+        RequestNetworkPolicyVersioned = $requestNetworkPolicyVersioned
+        IsolatedTestNetPolicyValid = $isolatedPolicyValid
+        InternetOnlyPolicyPinned = $internetPolicyValid
+        TrustedLanPolicyPinned = $trustedLanPolicyValid
         BrokerAclsMatchPolicy = @($aclResults | Where-Object { -not $_.Passed }).Count -eq 0
     }
     $failedChecks = @($checks.GetEnumerator() | Where-Object { -not [bool]$_.Value } | ForEach-Object Key)
@@ -302,6 +429,7 @@ try {
             DisplayWidth = [int]$sourceVideo.HorizontalResolution
             DisplayHeight = [int]$sourceVideo.VerticalResolution
             DisplayResolutionType = [string]$sourceVideo.ResolutionType
+            NetworkAdapters = @($sourceNetworkAdapters | ForEach-Object { [ordered]@{ Name = [string]$_.Name; SwitchName = [string]$_.SwitchName; Connected = -not [string]::IsNullOrWhiteSpace([string]$_.SwitchName) } })
         }
         Base = [ordered]@{
             Path = $basePath
@@ -316,6 +444,9 @@ try {
             ProcessingCount = $processingFiles.Count
             PayloadChildFileCount = $payloadChildFiles.Count
             PayloadLeaseFileCount = $payloadLeaseFiles.Count
+            RequestNetworkLeaseFileCount = $requestNetworkLeaseFiles.Count
+            ManagedRequestNetworkAdapterCount = $managedRequestNetworkAdapters.Count
+            ManagedRequestNetworkSwitchCount = $managedRequestNetworkSwitches.Count
             CacheEntryCount = $cacheEntries.Count
             GarbageCollection = $gcState
             BrokerTaskState = if ($brokerTask) { [string]$brokerTask.State } else { 'Missing' }
@@ -323,6 +454,7 @@ try {
             BrokerHeartbeatUtc = if ($brokerState) { [string]$brokerState.HeartbeatUtc } else { $null }
             PoolIdleTimeoutSeconds = [int]$brokerConfig.PoolIdleTimeoutSeconds
             ClientSid = $resolvedClientSid
+            RequestNetworkPolicy = $requestNetworkPolicy
             AclChecks = $aclResults
         }
         Checks = $checks
