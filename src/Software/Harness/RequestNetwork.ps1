@@ -1876,21 +1876,16 @@ function Reset-GuestRequestNetworkResidue {
         param($PinnedGatewayAddress)
 
         function Get-BrokerOwnedPersistentDefaultRoute {
-            $routeErrors = @()
-            $routes = @(
-                Get-NetRoute -AddressFamily IPv4 -PolicyStore PersistentStore -ErrorAction SilentlyContinue -ErrorVariable +routeErrors |
+            # MSFT_NetRoute.Store is 0 for PersistentStore and 1 for
+            # ActiveStore. Direct CIM enumeration returns an empty collection
+            # without Get-NetRoute's localized not-found error.
+            @(
+                Get-CimInstance -Namespace 'root/StandardCimv2' -ClassName 'MSFT_NetRoute' -Filter 'AddressFamily = 2 AND Store = 0' -ErrorAction Stop |
                     Where-Object {
                         [string]::Equals([string]$_.DestinationPrefix, '0.0.0.0/0', [StringComparison]::Ordinal) -and
                         [string]::Equals([string]$_.NextHop, $PinnedGatewayAddress, [StringComparison]::Ordinal)
                     }
             )
-            $unexpectedErrors = @($routeErrors | Where-Object {
-                -not [string]::Equals([string]$_.FullyQualifiedErrorId, 'CmdletizationQuery_NotFound,Get-NetRoute', [StringComparison]::Ordinal)
-            })
-            if ($unexpectedErrors.Count -gt 0) {
-                throw ('Persistent guest route inventory failed: ' + (($unexpectedErrors | ForEach-Object { $_.Exception.Message }) -join '; '))
-            }
-            $routes
         }
 
         $matchingRoutes = @(
