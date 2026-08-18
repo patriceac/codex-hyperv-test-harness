@@ -414,6 +414,19 @@ $vlanFixture = [pscustomobject][ordered]@{
 }
 $validExtendedAcls = @(Get-RequestNetworkInternetExtendedAclRules -Runtime $aclRuntime)
 $weights = Get-RequestNetworkInternetExtendedAclWeights
+Assert-True (
+    [int]$weights.StatelessIdleSessionTimeout -eq 0 -and
+    (ConvertTo-RequestNetworkExtendedAclDirection -Value 1) -eq 'Inbound' -and
+    (ConvertTo-RequestNetworkExtendedAclDirection -Value 2) -eq 'Outbound' -and
+    (ConvertTo-RequestNetworkExtendedAclAction -Value 1) -eq 'Allow' -and
+    (ConvertTo-RequestNetworkExtendedAclAction -Value 2) -eq 'Deny'
+) 'The exact Hyper-V provider enum and stateless-timeout normalization changed.'
+Assert-Rejected -Scenario 'unsupported extended ACL direction' -ExpectedMessage 'unsupported extended-ACL direction' -Operation {
+    ConvertTo-RequestNetworkExtendedAclDirection -Value 3 | Out-Null
+}
+Assert-Rejected -Scenario 'unsupported extended ACL action' -ExpectedMessage 'unsupported extended-ACL action' -Operation {
+    ConvertTo-RequestNetworkExtendedAclAction -Value 3 | Out-Null
+}
 $prefixDenyWeights = @($validExtendedAcls | Where-Object {
     $_.Direction -eq 'Outbound' -and $_.Action -eq 'Deny' -and $_.RemoteIPAddress -ne 'ANY'
 } | ForEach-Object { [int]$_.Weight })
@@ -448,6 +461,27 @@ Assert-True (
     [int]$validAclResult.InstalledExtendedAclCount -eq $validExtendedAcls.Count -and
     [bool]$validAclResult.InstalledVlan
 ) 'The exact synthetic private-VLAN and extended-ACL contract was not accepted.'
+
+$providerNormalizedExtendedAcls = @($validExtendedAcls | ForEach-Object {
+    $copy = [ordered]@{}
+    foreach ($property in $_.PSObject.Properties) { $copy[$property.Name] = $property.Value }
+    $copy.Direction = if ([string]$copy.Direction -eq 'Inbound') { 1 } else { 2 }
+    $copy.Action = if ([string]$copy.Action -eq 'Allow') { 1 } else { 2 }
+    if (-not [bool]$copy.Stateful) { $copy.IdleSessionTimeout = 0 }
+    [pscustomobject]$copy
+})
+$providerNormalizedResult = & {
+    param($ExtendedFixture, $VlanFixture, $Runtime, $Adapter)
+    function Get-VMNetworkAdapterAcl { [CmdletBinding()] param($VMNetworkAdapter) }
+    function Get-VMNetworkAdapterExtendedAcl { [CmdletBinding()] param($VMNetworkAdapter); @($ExtendedFixture) }
+    function Get-VMNetworkAdapterVlan { [CmdletBinding()] param($VMNetworkAdapter); $VlanFixture }
+    Assert-RequestNetworkAdapterEnforcement -Runtime $Runtime -Adapter $Adapter
+} $providerNormalizedExtendedAcls $vlanFixture $aclRuntime $aclAdapter
+Assert-True (
+    [int]$providerNormalizedResult.InstalledExtendedAclCount -eq $providerNormalizedExtendedAcls.Count -and
+    [bool]$providerNormalizedResult.InstalledVlan
+) 'The exact Windows provider-normalized extended-ACL contract was not accepted.'
+$scenarios.Add('internet-only-provider-normalized-acl-contract-is-exact')
 
 $extraExtendedAcl = [pscustomobject][ordered]@{
     Direction = 'Outbound'; Action = 'Allow'; LocalIPAddress = '10.254.1.55/32'; RemoteIPAddress = '10.0.0.42/32'

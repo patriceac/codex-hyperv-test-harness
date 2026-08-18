@@ -396,7 +396,7 @@ function Get-RequestNetworkInternetExtendedAclWeights {
         SourceUdpAllowWeight = 10001
         DenyPrefixWeightBase = 20000
         MaximumWeight = 65535
-        StatelessIdleSessionTimeout = 255
+        StatelessIdleSessionTimeout = 0
     }
 }
 
@@ -488,6 +488,30 @@ function ConvertTo-RequestNetworkExtendedAclCanonicalValue {
     $normalized = $Value.Trim()
     if ($Upper) { return $normalized.ToUpperInvariant() }
     $normalized
+}
+
+function ConvertTo-RequestNetworkExtendedAclDirection {
+    param([Parameter(Mandatory = $true)] $Value)
+
+    switch -CaseSensitive ([string]$Value) {
+        '1' { 'Inbound'; break }
+        'Inbound' { 'Inbound'; break }
+        '2' { 'Outbound'; break }
+        'Outbound' { 'Outbound'; break }
+        default { throw "The Hyper-V provider returned an unsupported extended-ACL direction: $Value" }
+    }
+}
+
+function ConvertTo-RequestNetworkExtendedAclAction {
+    param([Parameter(Mandatory = $true)] $Value)
+
+    switch -CaseSensitive ([string]$Value) {
+        '1' { 'Allow'; break }
+        'Allow' { 'Allow'; break }
+        '2' { 'Deny'; break }
+        'Deny' { 'Deny'; break }
+        default { throw "The Hyper-V provider returned an unsupported extended-ACL action: $Value" }
+    }
 }
 
 function Assert-RequestNetworkInternetVlan {
@@ -1479,8 +1503,8 @@ function Assert-RequestNetworkAdapterEnforcement {
             for ($index = 0; $index -lt $extendedAcls.Count; $index++) {
                 if ($matched.Contains($index)) { continue }
                 $actual = $extendedAcls[$index]
-                if ([string]$actual.Direction -ne [string]$expected.Direction -or
-                    [string]$actual.Action -ne [string]$expected.Action -or
+                if ((ConvertTo-RequestNetworkExtendedAclDirection -Value $actual.Direction) -ne [string]$expected.Direction -or
+                    (ConvertTo-RequestNetworkExtendedAclAction -Value $actual.Action) -ne [string]$expected.Action -or
                     (ConvertTo-RequestNetworkExtendedAclCanonicalValue -Value ([string]$actual.LocalIPAddress) -Upper) -ne (ConvertTo-RequestNetworkExtendedAclCanonicalValue -Value ([string]$expected.LocalIPAddress) -Upper) -or
                     (ConvertTo-RequestNetworkExtendedAclCanonicalValue -Value ([string]$actual.RemoteIPAddress) -Upper) -ne (ConvertTo-RequestNetworkExtendedAclCanonicalValue -Value ([string]$expected.RemoteIPAddress) -Upper) -or
                     (ConvertTo-RequestNetworkExtendedAclCanonicalValue -Value ([string]$actual.LocalPort) -Upper) -ne (ConvertTo-RequestNetworkExtendedAclCanonicalValue -Value ([string]$expected.LocalPort) -Upper) -or
