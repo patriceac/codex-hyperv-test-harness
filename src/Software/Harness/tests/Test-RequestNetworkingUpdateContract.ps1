@@ -97,9 +97,11 @@ $scenarios.Add('live-update-carries-network-canary-and-recovery-contract')
 Assert-True (
     $networkCanaryText.Contains('resolverThread.IsBackground = true') -and
     $networkCanaryText.Contains('resolverThread.Join(timeoutMilliseconds)') -and
-    $networkCanaryText.Contains('DNS resolution timed out after')
-) 'The live network canary does not bound disconnected DNS probes by its declared timeout.'
-$scenarios.Add('network-canary-bounds-dns-probes')
+    $networkCanaryText.Contains('DNS resolution timed out after') -and
+    $networkCanaryText.Contains('options.Has("headless")') -and
+    $networkCanaryText.Contains('ExecuteAndWriteResult(options, holdMilliseconds, resultPath)')
+) 'The live network canary does not bound disconnected DNS probes or expose a deterministic headless evidence path.'
+$scenarios.Add('network-canary-has-bounded-headless-evidence-path')
 
 Assert-True ($setupSkillText.Contains('Update-RequestNetworking.ps1') -and $setupSkillText.Contains('approved fingerprint') -and $setupSkillText.Contains('separate approval')) 'The setup skill does not preserve the two-gate request-network workflow.'
 Assert-True ($recoveryVerifierText.Contains("'Software\Setup\Update-RequestNetworking.ps1'")) 'Recovery verification does not require the request-network updater.'

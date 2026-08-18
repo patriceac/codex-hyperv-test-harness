@@ -238,36 +238,18 @@ internal static class NetworkBoundaryCanary
         if (String.IsNullOrWhiteSpace(resultPath)) return 2;
 
         int holdMilliseconds = Math.Max(0, Math.Min(MaximumHoldMilliseconds, options.GetInt("hold-ms", 1500)));
+        if (options.Has("headless"))
+        {
+            CanaryResult headlessResult = ExecuteAndWriteResult(options, holdMilliseconds, resultPath);
+            return headlessResult.Passed ? 0 : 1;
+        }
         int stayMilliseconds = Math.Max(1000, Math.Min(MaximumHoldMilliseconds, options.GetInt("stay-ms", 3500)));
         var form = new CanaryForm(options.Get("profile", "None"), stayMilliseconds);
         form.Shown += delegate
         {
             var thread = new Thread(new ThreadStart(delegate
             {
-                CanaryResult result;
-                try
-                {
-                    result = Execute(options, holdMilliseconds);
-                }
-                catch (Exception exception)
-                {
-                    result = CreateFatalResult(options.Get("profile", "None"), exception);
-                }
-
-                try { WriteAtomic(resultPath, result.ToJson()); }
-                catch (Exception writeException)
-                {
-                    result.Passed = false;
-                    result.Failure = "Result write failed: " + writeException.GetType().FullName + ": " + writeException.Message;
-                    try { WriteAtomic(resultPath, result.ToJson()); } catch { }
-                }
-
-                string evidencePath = options.Get("evidence", null);
-                if (!String.IsNullOrWhiteSpace(evidencePath))
-                {
-                    try { WriteAtomic(evidencePath, BuildEvidenceDocument(result)); } catch { }
-                }
-
+                CanaryResult result = ExecuteAndWriteResult(options, holdMilliseconds, resultPath);
                 form.SetResult(result);
             }));
             thread.IsBackground = true;
@@ -277,6 +259,34 @@ internal static class NetworkBoundaryCanary
         Application.SetCompatibleTextRenderingDefault(false);
         Application.Run(form);
         return form.ExitCode;
+    }
+
+    private static CanaryResult ExecuteAndWriteResult(CanaryOptions options, int holdMilliseconds, string resultPath)
+    {
+        CanaryResult result;
+        try
+        {
+            result = Execute(options, holdMilliseconds);
+        }
+        catch (Exception exception)
+        {
+            result = CreateFatalResult(options.Get("profile", "None"), exception);
+        }
+
+        try { WriteAtomic(resultPath, result.ToJson()); }
+        catch (Exception writeException)
+        {
+            result.Passed = false;
+            result.Failure = "Result write failed: " + writeException.GetType().FullName + ": " + writeException.Message;
+            try { WriteAtomic(resultPath, result.ToJson()); } catch { }
+        }
+
+        string evidencePath = options.Get("evidence", null);
+        if (!String.IsNullOrWhiteSpace(evidencePath))
+        {
+            try { WriteAtomic(evidencePath, BuildEvidenceDocument(result)); } catch { }
+        }
+        return result;
     }
 
     private static string BuildEvidenceDocument(CanaryResult result)
