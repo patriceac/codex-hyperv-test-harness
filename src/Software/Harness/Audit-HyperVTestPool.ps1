@@ -277,9 +277,13 @@ try {
             }
             catch { $internetNatPolicyValid = $false }
         }
-        $internetVmAdapters = @($allVmNetworkAdapters | Where-Object {
+        $internetAttachedAdapters = @($allVmNetworkAdapters | Where-Object {
             [string]::Equals([string]$_.SwitchName, [string]$internetSettings.SwitchName, [StringComparison]::Ordinal)
         })
+        # Get-VMNetworkAdapter -All includes management-OS adapters. The
+        # InternetOnly gateway is required and validated separately below; the
+        # no-foreign-adapter invariant applies only to adapters owned by VMs.
+        $internetVmAdapters = @($internetAttachedAdapters | Where-Object { -not [bool]$_.IsManagementOs })
         $internetManagementAdapters = @(Get-VMNetworkAdapter -ManagementOS -SwitchName ([string]$internetSettings.SwitchName) -ErrorAction Stop)
         $internetGatewayVlan = $null
         $internetGatewayVlanValid = $false
@@ -332,6 +336,13 @@ try {
         $internetPolicyAudit = [ordered]@{
             Enabled = $true
             Checks = $internetPolicyChecks
+            AttachedAdapters = @($internetAttachedAdapters | ForEach-Object {
+                [ordered]@{
+                    Name = [string]$_.Name
+                    VmName = [string]$_.VMName
+                    IsManagementOs = [bool]$_.IsManagementOs
+                }
+            })
             GatewayVlan = $internetGatewayVlan
             GatewayVlanError = $internetGatewayVlanError
         }

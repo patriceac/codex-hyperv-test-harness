@@ -124,6 +124,8 @@ foreach ($requiredAuditContract in @(
     '-ManagementOS',
     'InternetOnlyPolicyAudit',
     'GatewayVlanError',
+    '-not [bool]$_.IsManagementOs',
+    'AttachedAdapters',
     'AllWorkerNetworksDisconnected',
     'RequestNetworkLeaseFileCount',
     'ManagedRequestNetworkAdapterCount',
