@@ -1986,12 +1986,8 @@ function Initialize-GuestRequestNetwork {
         @(Get-RequestNetworkExpectedGuestRoutePrefixes -NetworkPrefix ([string]$Runtime.NetworkPrefix) -GuestAddress ([string]$Runtime.GuestAddress) -PrefixLength ([int]$Runtime.PrefixLength))
     }
     else { @() }
-    $guestFirewallRuleName = if ([string]$Runtime.Profile -eq 'IsolatedTestNet') {
-        'CodexHarness-Isolated-' + (Get-RequestNetworkHash -Value ([string]$Runtime.RequestId)).Substring(0, 24)
-    }
-    else { '' }
     $remoteJob = Invoke-Command -Session $Session -AsJob -ErrorAction Stop -ScriptBlock {
-        param($ExpectedMac, $Profile, $GuestAddress, $PrefixLength, $GatewayAddress, $GatewayMacAddress, $DnsServers, $ExpectedConnectedPrefixes, $NetworkPrefix, $GuestFirewallRuleName)
+        param($ExpectedMac, $Profile, $GuestAddress, $PrefixLength, $GatewayAddress, $GatewayMacAddress, $DnsServers, $ExpectedConnectedPrefixes)
 
         $normalizedMac = $ExpectedMac -replace '[:-]', ''
         $deadline = [DateTime]::UtcNow.AddSeconds(30)
@@ -2050,11 +2046,8 @@ function Initialize-GuestRequestNetwork {
         } while ($addresses.Count -eq 0 -and [DateTime]::UtcNow -lt $readyDeadline)
         if ($addresses.Count -eq 0) { throw "Guest $Profile network did not obtain a preferred IPv4 address." }
 
-        $isolatedInboundFirewallRule = $null
+        $isolatedFirewallInterfaceExemption = $null
         if ($Profile -eq 'IsolatedTestNet') {
-            if ([string]::IsNullOrWhiteSpace($GuestFirewallRuleName) -or $GuestFirewallRuleName -notmatch '^CodexHarness-Isolated-[0-9a-f]{24}$') {
-                throw 'IsolatedTestNet received an invalid broker-owned guest firewall rule name.'
-            }
             $connectionProfiles = @()
             $connectionProfileDeadline = [DateTime]::UtcNow.AddSeconds(10)
             do {
@@ -2068,84 +2061,44 @@ function Initialize-GuestRequestNetwork {
             if ($connectionProfiles.Count -ne 1 -or [string]$connectionProfiles[0].NetworkCategory -ne 'Private') {
                 throw 'The isolated request adapter did not attest its request-scoped Private guest connection category.'
             }
-            $existingRules = @(Get-NetFirewallRule -Name $GuestFirewallRuleName -ErrorAction SilentlyContinue)
-            if ($existingRules.Count -gt 1) { throw 'The broker-owned isolated guest firewall rule did not resolve uniquely before creation.' }
-            if ($existingRules.Count -eq 1) {
-                Remove-NetFirewallRule -InputObject $existingRules[0] -ErrorAction Stop
+            $privateProfiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore -Name Private -ErrorAction Stop)
+            if ($privateProfiles.Count -ne 1) { throw 'The guest Private firewall profile did not resolve uniquely before isolated-interface exemption.' }
+            $previousDisabledAliases = @($privateProfiles[0].DisabledInterfaceAliases | ForEach-Object { [string]$_ } | Where-Object {
+                -not [string]::IsNullOrWhiteSpace($_) -and $_ -ne 'NotConfigured'
+            })
+            if ($previousDisabledAliases.Count -ne 0) {
+                throw 'The disposable guest entered IsolatedTestNet with an unexpected pre-existing firewall-disabled interface.'
             }
-            New-NetFirewallRule -Name $GuestFirewallRuleName -DisplayName $GuestFirewallRuleName `
-                -Description 'Ephemeral broker-owned same-cohort ingress for an isolated executable test.' `
-                -Direction Inbound -Action Allow -Enabled True -Profile Private -Protocol Any `
-                -InterfaceAlias ([string]$adapter.InterfaceAlias) -LocalAddress $GuestAddress -RemoteAddress $NetworkPrefix -ErrorAction Stop | Out-Null
-
-            $createdRules = @(Get-NetFirewallRule -PolicyStore ActiveStore -Name $GuestFirewallRuleName -ErrorAction Stop)
-            if ($createdRules.Count -ne 1) { throw 'The broker-owned isolated guest firewall rule did not resolve uniquely after creation.' }
-            $addressFilters = @($createdRules[0] | Get-NetFirewallAddressFilter -ErrorAction Stop)
-            $interfaceFilters = @($createdRules[0] | Get-NetFirewallInterfaceFilter -ErrorAction Stop)
-            $localAddresses = @($addressFilters | ForEach-Object { @($_.LocalAddress) } | ForEach-Object { [string]$_ })
-            $remoteAddresses = @($addressFilters | ForEach-Object { @($_.RemoteAddress) } | ForEach-Object { [string]$_ })
-            $interfaceAliases = @($interfaceFilters | ForEach-Object { @($_.InterfaceAlias) } | ForEach-Object { [string]$_ })
-            $enabledName = [string]$createdRules[0].Enabled
-            $directionName = [string]$createdRules[0].Direction
-            $actionName = [string]$createdRules[0].Action
-            $profileName = [string]$createdRules[0].Profile
-            $enforcementName = [string]$createdRules[0].EnforcementStatus
-            $localAddressIsExact = $localAddresses.Count -eq 1 -and (
-                [string]::Equals($localAddresses[0], $GuestAddress, [StringComparison]::OrdinalIgnoreCase) -or
-                [string]::Equals($localAddresses[0], ($GuestAddress + '/32'), [StringComparison]::OrdinalIgnoreCase)
+            Set-NetFirewallProfile -Name Private -DisabledInterfaceAliases ([string[]]@([string]$adapter.InterfaceAlias)) -ErrorAction Stop
+            $privateProfiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore -Name Private -ErrorAction Stop)
+            if ($privateProfiles.Count -ne 1) { throw 'The guest Private firewall profile did not resolve uniquely after isolated-interface exemption.' }
+            $disabledAliases = @($privateProfiles[0].DisabledInterfaceAliases | ForEach-Object { [string]$_ } | Where-Object {
+                -not [string]::IsNullOrWhiteSpace($_) -and $_ -ne 'NotConfigured'
+            })
+            $firewallProfileIsExact = (
+                [string]$privateProfiles[0].Enabled -eq 'True' -and
+                [string]$privateProfiles[0].DefaultInboundAction -eq 'Block' -and
+                $disabledAliases.Count -eq 1 -and
+                [string]::Equals($disabledAliases[0], [string]$adapter.InterfaceAlias, [StringComparison]::Ordinal)
             )
-            $networkPrefixParts = @($NetworkPrefix.Split('/'))
-            if ($networkPrefixParts.Count -ne 2 -or $networkPrefixParts[1] -ne '24') {
-                throw 'IsolatedTestNet received a non-canonical guest firewall network prefix.'
-            }
-            $providerDottedNetworkPrefix = $networkPrefixParts[0] + '/255.255.255.0'
-            $remoteAddressIsExact = $remoteAddresses.Count -eq 1 -and (
-                [string]::Equals($remoteAddresses[0], $NetworkPrefix, [StringComparison]::OrdinalIgnoreCase) -or
-                [string]::Equals($remoteAddresses[0], $providerDottedNetworkPrefix, [StringComparison]::OrdinalIgnoreCase)
-            )
-            $firewallRuleIsExact = (
-                $enabledName -eq 'True' -and
-                $directionName -eq 'Inbound' -and
-                $actionName -eq 'Allow' -and
-                $profileName -eq 'Private' -and
-                $enforcementName -like '*Enforced*' -and
-                $addressFilters.Count -eq 1 -and $interfaceFilters.Count -eq 1 -and
-                $localAddressIsExact -and
-                $remoteAddressIsExact -and
-                $interfaceAliases.Count -eq 1 -and [string]::Equals($interfaceAliases[0], [string]$adapter.InterfaceAlias, [StringComparison]::Ordinal)
-            )
-            if (-not $firewallRuleIsExact) {
+            if (-not $firewallProfileIsExact) {
                 $firewallDiagnostic = [ordered]@{
-                    Name = [string]$createdRules[0].Name
-                    Enabled = $enabledName
-                    Direction = $directionName
-                    Action = $actionName
-                    Profile = $profileName
-                    EnforcementStatus = $enforcementName
-                    AddressFilterCount = [int]$addressFilters.Count
-                    InterfaceFilterCount = [int]$interfaceFilters.Count
-                    LocalAddresses = @($localAddresses)
-                    RemoteAddresses = @($remoteAddresses)
-                    InterfaceAliases = @($interfaceAliases)
-                    ExpectedLocalAddress = $GuestAddress
-                    ExpectedRemoteAddress = $NetworkPrefix
+                    Name = [string]$privateProfiles[0].Name
+                    Enabled = [string]$privateProfiles[0].Enabled
+                    DefaultInboundAction = [string]$privateProfiles[0].DefaultInboundAction
+                    DisabledInterfaceAliases = @($disabledAliases)
                     ExpectedInterfaceAlias = [string]$adapter.InterfaceAlias
                 } | ConvertTo-Json -Depth 5 -Compress
-                throw "IsolatedTestNet did not attest its exact broker-owned same-cohort guest firewall boundary. Exact observation: $firewallDiagnostic"
+                throw "IsolatedTestNet did not attest its exact disposable guest firewall-interface exemption. Exact observation: $firewallDiagnostic"
             }
-            $isolatedInboundFirewallRule = [ordered]@{
-                Name = [string]$createdRules[0].Name
-                Direction = [string]$createdRules[0].Direction
-                Action = [string]$createdRules[0].Action
-                Enabled = [string]$createdRules[0].Enabled
-                Profile = $profileName
-                EnforcementStatus = $enforcementName
-                ConnectionProfileCategory = [string]$connectionProfiles[0].NetworkCategory
-                InterfaceAlias = [string]$interfaceAliases[0]
-                LocalAddress = [string]$localAddresses[0]
-                RemoteAddress = [string]$remoteAddresses[0]
-                Protocol = 'Any'
+            $isolatedFirewallInterfaceExemption = [ordered]@{
                 Scope = 'DisposableGuestRun'
+                Profile = [string]$privateProfiles[0].Name
+                FirewallEnabled = [string]$privateProfiles[0].Enabled
+                DefaultInboundAction = [string]$privateProfiles[0].DefaultInboundAction
+                ConnectionProfileCategory = [string]$connectionProfiles[0].NetworkCategory
+                DisabledInterfaceAliases = @($disabledAliases)
+                InterfaceAlias = [string]$adapter.InterfaceAlias
             }
         }
 
@@ -2293,10 +2246,10 @@ function Initialize-GuestRequestNetwork {
                 }
             }
             else { $null }
-            IsolatedInboundFirewallRule = $isolatedInboundFirewallRule
+            IsolatedFirewallInterfaceExemption = $isolatedFirewallInterfaceExemption
             BoundaryAttested = $true
         }
-    } -ArgumentList ([string]$Runtime.AdapterMacAddress), ([string]$Runtime.Profile), ([string]$Runtime.GuestAddress), ([int]$Runtime.PrefixLength), ([string]$Runtime.GatewayAddress), ([string]$Runtime.GatewayMacAddress), @($Runtime.DnsServers), @($expectedConnectedPrefixes), ([string]$Runtime.NetworkPrefix), $guestFirewallRuleName | Select-Object -Last 1
+    } -ArgumentList ([string]$Runtime.AdapterMacAddress), ([string]$Runtime.Profile), ([string]$Runtime.GuestAddress), ([int]$Runtime.PrefixLength), ([string]$Runtime.GatewayAddress), ([string]$Runtime.GatewayMacAddress), @($Runtime.DnsServers), @($expectedConnectedPrefixes) | Select-Object -Last 1
     try {
         while ([string]$remoteJob.State -in @('NotStarted', 'Running')) {
             if ($ActivityCheck) { & $ActivityCheck }

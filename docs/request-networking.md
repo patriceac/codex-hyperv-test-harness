@@ -15,7 +15,7 @@ Every non-`None` request uses `RunGuestJobNetworkV1`. This makes an older broker
 
 ## Lifecycle
 
-The broker writes a SYSTEM-only lease before it mutates a VM. It creates the request adapter disconnected, applies guards, private-VLAN state, and the exact weighted extended ACL set, revalidates the pinned host infrastructure, then connects the adapter last. Guest configuration and attestation complete before the application starts. For `IsolatedTestNet`, the broker classifies only the disposable request adapter as a Private guest connection and installs an active, interface/address/subnet-bound inbound allow rule so same-cohort peers can communicate; the private VM-only switch still has no host, LAN, DNS, gateway, or Internet path.
+The broker writes a SYSTEM-only lease before it mutates a VM. It creates the request adapter disconnected, applies guards, private-VLAN state, and the exact weighted extended ACL set, revalidates the pinned host infrastructure, then connects the adapter last. Guest configuration and attestation complete before the application starts. For `IsolatedTestNet`, the broker classifies only the disposable request adapter as a Private guest connection and exempts exactly that alias from the guest firewall so same-cohort tests may use arbitrary protocols; the private VM-only switch still has no host, LAN, DNS, gateway, or Internet path, and the disposable OS child is discarded after the request.
 
 During `InternetOnly`, the broker periodically verifies the NAT, switch, gateway, VLAN and ACL state, current host routes and addresses, and the complete default-route interface identity. A VPN/default-route change fails closed rather than silently changing the approved egress boundary.
 
