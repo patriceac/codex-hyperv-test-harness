@@ -1064,6 +1064,7 @@ function Invoke-GuestRequest {
     $requestNetworkRuntime = $null
     $requestNetworkAttachment = $null
     $requestNetworkConnection = $null
+    $requestNetworkResidueCleanup = $null
     $requestNetworkGuestEvidence = $null
     $requestNetworkPrelaunchHostEvidence = $null
     $requestNetworkLastHostEvidence = $null
@@ -1303,6 +1304,10 @@ function Invoke-GuestRequest {
         $guestState = Wait-GuestSession -VmName $vmName -Credential $credential -NotBeforeUtc $vmStartUtc -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
 
         $session = Open-GuestSessionReliable -VmName $vmName -Credential $credential -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
+        $failureStage = 'NormalizingGuestNetwork'
+        $activityCheck = { Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc }
+        $requestNetworkResidueCleanup = Reset-GuestRequestNetworkResidue -Session $session -Policy $requestNetworkDefinition.Policy -ActivityCheck $activityCheck
+        Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
         if ($requestNetworkRuntime) {
             $failureStage = 'VerifyingNetwork'
             Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
@@ -1313,7 +1318,6 @@ function Invoke-GuestRequest {
             Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
             $requestNetworkLastHostEvidence = $requestNetworkConnection.HostPolicyCheck
             $requestNetworkHostPolicyCheckCount++
-            $activityCheck = { Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc }
             $requestNetworkGuestEvidence = Initialize-GuestRequestNetwork -Session $session -Runtime $requestNetworkRuntime -ActivityCheck $activityCheck
             Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
             $requestNetworkPrelaunchHostEvidence = Assert-RequestNetworkHostPolicyCurrent -Runtime $requestNetworkRuntime -BrokerRoot $BrokerRoot
@@ -2193,6 +2197,7 @@ function Invoke-GuestRequest {
                 AllowedRemoteAddress = if ($requestNetworkRuntime) { [string]$requestNetworkRuntime.AllowedRemoteAddress } else { $null }
                 AllowedRemoteMacAddress = if ($requestNetworkRuntime) { [string]$requestNetworkRuntime.AllowedRemoteMacAddress } else { $null }
                 DenyRemotePrefixes = if ($requestNetworkRuntime) { @($requestNetworkRuntime.DenyRemotePrefixes) } else { @() }
+                ResidueCleanup = $requestNetworkResidueCleanup
                 AdapterEnforcement = $requestNetworkAttachment
                 Connection = $requestNetworkConnection
                 HostPolicyChecks = [ordered]@{

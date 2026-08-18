@@ -45,6 +45,7 @@ function Assert-FailClosedExternalProfiles {
 }
 
 $configurationPath = Join-Path $RepositoryRoot 'setup\New-HarnessConfiguration.ps1'
+$brokerPath = Join-Path $RepositoryRoot 'src\Software\Harness\HostBroker.ps1'
 $installerPath = Join-Path $RepositoryRoot 'src\Software\Harness\Install-PoolHostBroker.ps1'
 $poolBrokerPath = Join-Path $RepositoryRoot 'src\Software\Harness\PoolBroker.ps1'
 $poolLifecyclePath = Join-Path $RepositoryRoot 'src\Software\Harness\PoolLifecycle.ps1'
@@ -85,6 +86,20 @@ Assert-True ($installerText.Contains("'RequestNetwork.ps1'")) 'Broker installati
 Assert-True ($installerText.Contains("`$layout.PSObject.Properties['RequestNetworkPolicy']") -and $installerText.Contains('RequestNetworkPolicy = $requestNetworkPolicy')) 'Broker installation does not propagate the layout request-network policy.'
 Assert-True (-not $fallbackFunction[0].Extent.Text.Contains('Default Switch') -and -not $fallbackFunction[0].Extent.Text.Contains('New-NetNat')) 'The fallback policy infers host networking.'
 $scenarios.Add('installer-copies-module-and-private-policy')
+
+$brokerText = Get-Content -LiteralPath $brokerPath -Raw
+$brokerSessionIndex = $brokerText.IndexOf('$session = Open-GuestSessionReliable', [StringComparison]::Ordinal)
+$brokerResidueCleanupIndex = $brokerText.IndexOf('Reset-GuestRequestNetworkResidue -Session $session -Policy $requestNetworkDefinition.Policy', [StringComparison]::Ordinal)
+$brokerNetworkConnectIndex = $brokerText.IndexOf('Connect-RequestVmNetwork -Runtime $requestNetworkRuntime', [StringComparison]::Ordinal)
+$brokerGuestInitializeIndex = $brokerText.IndexOf('Initialize-GuestRequestNetwork -Session $session -Runtime $requestNetworkRuntime', [StringComparison]::Ordinal)
+Assert-True (
+    $brokerSessionIndex -ge 0 -and
+    $brokerResidueCleanupIndex -gt $brokerSessionIndex -and
+    $brokerNetworkConnectIndex -gt $brokerResidueCleanupIndex -and
+    $brokerGuestInitializeIndex -gt $brokerNetworkConnectIndex -and
+    $brokerText.Contains('ResidueCleanup = $requestNetworkResidueCleanup')
+) 'HostBroker does not normalize exact guest network residue before connect-last or persist its attestation.'
+$scenarios.Add('broker-normalizes-guest-network-residue-before-connect-last')
 
 $poolBrokerText = Get-Content -LiteralPath $poolBrokerPath -Raw
 $orphanRecoveryCalls = [regex]::Matches($poolBrokerText, 'Recover-OrphanedRequestNetworkResources\s+-BrokerRoot\s+\$BrokerRoot')
@@ -156,7 +171,7 @@ foreach ($requiredRecoveryPath in @(
 }
 $scenarios.Add('recovery-bundle-requires-complete-network-source-runtime-and-canary')
 
-foreach ($path in @($configurationPath, $installerPath, $poolBrokerPath, $poolLifecyclePath, $auditPath, $recoveryVerifierPath, $PSCommandPath)) {
+foreach ($path in @($configurationPath, $brokerPath, $installerPath, $poolBrokerPath, $poolLifecyclePath, $auditPath, $recoveryVerifierPath, $PSCommandPath)) {
     $parseTokens = $null
     $parseIssues = $null
     [void][Management.Automation.Language.Parser]::ParseFile($path, [ref]$parseTokens, [ref]$parseIssues)

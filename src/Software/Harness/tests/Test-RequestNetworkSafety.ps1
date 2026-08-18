@@ -572,6 +572,7 @@ $brokerPrepare = $brokerText.IndexOf('Prepare-RequestVmNetwork -Runtime $request
 $brokerStartVm = $brokerText.IndexOf('Start-VM -Name $vmName', $brokerPrepare, [StringComparison]::Ordinal)
 $brokerWaitGuest = $brokerText.IndexOf('Wait-GuestSession -VmName $vmName', $brokerStartVm, [StringComparison]::Ordinal)
 $brokerGuestSession = $brokerText.IndexOf('$session = Open-GuestSessionReliable', $brokerPrepare, [StringComparison]::Ordinal)
+$brokerResidueCleanup = $brokerText.IndexOf('Reset-GuestRequestNetworkResidue -Session $session -Policy $requestNetworkDefinition.Policy', $brokerGuestSession, [StringComparison]::Ordinal)
 $brokerConnect = $brokerText.IndexOf('Connect-RequestVmNetwork -Runtime $requestNetworkRuntime', $brokerGuestSession, [StringComparison]::Ordinal)
 $brokerInitGuest = $brokerText.IndexOf('Initialize-GuestRequestNetwork -Session $session -Runtime $requestNetworkRuntime', $brokerConnect, [StringComparison]::Ordinal)
 Assert-True (
@@ -582,7 +583,8 @@ Assert-True (
     $brokerStartVm -gt $brokerPrepare -and
     $brokerWaitGuest -gt $brokerStartVm -and
     $brokerGuestSession -gt $brokerWaitGuest -and
-    $brokerConnect -gt $brokerGuestSession -and
+    $brokerResidueCleanup -gt $brokerGuestSession -and
+    $brokerConnect -gt $brokerResidueCleanup -and
     $brokerInitGuest -gt $brokerConnect
 ) 'The lease-first, disconnected preparation, guest wait, connect-last sequence is not enforced.'
 $scenarios.Add('lease-first-connect-last')
@@ -964,6 +966,22 @@ Assert-True (
     $moduleText.Contains('ConnectedRoutes = @($connectedRoutes')
 ) 'Guest route attestation does not reject extra routes or return the exact route set.'
 $scenarios.Add('guest-routes-are-exact-and-returned')
+$residueCleanupStart = $moduleText.IndexOf('function Reset-GuestRequestNetworkResidue', [StringComparison]::Ordinal)
+$residuePersistentQuery = $moduleText.IndexOf('Get-NetRoute -AddressFamily IPv4 -PolicyStore PersistentStore -ErrorAction Stop', $residueCleanupStart, [StringComparison]::Ordinal)
+$residueExactDestination = $moduleText.IndexOf("[string]::Equals([string]`$_.DestinationPrefix, '0.0.0.0/0', [StringComparison]::Ordinal)", $residuePersistentQuery, [StringComparison]::Ordinal)
+$residueExactGateway = $moduleText.IndexOf('[string]::Equals([string]$_.NextHop, $PinnedGatewayAddress, [StringComparison]::Ordinal)', $residueExactDestination, [StringComparison]::Ordinal)
+$residueRemove = $moduleText.IndexOf('Remove-NetRoute -InputObject $route -Confirm:$false -ErrorAction Stop', $residueExactGateway, [StringComparison]::Ordinal)
+$residueRequery = $moduleText.IndexOf('Get-NetRoute -AddressFamily IPv4 -PolicyStore PersistentStore -ErrorAction Stop', $residueRemove, [StringComparison]::Ordinal)
+Assert-True (
+    $residueCleanupStart -ge 0 -and
+    $residuePersistentQuery -gt $residueCleanupStart -and
+    $residueExactDestination -gt $residuePersistentQuery -and
+    $residueExactGateway -gt $residueExactDestination -and
+    $residueRemove -gt $residueExactGateway -and
+    $residueRequery -gt $residueRemove -and
+    $brokerText.Contains('ResidueCleanup = $requestNetworkResidueCleanup')
+) 'Guest residue cleanup is not limited to the exact broker-owned persistent InternetOnly default route or is not attested.'
+$scenarios.Add('guest-persistent-route-residue-is-exact-and-attested')
 $guestInitStart = $moduleText.IndexOf('function Initialize-GuestRequestNetwork', [StringComparison]::Ordinal)
 $guestJob = $moduleText.IndexOf('Invoke-Command -Session $Session -AsJob -ErrorAction Stop', $guestInitStart, [StringComparison]::Ordinal)
 $guestPreCheck = $moduleText.IndexOf('if ($ActivityCheck) { & $ActivityCheck }', $guestInitStart, [StringComparison]::Ordinal)

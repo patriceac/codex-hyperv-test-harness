@@ -1846,6 +1846,81 @@ function Connect-RequestVmNetwork {
     }
 }
 
+function Reset-GuestRequestNetworkResidue {
+    param(
+        [Parameter(Mandatory = $true)] [Management.Automation.Runspaces.PSSession] $Session,
+        [Parameter(Mandatory = $true)] $Policy,
+        [scriptblock] $ActivityCheck
+    )
+
+    if ($ActivityCheck) { & $ActivityCheck }
+    $internetOnly = Get-RequestNetworkObjectPropertyValue -Value $Policy -Name 'InternetOnly'
+    $gatewayAddress = [string](Get-RequestNetworkObjectPropertyValue -Value $internetOnly -Name 'GatewayAddress')
+    if ([string]::IsNullOrWhiteSpace($gatewayAddress)) {
+        return [pscustomobject][ordered]@{
+            Attempted = $false
+            Success = $true
+            GatewayAddress = $null
+            RemovedPersistentDefaultRouteCount = 0
+            RemainingPersistentDefaultRouteCount = 0
+        }
+    }
+    try {
+        $parsedGateway = [Net.IPAddress]::Parse($gatewayAddress)
+        if ($parsedGateway.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) { throw 'not IPv4' }
+        $gatewayAddress = $parsedGateway.ToString()
+    }
+    catch { throw 'InternetOnly.GatewayAddress is not a valid IPv4 address for guest residue cleanup.' }
+
+    $remoteJob = Invoke-Command -Session $Session -AsJob -ErrorAction Stop -ScriptBlock {
+        param($PinnedGatewayAddress)
+
+        $matchingRoutes = @(
+            Get-NetRoute -AddressFamily IPv4 -PolicyStore PersistentStore -ErrorAction Stop |
+                Where-Object {
+                    [string]::Equals([string]$_.DestinationPrefix, '0.0.0.0/0', [StringComparison]::Ordinal) -and
+                    [string]::Equals([string]$_.NextHop, $PinnedGatewayAddress, [StringComparison]::Ordinal)
+                }
+        )
+        foreach ($route in $matchingRoutes) {
+            Remove-NetRoute -InputObject $route -Confirm:$false -ErrorAction Stop
+        }
+        $remainingRoutes = @(
+            Get-NetRoute -AddressFamily IPv4 -PolicyStore PersistentStore -ErrorAction Stop |
+                Where-Object {
+                    [string]::Equals([string]$_.DestinationPrefix, '0.0.0.0/0', [StringComparison]::Ordinal) -and
+                    [string]::Equals([string]$_.NextHop, $PinnedGatewayAddress, [StringComparison]::Ordinal)
+                }
+        )
+        if ($remainingRoutes.Count -ne 0) {
+            throw 'The exact broker-owned InternetOnly persistent default route remained after guest cleanup.'
+        }
+        [pscustomobject][ordered]@{
+            Attempted = $true
+            Success = $true
+            GatewayAddress = $PinnedGatewayAddress
+            RemovedPersistentDefaultRouteCount = $matchingRoutes.Count
+            RemainingPersistentDefaultRouteCount = $remainingRoutes.Count
+        }
+    } -ArgumentList $gatewayAddress | Select-Object -Last 1
+    try {
+        while ([string]$remoteJob.State -in @('NotStarted', 'Running')) {
+            if ($ActivityCheck) { & $ActivityCheck }
+            $null = Wait-Job -Job $remoteJob -Timeout 1
+        }
+        if ($ActivityCheck) { & $ActivityCheck }
+        $result = Receive-Job -Job $remoteJob -Wait -ErrorAction Stop | Select-Object -Last 1
+        if (-not $result -or -not [bool]$result.Success -or [int]$result.RemainingPersistentDefaultRouteCount -ne 0) {
+            throw 'Guest request-network residue cleanup did not produce a positive zero-residue attestation.'
+        }
+        $result
+    }
+    finally {
+        if ([string]$remoteJob.State -in @('NotStarted', 'Running')) { Stop-Job -Job $remoteJob -ErrorAction SilentlyContinue }
+        Remove-Job -Job $remoteJob -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Initialize-GuestRequestNetwork {
     param(
         [Parameter(Mandatory = $true)] [Management.Automation.Runspaces.PSSession] $Session,
