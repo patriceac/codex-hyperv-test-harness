@@ -13,15 +13,21 @@ function Assert-True {
 }
 
 $scriptPath = Join-Path $RepositoryRoot 'setup\Update-RequestNetworking.ps1'
+$infrastructurePath = Join-Path $RepositoryRoot 'setup\Prepare-RequestNetworkInfrastructure.ps1'
 $setupSkillPath = Join-Path $RepositoryRoot '.agents\skills\setup-hyperv-harness\SKILL.md'
 $recoveryVerifierPath = Join-Path $RepositoryRoot 'src\Software\Recovery\Test-CodexHyperVRecovery.ps1'
 $text = Get-Content -Raw -LiteralPath $scriptPath
+$infrastructureText = Get-Content -Raw -LiteralPath $infrastructurePath
 $setupSkillText = Get-Content -Raw -LiteralPath $setupSkillPath
 $recoveryVerifierText = Get-Content -Raw -LiteralPath $recoveryVerifierPath
 $tokens = $null
 $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors)
 if ($errors.Count -gt 0) { throw "Update-RequestNetworking.ps1 has a parse error: $($errors[0].Message)" }
+$infraTokens = $null
+$infraErrors = $null
+[void][Management.Automation.Language.Parser]::ParseFile($infrastructurePath, [ref]$infraTokens, [ref]$infraErrors)
+if ($infraErrors.Count -gt 0) { throw "Prepare-RequestNetworkInfrastructure.ps1 has a parse error: $($infraErrors[0].Message)" }
 $scenarios = New-Object Collections.Generic.List[string]
 
 $planBranch = @($ast.FindAll({ param($node) $node -is [Management.Automation.Language.IfStatementAst] }, $true) | Where-Object {
@@ -75,6 +81,28 @@ $scenarios.Add('deployment-is-transactional-and-stops-before-claiming-live-proof
 Assert-True ($setupSkillText.Contains('Update-RequestNetworking.ps1') -and $setupSkillText.Contains('approved fingerprint') -and $setupSkillText.Contains('separate approval')) 'The setup skill does not preserve the two-gate request-network workflow.'
 Assert-True ($recoveryVerifierText.Contains("'Software\Setup\Update-RequestNetworking.ps1'")) 'Recovery verification does not require the request-network updater.'
 $scenarios.Add('setup-and-recovery-contracts-carry-the-updater')
+
+foreach ($requiredInfrastructureContract in @(
+    'Get-RequestNetworkInfrastructurePlan',
+    'ApprovedPlanFingerprint',
+    'NoMutationPerformed',
+    'New-VMSwitch @createInternet',
+    'New-VMSwitch @createTrusted',
+    'Set-VMNetworkAdapterVlan -VMNetworkAdapter $management[0] -Promiscuous',
+    'New-NetNat -Name $InternetNatName',
+    'Preserve all unrelated switches, NATs, VMs, adapters, routes, and firewall rules.',
+    'PreparedForBrokerPolicyPlan',
+    'RolledBack'
+)) {
+    Assert-True ($infrastructureText.Contains($requiredInfrastructureContract)) "Infrastructure preparation contract is missing: $requiredInfrastructureContract"
+}
+$infraPlanIndex = $infrastructureText.IndexOf('if ($PlanOnly)', [StringComparison]::Ordinal)
+$infraMutationIndex = $infrastructureText.IndexOf('New-VMSwitch @createInternet', [StringComparison]::Ordinal)
+Assert-True ($infraPlanIndex -ge 0 -and $infraMutationIndex -gt $infraPlanIndex) 'Infrastructure PlanOnly does not precede its first host mutation.'
+Assert-True (-not $infrastructureText.Contains('Get-VMSwitch | Remove-VMSwitch') -and -not $infrastructureText.Contains('Get-NetNat | Remove-NetNat')) 'Infrastructure rollback contains an unscoped destructive pipeline.'
+Assert-True ($text.Contains('Prepare-RequestNetworkInfrastructure.ps1')) 'The broker updater does not stage or bind the infrastructure preparation source.'
+Assert-True ($recoveryVerifierText.Contains("'Software\Setup\Prepare-RequestNetworkInfrastructure.ps1'")) 'Recovery verification does not require the infrastructure preparation script.'
+$scenarios.Add('fingerprinted-infrastructure-preparation-is-scoped-and-recoverable')
 
 [pscustomobject][ordered]@{
     Success = $true

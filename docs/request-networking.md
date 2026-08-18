@@ -53,6 +53,19 @@ Run the non-elevated discovery preflight with explicit intent:
 
 This call never elevates or writes. If Hyper-V identity is unavailable to the unelevated account, it reports that limitation and returns no approval fingerprint. An elevated read-only pass, separately approved, must resolve exact switch, management-adapter, NAT, gateway, VLAN, physical-uplink, route, and idle-pool identities. A fully populated local policy can then be supplied with `-PolicyPath`; only an approval-ready plan receives a fingerprint.
 
+When the pinned switches, gateway PVLAN, or WinNAT are not yet prepared, first run the reusable infrastructure planner with preselected switch GUIDs:
+
+```powershell
+& .\setup\Prepare-RequestNetworkInfrastructure.ps1 `
+  -InstallRoot '<EXACT_INSTALL_ROOT>' `
+  -InternetSwitchId '<PRESELECTED-INTERNAL-SWITCH-GUID>' `
+  -TrustedLanSwitchId '<PRESELECTED-EXTERNAL-SWITCH-GUID>' `
+  -TrustedLanPhysicalAdapterName '<EXACT-PHYSICAL-ADAPTER-NAME>' `
+  -PlanOnly
+```
+
+Run that approval-ready plan elevated but still read-only, review its exact fingerprint, then pass the fingerprint without PlanOnly. Preparation creates only missing named infrastructure, writes the private policy under the installed Live\Setup tree, and stops for the separate transactional broker-policy plan. A failed preparation removes only objects created by that transaction and restores a gateway VLAN it changed from untagged. It never removes or repurposes an unrelated switch, NAT, VM adapter, route, or firewall rule. Creating an external switch with management-OS sharing can briefly interrupt the host uplink.
+
 Applying that exact fingerprint overlays the reviewed broker source, replaces only `RequestNetworkPolicy` in the installed v1 configuration, transactionally reinstalls the broker, refreshes the runtime skill, runs the privileged idle-pool audit, and retains the rollback snapshot through live acceptance and recovery refresh. It deliberately does not create or reconfigure switches, NAT, firewall, VLAN, or gateway state; those are separate host-infrastructure mutations in the reviewed live plan.
 
 ## Live acceptance

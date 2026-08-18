@@ -49,6 +49,7 @@ try {
         'Codex\AGENTS.md',
         'Software\harness-config.json',
         'Software\Setup\Update-RequestNetworking.ps1',
+        'Software\Setup\Prepare-RequestNetworkInfrastructure.ps1',
         'Software\Harness\HostBroker.ps1',
         'Software\Harness\HostInputShare.ps1',
         'Software\Harness\RequestNetwork.ps1',

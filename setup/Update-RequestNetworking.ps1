@@ -140,6 +140,7 @@ function Get-RequestNetworkingSourceIdentity {
     $hashes['Skill\SKILL.md'] = Get-RequestNetworkingFileHash -Path (Join-Path $checkoutSkillRoot 'SKILL.md')
     $hashes['Skill\scripts\Invoke-HyperVExecutableTest.ps1'] = Get-RequestNetworkingFileHash -Path (Join-Path $checkoutSkillRoot 'scripts\Invoke-HyperVExecutableTest.ps1')
     $hashes['Setup\Update-RequestNetworking.ps1'] = Get-RequestNetworkingFileHash -Path $PSCommandPath
+    $hashes['Setup\Prepare-RequestNetworkInfrastructure.ps1'] = Get-RequestNetworkingFileHash -Path (Join-Path $PSScriptRoot 'Prepare-RequestNetworkInfrastructure.ps1')
     $hashes
 }
 
@@ -419,6 +420,7 @@ try {
     Copy-Item -Path (Join-Path $checkoutSkillRoot '*') -Destination $installedSkillSourceRoot -Recurse -Force
     New-Item -ItemType Directory -Force -Path $installedSetupRoot | Out-Null
     Copy-Item -LiteralPath $PSCommandPath -Destination (Join-Path $installedSetupRoot 'Update-RequestNetworking.ps1') -Force
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Prepare-RequestNetworkInfrastructure.ps1') -Destination (Join-Path $installedSetupRoot 'Prepare-RequestNetworkInfrastructure.ps1') -Force
     $installedConfig = Get-Content -Raw -LiteralPath $installedConfigPath | ConvertFrom-Json
     $installedConfig | Add-Member -NotePropertyName RequestNetworkPolicy -NotePropertyValue $policy -Force
     Write-RequestNetworkingJsonAtomic -Path $installedConfigPath -Value $installedConfig
