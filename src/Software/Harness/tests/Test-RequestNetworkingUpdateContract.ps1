@@ -78,6 +78,17 @@ Assert-True (
 ) 'Deployment does not preserve rollback material through post-install audit, live proof, and recovery refresh.'
 $scenarios.Add('deployment-is-transactional-and-stops-before-claiming-live-proof')
 
+Assert-True (
+    $text.Contains("'Canaries\NetworkBoundaryCanary.cs'") -and
+    $text.Contains("'Canaries\NetworkBoundaryCanary.exe'") -and
+    $text.Contains("'Recovery\Test-CodexHyperVRecovery.ps1'") -and
+    $text.Contains("Join-Path `$backupRoot 'Canaries'") -and
+    $text.Contains("Join-Path `$backupRoot 'Recovery'") -and
+    $text.Contains("Join-Path `$checkoutCanariesRoot 'NetworkBoundaryCanary.exe'") -and
+    $text.Contains("Join-Path `$checkoutRecoveryRoot 'Test-CodexHyperVRecovery.ps1'")
+) 'The live update does not source-bind, stage, and preserve rollback for its network canary and recovery verifier.'
+$scenarios.Add('live-update-carries-network-canary-and-recovery-contract')
+
 Assert-True ($setupSkillText.Contains('Update-RequestNetworking.ps1') -and $setupSkillText.Contains('approved fingerprint') -and $setupSkillText.Contains('separate approval')) 'The setup skill does not preserve the two-gate request-network workflow.'
 Assert-True ($recoveryVerifierText.Contains("'Software\Setup\Update-RequestNetworking.ps1'")) 'Recovery verification does not require the request-network updater.'
 $scenarios.Add('setup-and-recovery-contracts-carry-the-updater')

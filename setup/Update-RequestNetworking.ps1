@@ -30,9 +30,13 @@ $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $repositoryRoot = [IO.Path]::GetFullPath($repositoryRoot).TrimEnd('\')
 $checkoutHarnessRoot = Join-Path $repositoryRoot 'src\Software\Harness'
 $checkoutSkillRoot = Join-Path $repositoryRoot 'src\Software\Skill'
+$checkoutCanariesRoot = Join-Path $repositoryRoot 'src\Software\Canaries'
+$checkoutRecoveryRoot = Join-Path $repositoryRoot 'src\Software\Recovery'
 $installedSoftwareRoot = Join-Path $InstallRoot 'Software'
 $installedConfigPath = Join-Path $installedSoftwareRoot 'harness-config.json'
 $installedSetupRoot = Join-Path $installedSoftwareRoot 'Setup'
+$installedCanariesRoot = Join-Path $installedSoftwareRoot 'Canaries'
+$installedRecoveryRoot = Join-Path $installedSoftwareRoot 'Recovery'
 
 if ([string]::IsNullOrWhiteSpace($TargetUserProfile)) { $TargetUserProfile = $env:USERPROFILE }
 $TargetUserProfile = [IO.Path]::GetFullPath($TargetUserProfile).TrimEnd('\')
@@ -139,6 +143,9 @@ function Get-RequestNetworkingSourceIdentity {
     }
     $hashes['Skill\SKILL.md'] = Get-RequestNetworkingFileHash -Path (Join-Path $checkoutSkillRoot 'SKILL.md')
     $hashes['Skill\scripts\Invoke-HyperVExecutableTest.ps1'] = Get-RequestNetworkingFileHash -Path (Join-Path $checkoutSkillRoot 'scripts\Invoke-HyperVExecutableTest.ps1')
+    $hashes['Canaries\NetworkBoundaryCanary.cs'] = Get-RequestNetworkingFileHash -Path (Join-Path $checkoutCanariesRoot 'NetworkBoundaryCanary.cs')
+    $hashes['Canaries\NetworkBoundaryCanary.exe'] = Get-RequestNetworkingFileHash -Path (Join-Path $checkoutCanariesRoot 'NetworkBoundaryCanary.exe')
+    $hashes['Recovery\Test-CodexHyperVRecovery.ps1'] = Get-RequestNetworkingFileHash -Path (Join-Path $checkoutRecoveryRoot 'Test-CodexHyperVRecovery.ps1')
     $hashes['Setup\Update-RequestNetworking.ps1'] = Get-RequestNetworkingFileHash -Path $PSCommandPath
     $hashes['Setup\Prepare-RequestNetworkInfrastructure.ps1'] = Get-RequestNetworkingFileHash -Path (Join-Path $PSScriptRoot 'Prepare-RequestNetworkInfrastructure.ps1')
     $hashes
@@ -340,6 +347,7 @@ function Get-RequestNetworkingPlan {
         Infrastructure = $infrastructure
         PersistentHostChangesOnApply = @(
             'Overlay the reviewed request-network broker source into the installed Software tree.',
+            'Stage the source-bound network boundary canary and recovery verifier into the installed Software tree.',
             'Replace only RequestNetworkPolicy in the installed v1 harness configuration.',
             'Transactionally reinstall and restart the ACL-restricted SYSTEM broker.',
             'Refresh the target user runtime skill after broker verification.'
@@ -397,6 +405,8 @@ if (-not (Test-RequestNetworkingAdministrator)) {
 
 $installedHarnessRoot = Assert-RequestNetworkingPathWithinRoot -Path ([string]$layout.HarnessSourceRoot) -Root $InstallRoot -Context 'HarnessSourceRoot'
 $installedSkillSourceRoot = Assert-RequestNetworkingPathWithinRoot -Path ([string]$layout.SkillSourceRoot) -Root $InstallRoot -Context 'SkillSourceRoot'
+$installedCanariesRoot = Assert-RequestNetworkingPathWithinRoot -Path $installedCanariesRoot -Root $InstallRoot -Context 'CanariesRoot'
+$installedRecoveryRoot = Assert-RequestNetworkingPathWithinRoot -Path $installedRecoveryRoot -Root $InstallRoot -Context 'RecoverySourceRoot'
 $poolDefinitionPath = Join-Path $installedHarnessRoot 'pool-definition.json'
 if (-not (Test-Path -LiteralPath $poolDefinitionPath -PathType Leaf)) { throw "Installed pool definition is missing: $poolDefinitionPath" }
 $skillDestination = Join-Path $TargetUserProfile '.agents\skills\hyperv-test-executables'
@@ -410,6 +420,8 @@ try {
     Copy-Item -LiteralPath $installedConfigPath -Destination (Join-Path $backupRoot 'harness-config.json') -Force
     Copy-Item -LiteralPath $installedHarnessRoot -Destination (Join-Path $backupRoot 'Harness') -Recurse -Force
     Copy-Item -LiteralPath $installedSkillSourceRoot -Destination (Join-Path $backupRoot 'SkillSource') -Recurse -Force
+    Copy-Item -LiteralPath $installedCanariesRoot -Destination (Join-Path $backupRoot 'Canaries') -Recurse -Force
+    Copy-Item -LiteralPath $installedRecoveryRoot -Destination (Join-Path $backupRoot 'Recovery') -Recurse -Force
     if ($skillExisted) { Copy-Item -LiteralPath $skillDestination -Destination (Join-Path $backupRoot 'UserSkill') -Recurse -Force }
 
     # Arm rollback before the first installed-file mutation. A failed or
@@ -418,6 +430,9 @@ try {
     $installedSourceMutated = $true
     Copy-Item -Path (Join-Path $checkoutHarnessRoot '*') -Destination $installedHarnessRoot -Recurse -Force
     Copy-Item -Path (Join-Path $checkoutSkillRoot '*') -Destination $installedSkillSourceRoot -Recurse -Force
+    Copy-Item -LiteralPath (Join-Path $checkoutCanariesRoot 'NetworkBoundaryCanary.cs') -Destination $installedCanariesRoot -Force
+    Copy-Item -LiteralPath (Join-Path $checkoutCanariesRoot 'NetworkBoundaryCanary.exe') -Destination $installedCanariesRoot -Force
+    Copy-Item -LiteralPath (Join-Path $checkoutRecoveryRoot 'Test-CodexHyperVRecovery.ps1') -Destination $installedRecoveryRoot -Force
     New-Item -ItemType Directory -Force -Path $installedSetupRoot | Out-Null
     Copy-Item -LiteralPath $PSCommandPath -Destination (Join-Path $installedSetupRoot 'Update-RequestNetworking.ps1') -Force
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Prepare-RequestNetworkInfrastructure.ps1') -Destination (Join-Path $installedSetupRoot 'Prepare-RequestNetworkInfrastructure.ps1') -Force
@@ -454,6 +469,8 @@ catch {
             Copy-Item -LiteralPath (Join-Path $backupRoot 'harness-config.json') -Destination $installedConfigPath -Force
             Invoke-RequestNetworkingMirror -Source (Join-Path $backupRoot 'Harness') -Destination $installedHarnessRoot
             Invoke-RequestNetworkingMirror -Source (Join-Path $backupRoot 'SkillSource') -Destination $installedSkillSourceRoot
+            Invoke-RequestNetworkingMirror -Source (Join-Path $backupRoot 'Canaries') -Destination $installedCanariesRoot
+            Invoke-RequestNetworkingMirror -Source (Join-Path $backupRoot 'Recovery') -Destination $installedRecoveryRoot
             if ($skillExisted) {
                 Invoke-RequestNetworkingMirror -Source (Join-Path $backupRoot 'UserSkill') -Destination $skillDestination
             }
