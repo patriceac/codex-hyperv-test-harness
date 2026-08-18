@@ -2015,7 +2015,6 @@ function Initialize-GuestRequestNetwork {
                 AddressFamily = 'IPv4'
                 ErrorAction = 'Stop'
             }
-            if ($Profile -eq 'InternetOnly') { $addressParameters.DefaultGateway = [string]$GatewayAddress }
             New-NetIPAddress @addressParameters | Out-Null
             if ($Profile -eq 'InternetOnly') {
                 $normalizedGatewayMac = ($GatewayMacAddress -replace '[:-]', '').ToUpperInvariant()
@@ -2103,6 +2102,7 @@ function Initialize-GuestRequestNetwork {
                 } | ConvertTo-Json -Depth 6 -Compress
                 throw "InternetOnly did not attest the permanent pinned gateway neighbor after bounded convergence. Exact observation: $diagnostic"
             }
+            New-NetRoute -InterfaceIndex $adapter.ifIndex -DestinationPrefix '0.0.0.0/0' -NextHop $GatewayAddress -PolicyStore ActiveStore -RouteMetric 256 -ErrorAction Stop | Out-Null
             Set-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -ServerAddresses @($DnsServers) -ErrorAction Stop
         }
 
@@ -2171,7 +2171,15 @@ function Initialize-GuestRequestNetwork {
             DefaultRoutes = @($defaultRoutes | ForEach-Object { [ordered]@{ DestinationPrefix = [string]$_.DestinationPrefix; NextHop = [string]$_.NextHop; RouteMetric = [int]$_.RouteMetric } })
             DnsServers = @($dns)
             IPv6BindingEnabled = if ($ipv6Bindings.Count -eq 1) { [bool]$ipv6Bindings[0].Enabled } else { $null }
-            GatewayNeighbor = if ($Profile -eq 'InternetOnly') { $gatewayNeighbors[0] | Select-Object IPAddress, LinkLayerAddress, State } else { $null }
+            GatewayNeighbor = if ($Profile -eq 'InternetOnly') {
+                [ordered]@{
+                    IPAddress = [string]$gatewayNeighbors[0].IPAddress
+                    LinkLayerAddress = [string]$gatewayNeighbors[0].LinkLayerAddress
+                    StateName = [string]$finalGatewayStateName
+                    StateValue = [int]$finalGatewayStateValue
+                }
+            }
+            else { $null }
             BoundaryAttested = $true
         }
     } -ArgumentList ([string]$Runtime.AdapterMacAddress), ([string]$Runtime.Profile), ([string]$Runtime.GuestAddress), ([int]$Runtime.PrefixLength), ([string]$Runtime.GatewayAddress), ([string]$Runtime.GatewayMacAddress), @($Runtime.DnsServers), @($expectedConnectedPrefixes) | Select-Object -Last 1

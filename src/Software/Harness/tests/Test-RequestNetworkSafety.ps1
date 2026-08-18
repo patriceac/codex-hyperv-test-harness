@@ -1002,6 +1002,7 @@ $guestNeighborDeadline = $guestInitText.IndexOf('$neighborDeadline = [DateTime]:
 $guestNeighborExactState = $guestInitText.IndexOf("[string]::Equals(`$observedGatewayStateName, 'Permanent', [StringComparison]::Ordinal)", [StringComparison]::Ordinal)
 $guestNeighborNumericState = $guestInitText.IndexOf('$observedGatewayStateValue -eq 6', [StringComparison]::Ordinal)
 $guestNeighborDiagnostic = $guestInitText.IndexOf('Exact observation: $diagnostic', [StringComparison]::Ordinal)
+$guestActiveDefaultRoute = $guestInitText.IndexOf("New-NetRoute -InterfaceIndex `$adapter.ifIndex -DestinationPrefix '0.0.0.0/0' -NextHop `$GatewayAddress -PolicyStore ActiveStore", [StringComparison]::Ordinal)
 Assert-True (
     $guestPreferredReady -ge 0 -and
     $guestNeighborCreate -gt $guestPreferredReady -and
@@ -1009,9 +1010,14 @@ Assert-True (
     $guestNeighborExactState -gt $guestNeighborDeadline -and
     $guestNeighborNumericState -gt $guestNeighborExactState -and
     $guestNeighborDiagnostic -gt $guestNeighborNumericState -and
-    $guestDnsEnable -gt $guestNeighborDiagnostic -and
-    $guestInitText.Contains('lost the attested permanent pinned gateway neighbor before guest launch')
-) 'InternetOnly does not pin the gateway after address convergence, before DNS, with bounded exact provider attestation and diagnostics.'
+    $guestActiveDefaultRoute -gt $guestNeighborDiagnostic -and
+    $guestDnsEnable -gt $guestActiveDefaultRoute -and
+    -not $guestInitText.Contains('$addressParameters.DefaultGateway') -and
+    $guestInitText.Contains('lost the attested permanent pinned gateway neighbor before guest launch') -and
+    $guestInitText.Contains('StateName = [string]$finalGatewayStateName') -and
+    $guestInitText.Contains('StateValue = [int]$finalGatewayStateValue') -and
+    -not $guestInitText.Contains('Select-Object IPAddress, LinkLayerAddress, State')
+) 'InternetOnly does not pin the gateway after address convergence, create only an active-store default route before DNS, or return scalar neighbor evidence.'
 $scenarios.Add('internet-gateway-neighbor-is-pinned-after-address-convergence')
 Assert-True (
     $moduleText.Contains('Get-RequestNetworkExpectedGuestRoutePrefixes') -and
