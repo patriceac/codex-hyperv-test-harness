@@ -43,41 +43,6 @@ $configuration = [ordered]@{
     RecoveryResumeTaskName = 'Codex Hyper-V Recovery Resume'
     RecoveryGenerations = 2
     NetworkPolicy = 'DisconnectedExceptEphemeralReadOnlyHostInput'
-    RequestNetworkPolicy = [ordered]@{
-        FormatVersion = 1
-        DefaultProfile = 'None'
-        IsolatedTestNet = [ordered]@{
-            Enabled = $true
-            SwitchPrefix = 'Codex-Harness-TestNet'
-            NetworkPrefix = '10.254.0.0/24'
-        }
-        InternetOnly = [ordered]@{
-            Enabled = $false
-            SwitchName = ''
-            SwitchId = ''
-            NatName = ''
-            NatPrefix = ''
-            ExternalIPInterfaceAddressPrefix = ''
-            InternalRoutingDomainId = '{00000000-0000-0000-0000-000000000000}'
-            TcpFilteringBehavior = 'AddressDependentFiltering'
-            UdpFilteringBehavior = 'AddressDependentFiltering'
-            UdpInboundRefresh = $false
-            TcpEstablishedConnectionTimeout = 1800
-            TcpTransientConnectionTimeout = 120
-            UdpIdleSessionTimeout = 120
-            IcmpQueryTimeout = 30
-            GatewayAddress = ''
-            PrefixLength = 24
-            PrimaryVlanId = 0
-            SecondaryVlanId = 0
-            DnsServers = @()
-            DenyRemotePrefixes = @()
-        }
-        TrustedLan = [ordered]@{
-            Enabled = $false
-            AllowedSwitches = @()
-        }
-    }
 }
 
 $parent = Split-Path -Parent $OutputPath

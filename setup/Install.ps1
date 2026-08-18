@@ -22,10 +22,6 @@ param(
     [switch] $ForceRebuild,
     [switch] $PlanOnly,
     [switch] $SkipGlobalPolicy,
-    [switch] $ProfileArtifactsPrepared,
-    [ValidatePattern('^[A-Fa-f0-9]{64}$')] [string] $PreparedSkillFingerprint,
-    [ValidatePattern('^[A-Fa-f0-9]{64}$')] [string] $PreparedPolicyFingerprint,
-    [ValidatePattern('^[A-Fa-f0-9]{64}$')] [string] $PreparedSourceFingerprint,
     [switch] $NoElevation
 )
 
@@ -33,25 +29,14 @@ $ErrorActionPreference = 'Stop'
 $InstallRoot = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')
 if ([IO.Path]::GetPathRoot($InstallRoot) -eq $InstallRoot) { throw 'InstallRoot must be a specific non-root directory.' }
 if ([string]::IsNullOrWhiteSpace($TargetUserProfile)) { $TargetUserProfile = $env:USERPROFILE }
-$TargetUserProfile = [IO.Path]::GetFullPath($TargetUserProfile).TrimEnd('\')
-if ([string]::IsNullOrWhiteSpace($TargetUserProfile) -or [IO.Path]::GetPathRoot($TargetUserProfile) -eq $TargetUserProfile) {
-    throw 'TargetUserProfile must be a specific non-root directory.'
-}
 if ([string]::IsNullOrWhiteSpace($TargetUserSid)) { $TargetUserSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value }
 if ([string]::IsNullOrWhiteSpace($AttemptId)) { $AttemptId = [Guid]::NewGuid().ToString('N') }
 try { [void][Security.Principal.SecurityIdentifier]::new($TargetUserSid) } catch { throw "Invalid target-user SID: $TargetUserSid" }
 try { [void][Guid]::ParseExact($AttemptId, 'N') } catch { throw "Invalid attempt ID: $AttemptId" }
-if (-not $Resume -and [string]::IsNullOrWhiteSpace($ExpectedDotNetSdkVersion)) {
-    throw 'Cold Install requires the exact stable .NET SDK version approved during plan review with -ExpectedDotNetSdkVersion.'
-}
-if (-not [string]::IsNullOrWhiteSpace($ExpectedDotNetSdkVersion) -and $ExpectedDotNetSdkVersion -notmatch '^\d+\.\d+\.\d+$') {
-    throw "ExpectedDotNetSdkVersion must be an exact stable SDK version such as '10.0.400'; received '$ExpectedDotNetSdkVersion'."
-}
 
 $checkoutSoftware = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\src\Software'))
 $runningFromCheckout = Test-Path -LiteralPath (Join-Path $checkoutSoftware 'Harness\HarnessPaths.ps1') -PathType Leaf
 $sourceSoftware = if ($runningFromCheckout) { $checkoutSoftware } else { Split-Path -Parent $PSScriptRoot }
-$userIntegrationScript = Join-Path $sourceSoftware 'UserIntegration\Install-CodexUserIntegration.ps1'
 $installedSoftware = Join-Path $InstallRoot 'Software'
 $installedSetup = Join-Path $installedSoftware 'Setup'
 $liveRoot = Join-Path $InstallRoot 'Live'
@@ -66,9 +51,6 @@ $transcriptStarted = $false
 $mutex = $null
 $mutexTaken = $false
 $installerAwake = $false
-$resumeTaskRegistered = $false
-$resumeHandoffCommitted = $false
-$resultRunOnceRegistered = $false
 
 function Test-Administrator {
     $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -136,8 +118,8 @@ function Write-SetupResult {
 
 function Invoke-Robocopy {
     param([string] $Source, [string] $Destination, [switch] $Mirror, [string[]] $ExcludeFiles = @(), [string[]] $ExcludeDirectories = @())
-    [IO.Directory]::CreateDirectory($Destination) | Out-Null
-    $arguments = @($Source, $Destination, $(if ($Mirror) { '/MIR' } else { '/E' }), '/COPY:DAT', '/DCOPY:DAT', '/XJ', '/R:2', '/W:1', '/NFL', '/NDL', '/NJH', '/NJS', '/NP')
+    New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+    $arguments = @($Source, $Destination, $(if ($Mirror) { '/MIR' } else { '/E' }), '/COPY:DAT', '/DCOPY:DAT', '/R:2', '/W:1', '/NFL', '/NDL', '/NJH', '/NJS', '/NP')
     if ($ExcludeFiles.Count -gt 0) { $arguments += '/XF'; $arguments += $ExcludeFiles }
     if ($ExcludeDirectories.Count -gt 0) { $arguments += '/XD'; $arguments += $ExcludeDirectories }
     & robocopy.exe @arguments | Out-Null
@@ -155,11 +137,6 @@ function Get-ElevationArguments {
         '-TargetUserProfile', ('"' + $TargetUserProfile + '"'), '-TargetUserSid', $TargetUserSid,
         '-AttemptId', $AttemptId, '-NoElevation'
     )
-    if ($ProfileArtifactsPrepared) {
-        $arguments += @('-ProfileArtifactsPrepared', '-PreparedSkillFingerprint', $PreparedSkillFingerprint)
-        if (-not [string]::IsNullOrWhiteSpace($PreparedPolicyFingerprint)) { $arguments += @('-PreparedPolicyFingerprint', $PreparedPolicyFingerprint) }
-        if (-not [string]::IsNullOrWhiteSpace($PreparedSourceFingerprint)) { $arguments += @('-PreparedSourceFingerprint', $PreparedSourceFingerprint) }
-    }
     if (-not [string]::IsNullOrWhiteSpace($ExpectedDotNetSdkVersion)) { $arguments += @('-ExpectedDotNetSdkVersion', $ExpectedDotNetSdkVersion) }
     foreach ($switchName in @('Resume','NoRestart','SkipSmokeTest','SkipLocalRecoveryBundle','AllowLowResources','ForceRebuild','SkipGlobalPolicy')) {
         if ((Get-Variable -Name $switchName -ValueOnly)) { $arguments += '-' + $switchName }
@@ -176,16 +153,7 @@ function Register-ResumeTask {
     $trigger = New-ScheduledTaskTrigger -AtStartup
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 6)
     $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-    # Mark the registration before invoking the cmdlet so a partial failure is
-    # still cleaned up by the outer failure path.
-    $script:resumeTaskRegistered = $true
     Register-ScheduledTask -TaskName $resumeTaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description 'Resumes the source-only Codex Hyper-V harness rebuild after Hyper-V enablement.' -Force | Out-Null
-}
-
-function Unregister-ResumeTaskIfOwned {
-    if (-not $script:resumeTaskRegistered -and -not $Resume) { return }
-    Unregister-ScheduledTask -TaskName $resumeTaskName -Confirm:$false -ErrorAction SilentlyContinue
-    $script:resumeTaskRegistered = $false
 }
 
 function Register-ResultRunOnce {
@@ -193,23 +161,27 @@ function Register-ResultRunOnce {
     if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) { throw "Post-restart result launcher is missing: $launcher" }
     $command = 'cmd.exe /d /c ""' + $launcher + '" "' + $InstallRoot + '""'
     $userHive = "Registry::HKEY_USERS\$TargetUserSid"
+    $temporaryHive = $null
     if (-not (Test-Path -LiteralPath $userHive)) {
-        throw 'The target-user registry hive must already be loaded before restart-result registration.'
+        $profileHive = Join-Path $TargetUserProfile 'NTUSER.DAT'
+        if (-not (Test-Path -LiteralPath $profileHive -PathType Leaf)) { throw "Target-user registry hive is missing: $profileHive" }
+        $temporaryHive = 'CodexHyperVSetup_' + [Guid]::NewGuid().ToString('N')
+        & reg.exe load "HKU\$temporaryHive" "$profileHive" | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'Failed to load the target-user registry hive.' }
+        $userHive = "Registry::HKEY_USERS\$temporaryHive"
     }
-    $script:resultRunOnceRegistered = $true
-    $runOnce = Join-Path $userHive 'Software\Microsoft\Windows\CurrentVersion\RunOnce'
-    New-Item -Path $runOnce -Force | Out-Null
-    New-ItemProperty -Path $runOnce -Name 'CodexHyperVSetupResult' -PropertyType String -Value $command -Force | Out-Null
-}
-
-function Unregister-ResultRunOnceIfOwned {
-    if (-not $script:resultRunOnceRegistered) { return }
-    $userHive = "Registry::HKEY_USERS\$TargetUserSid"
-    $runOnce = Join-Path $userHive 'Software\Microsoft\Windows\CurrentVersion\RunOnce'
-    if (Test-Path -LiteralPath $runOnce) {
-        Remove-ItemProperty -LiteralPath $runOnce -Name 'CodexHyperVSetupResult' -ErrorAction SilentlyContinue
+    try {
+        $runOnce = Join-Path $userHive 'Software\Microsoft\Windows\CurrentVersion\RunOnce'
+        New-Item -Path $runOnce -Force | Out-Null
+        New-ItemProperty -Path $runOnce -Name 'CodexHyperVSetupResult' -PropertyType String -Value $command -Force | Out-Null
     }
-    $script:resultRunOnceRegistered = $false
+    finally {
+        if ($temporaryHive) {
+            [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+            & reg.exe unload "HKU\$temporaryHive" | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to unload the target-user registry hive.' }
+        }
+    }
 }
 
 function Install-LocationPointer {
@@ -234,118 +206,31 @@ function Set-PrivateFileAcl {
     if ($LASTEXITCODE -ne 0) { throw "Failed to secure private file: $Path" }
 }
 
-function Assert-NoReparsePointChain {
-    param(
-        [Parameter(Mandatory = $true)] [string] $Path,
-        [switch] $RequireExisting
-    )
-
-    if ([string]::IsNullOrWhiteSpace($Path)) { throw 'A protected path cannot be empty.' }
-    $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
-    $root = [IO.Path]::GetPathRoot($full)
-    if ([string]::IsNullOrWhiteSpace($root)) { throw "The protected path has no filesystem root: $Path" }
-    $relativeToRoot = $full.Substring($root.Length)
-    if ($relativeToRoot -match ':') { throw "Alternate data streams are not allowed in protected paths: $Path" }
-
-    $existing = New-Object Collections.Generic.List[object]
-    $probe = New-Object IO.DirectoryInfo($full)
-    while ($null -ne $probe) {
-        if (Test-Path -LiteralPath $probe.FullName) {
-            $item = Get-Item -LiteralPath $probe.FullName -Force -ErrorAction Stop
-            [void]$existing.Add($item)
-        }
-        $probe = $probe.Parent
-    }
-    if ($RequireExisting -and -not (Test-Path -LiteralPath $full)) { throw "Protected source path is missing: $full" }
-    foreach ($item in $existing) {
-        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw "Reparse points are not allowed in protected path ancestry: $($item.FullName)"
-        }
-    }
-    $full
+function Install-RuntimeSkill {
+    param($Layout)
+    $skillDestination = Join-Path $TargetUserProfile '.agents\skills\hyperv-test-executables'
+    Invoke-Robocopy -Source ([string]$Layout.SkillSourceRoot) -Destination $skillDestination -Mirror
+    $skillDestination
 }
 
-function Assert-NoAlternateDataStreams {
-    param([Parameter(Mandatory = $true)] [string] $Path)
-
-    $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
-    $root = [IO.Path]::GetPathRoot($full)
-    if ($full.Substring($root.Length) -match ':') { throw "Alternate data streams are not allowed in protected paths: $Path" }
-    if (-not (Test-Path -LiteralPath $full)) { return }
-    try {
-        $streams = @(Get-Item -LiteralPath $full -Stream * -ErrorAction Stop)
-        foreach ($stream in $streams) {
-            if ([string]$stream.Stream -notin @('', '::$DATA', ':$DATA', '$DATA')) {
-                throw "Alternate data streams are not allowed in protected paths: ${full}:$($stream.Stream)"
-            }
-        }
+function Install-ManagedPolicyBlock {
+    if ($SkipGlobalPolicy) { return $null }
+    $blockPath = Join-Path $installedSetup 'AGENTS.block.md'
+    $agentsPath = Join-Path $TargetUserProfile '.codex\AGENTS.md'
+    $block = (Get-Content -LiteralPath $blockPath -Raw).Trim()
+    $startMarker = '<!-- BEGIN CODEX HYPERV TEST HARNESS -->'
+    $endMarker = '<!-- END CODEX HYPERV TEST HARNESS -->'
+    $existing = if (Test-Path -LiteralPath $agentsPath -PathType Leaf) { Get-Content -LiteralPath $agentsPath -Raw } else { '' }
+    $pattern = [regex]::Escape($startMarker) + '.*?' + [regex]::Escape($endMarker)
+    if ([regex]::IsMatch($existing, $pattern, [Text.RegularExpressions.RegexOptions]::Singleline)) {
+        $updated = [regex]::Replace($existing, $pattern, [Text.RegularExpressions.MatchEvaluator]{ param($match) $block }, [Text.RegularExpressions.RegexOptions]::Singleline)
     }
-    catch [ParameterBindingException] { }
-    catch [NotSupportedException] { }
-}
-
-function Assert-SourceTreeSafeForPrivilegedCopy {
-    param([Parameter(Mandatory = $true)] [string] $Path)
-
-    $full = Assert-NoReparsePointChain -Path $Path -RequireExisting
-    $rootItem = Get-Item -LiteralPath $full -Force -ErrorAction Stop
-    if (-not $rootItem.PSIsContainer) { throw "Protected source root is not a directory: $full" }
-    Assert-NoAlternateDataStreams -Path $full
-    foreach ($item in @(Get-ChildItem -LiteralPath $full -Recurse -Force -ErrorAction Stop)) {
-        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw "Reparse points are not allowed in protected source trees: $($item.FullName)"
-        }
-        Assert-NoAlternateDataStreams -Path $item.FullName
+    else {
+        $updated = $existing.TrimEnd() + $(if ([string]::IsNullOrWhiteSpace($existing)) { '' } else { "`r`n`r`n" }) + $block + "`r`n"
     }
-    $full
-}
-
-function Get-SourceTreeFingerprint {
-    param(
-        [Parameter(Mandatory = $true)] [string] $Path,
-        [string[]] $ExcludeFiles = @(),
-        [string[]] $ExcludeDirectories = @()
-    )
-
-    $full = Assert-SourceTreeSafeForPrivilegedCopy -Path $Path
-    $records = New-Object Collections.Generic.List[string]
-    foreach ($item in @(Get-ChildItem -LiteralPath $full -Recurse -File -Force -ErrorAction Stop | Sort-Object FullName)) {
-        $relative = $item.FullName.Substring($full.Length).TrimStart('\')
-        $parts = @($relative -split '\\')
-        if (@($parts | Where-Object { $_ -in $ExcludeDirectories }).Count -gt 0) { continue }
-        if (@($ExcludeFiles | Where-Object { $item.Name -like $_ }).Count -gt 0) { continue }
-        $hash = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpperInvariant()
-        [void]$records.Add("$($relative.Replace('\','/'))|$($item.Length)|$hash")
-    }
-    $payload = [Text.Encoding]::UTF8.GetBytes(($records -join "`n"))
-    $digest = [Security.Cryptography.SHA256]::Create()
-    try { ([BitConverter]::ToString($digest.ComputeHash($payload))).Replace('-', '') }
-    finally { $digest.Dispose() }
-}
-
-function Get-PreparedSourceFingerprint {
-    param(
-        [string] $SoftwareRoot = $sourceSoftware,
-        [string] $SetupRoot = $PSScriptRoot
-    )
-    # The elevated destination nests Setup under Software. Keep that subtree
-    # out of the Software digest and hash it once as Setup below, so checkout
-    # and staged layouts have the same receipt despite different topology.
-    $softwareFingerprint = Get-SourceTreeFingerprint -Path $SoftwareRoot -ExcludeFiles @('*.exe', 'pool-definition.json', 'pool-provision-status.json', 'pool-broker-install-status.json', 'guest-credential.json', 'harness-config.json') -ExcludeDirectories @('private', 'seed-build', 'Setup')
-    $setupFingerprint = Get-SourceTreeFingerprint -Path $SetupRoot -ExcludeDirectories @('artifacts')
-    $payload = [Text.Encoding]::UTF8.GetBytes("Software|$softwareFingerprint`nSetup|$setupFingerprint")
-    $digest = [Security.Cryptography.SHA256]::Create()
-    try { ([BitConverter]::ToString($digest.ComputeHash($payload))).Replace('-', '') }
-    finally { $digest.Dispose() }
-}
-
-function Protect-StagedSourceTree {
-    param([Parameter(Mandatory = $true)] [string] $Path)
-
-    $full = Assert-SourceTreeSafeForPrivilegedCopy -Path $Path
-    $client = '*' + $TargetUserSid
-    & icacls.exe $full /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)(F)' '*S-1-5-32-544:(OI)(CI)(F)' "$client`:(OI)(CI)(RX)" /T /C | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Failed to apply the SYSTEM/Administrators-only ACL with the approved target-user read/execute grant to staged source: $full" }
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $agentsPath) | Out-Null
+    [IO.File]::WriteAllText($agentsPath, $updated, (New-Object Text.UTF8Encoding($false)))
+    $agentsPath
 }
 
 function Resolve-WindowsLocale {
@@ -418,25 +303,8 @@ if ($PlanOnly) {
 
 if (-not (Test-Administrator)) {
     if ($NoElevation) { throw 'Administrator rights are required to install Hyper-V and the SYSTEM broker.' }
-    if (-not (Test-Path -LiteralPath $userIntegrationScript -PathType Leaf)) { throw "User-integration helper is missing: $userIntegrationScript" }
-    [void](Assert-SourceTreeSafeForPrivilegedCopy -Path $sourceSoftware)
-    [void](Assert-SourceTreeSafeForPrivilegedCopy -Path $PSScriptRoot)
-    if (Test-Path -LiteralPath $InstallRoot) { [void](Assert-NoReparsePointChain -Path $InstallRoot); Assert-NoAlternateDataStreams -Path $InstallRoot }
-    $PreparedSourceFingerprint = Get-PreparedSourceFingerprint
-    if ($runningFromCheckout) {
-        $publicAudit = & (Join-Path $PSScriptRoot 'Test-PublicRepository.ps1') -RepositoryRoot (Split-Path -Parent $PSScriptRoot)
-        if (-not [bool]$publicAudit.Success) { throw 'The public repository audit failed before user-profile integration.' }
-    }
-    $profileArtifacts = & $userIntegrationScript -SkillSourceRoot (Join-Path $sourceSoftware 'Skill') -PolicyBlockPath (Join-Path $PSScriptRoot 'AGENTS.block.md') -TargetUserProfile $TargetUserProfile -TargetUserSid $TargetUserSid -SkipGlobalPolicy:$SkipGlobalPolicy
-    if (-not [bool]$profileArtifacts.Success) { throw 'User-profile integration did not complete.' }
-    $ProfileArtifactsPrepared = $true
-    $PreparedSkillFingerprint = [string]$profileArtifacts.SkillFingerprint
-    $PreparedPolicyFingerprint = [string]$profileArtifacts.PolicyFingerprint
     $process = Start-Process -FilePath 'powershell.exe' -ArgumentList (Get-ElevationArguments) -Verb RunAs -PassThru -Wait
     exit $process.ExitCode
-}
-if (-not $ProfileArtifactsPrepared -or [string]::IsNullOrWhiteSpace($PreparedSkillFingerprint) -or [string]::IsNullOrWhiteSpace($PreparedSourceFingerprint)) {
-    throw 'Launch Install.ps1 from the target user''s unelevated process so profile and staged-source receipts are prepared before elevation.'
 }
 
 try {
@@ -448,32 +316,8 @@ try {
     Start-Transcript -LiteralPath $logPath -Append | Out-Null
     $transcriptStarted = $true
 
-    [void](Assert-NoReparsePointChain -Path $InstallRoot)
-    if (Test-Path -LiteralPath $InstallRoot) { Assert-NoAlternateDataStreams -Path $InstallRoot }
-    if (Test-Path -LiteralPath $installedSoftware -PathType Container) {
-        # Robocopy must never encounter a user-planted junction, symlink, or
-        # alternate stream in an existing destination tree. Validate the
-        # complete tree before /MIR can copy or delete through it.
-        [void](Assert-SourceTreeSafeForPrivilegedCopy -Path $installedSoftware)
-    }
-
-    Write-SetupState -Phase 'StagingSource' -Message 'Installing the sanitized harness source and resumable setup scripts.'
-    New-Item -ItemType Directory -Force -Path $installedSoftware, $installedSetup | Out-Null
-    [void](Assert-NoReparsePointChain -Path $installedSoftware)
-    [void](Assert-NoReparsePointChain -Path $installedSetup)
-    if ($runningFromCheckout) {
-        Invoke-Robocopy -Source $sourceSoftware -Destination $installedSoftware -Mirror -ExcludeFiles @('*.exe','pool-definition.json','pool-provision-status.json','pool-broker-install-status.json','guest-credential.json','harness-config.json') -ExcludeDirectories @('private','seed-build','Setup')
-        Invoke-Robocopy -Source $PSScriptRoot -Destination $installedSetup -Mirror -ExcludeDirectories @('artifacts')
-    }
-    $stagedSourceFingerprint = Get-PreparedSourceFingerprint -SoftwareRoot $installedSoftware -SetupRoot $installedSetup
-    if (-not [string]::Equals($stagedSourceFingerprint, $PreparedSourceFingerprint, [StringComparison]::OrdinalIgnoreCase)) {
-        throw 'The staged Software/Setup source changed between unelevated preparation and elevation.'
-    }
-    Protect-StagedSourceTree -Path $installedSoftware
-    Protect-StagedSourceTree -Path $installedSetup
-
-    Write-SetupState -Phase 'Preflight' -Message 'Checking Windows, virtualization, storage, memory, and official-media prerequisites from the protected staged source.'
-    $preflightPath = Join-Path $installedSetup 'Test-Prerequisites.ps1'
+    Write-SetupState -Phase 'Preflight' -Message 'Checking Windows, virtualization, storage, memory, and official-media prerequisites.'
+    $preflightPath = if ($runningFromCheckout) { Join-Path $PSScriptRoot 'Test-Prerequisites.ps1' } else { Join-Path $installedSetup 'Test-Prerequisites.ps1' }
     $preflightJson = & $preflightPath -InstallRoot $InstallRoot -PoolSize $PoolSize -VmMemoryGiB $VmMemoryGiB -GuestUpdateSwitchName $GuestUpdateSwitchName -DotNetChannel $DotNetChannel -ExpectedDotNetSdkVersion $ExpectedDotNetSdkVersion -AllowLowResources:$AllowLowResources -AsJson -ReportOnly
     $preflight = $preflightJson | ConvertFrom-Json
     if (-not [bool]$preflight.Success) {
@@ -481,11 +325,11 @@ try {
         throw "Required prerequisite checks failed: $failedChecks"
     }
 
-    $installedUserIntegrationScript = Join-Path $installedSoftware 'UserIntegration\Install-CodexUserIntegration.ps1'
-    $preparedSource = & $installedUserIntegrationScript -SkillSourceRoot (Join-Path $installedSoftware 'Skill') -PolicyBlockPath (Join-Path $installedSetup 'AGENTS.block.md') -TargetUserProfile $TargetUserProfile -TargetUserSid $TargetUserSid -SkipGlobalPolicy:$SkipGlobalPolicy -FingerprintOnly
-    if (-not [string]::Equals([string]$preparedSource.SkillFingerprint, $PreparedSkillFingerprint, [StringComparison]::OrdinalIgnoreCase) -or
-        (-not $SkipGlobalPolicy -and -not [string]::Equals([string]$preparedSource.PolicyFingerprint, $PreparedPolicyFingerprint, [StringComparison]::OrdinalIgnoreCase))) {
-        throw 'Prepared user-profile artifacts do not match the sanitized source staged for elevation.'
+    Write-SetupState -Phase 'StagingSource' -Message 'Installing the sanitized harness source and resumable setup scripts.'
+    New-Item -ItemType Directory -Force -Path $installedSoftware, $installedSetup | Out-Null
+    if ($runningFromCheckout) {
+        Invoke-Robocopy -Source $sourceSoftware -Destination $installedSoftware -Mirror -ExcludeFiles @('*.exe','pool-definition.json','pool-provision-status.json','pool-broker-install-status.json','guest-credential.json') -ExcludeDirectories @('private','seed-build')
+        Invoke-Robocopy -Source $PSScriptRoot -Destination $installedSetup -Mirror -ExcludeDirectories @('artifacts')
     }
     $layout = & (Join-Path $installedSetup 'New-HarnessConfiguration.ps1') -InstallRoot $InstallRoot -PoolSize $PoolSize -VmMemoryGiB $VmMemoryGiB -VmProcessorCount $VmProcessorCount -IdleTimeoutSeconds $IdleTimeoutSeconds -DisplayWidth $DisplayWidth -DisplayHeight $DisplayHeight -OutputPath $configPath
     . (Join-Path ([string]$layout.HarnessSourceRoot) 'HarnessPaths.ps1')
@@ -502,22 +346,8 @@ try {
         Register-ResumeTask
         Register-ResultRunOnce
         Write-SetupState -Phase 'RebootPending' -Message 'Hyper-V is enabled and a restart is required.' -Details @{ RestartNeeded = [bool]$enableResult.RestartNeeded }
-        if ($NoRestart) {
-            # A caller explicitly requested a deferred restart. The task and
-            # RunOnce entry are now the legitimate resume handoff.
-            $script:resumeHandoffCommitted = $true
-            exit 3010
-        }
-        try {
-            Restart-Computer -Force -ErrorAction Stop
-            # Reaching this point means Windows accepted the automatic-restart
-            # request; preserve the task for the post-reboot resume.
-            $script:resumeHandoffCommitted = $true
-        }
-        catch {
-            $script:resumeHandoffCommitted = $false
-            throw
-        }
+        if ($NoRestart) { exit 3010 }
+        Restart-Computer -Force
         exit 0
     }
 
@@ -583,8 +413,8 @@ try {
 
     Write-SetupState -Phase 'InstallingBroker' -Message 'Installing and starting the ACL-restricted SYSTEM broker.'
     & (Join-Path ([string]$layout.HarnessSourceRoot) 'Install-PoolHostBroker.ps1') -SourceRoot ([string]$layout.HarnessSourceRoot) -BrokerRoot ([string]$layout.BrokerRoot) -PoolDefinitionPath $definitionPath -StatusPath (Join-Path ([string]$layout.BrokerRoot) 'State\Management\pool-broker-install-status.json') -ConfigPath $configPath -ClientSid $TargetUserSid
-    $skillPath = Join-Path $TargetUserProfile '.agents\skills\hyperv-test-executables'
-    $policyPath = if ($SkipGlobalPolicy) { $null } else { Join-Path $TargetUserProfile '.codex\AGENTS.md' }
+    $skillPath = Install-RuntimeSkill -Layout $layout
+    $policyPath = Install-ManagedPolicyBlock
 
     Write-SetupState -Phase 'Verifying' -Message 'Auditing pool isolation, lifecycle policy, and broker configuration.'
     $auditPath = Join-Path ([string]$layout.BrokerRoot) 'State\Management\pool-audit-status.json'
@@ -595,7 +425,7 @@ try {
     $smoke = $null
     if (-not $SkipSmokeTest) {
         Write-SetupState -Phase 'SmokeTesting' -Message 'Running the compiled visual canary inside an isolated pool VM.'
-        $runner = Join-Path ([string]$layout.SkillSourceRoot) 'scripts\Invoke-HyperVExecutableTest.ps1'
+        $runner = Join-Path $skillPath 'scripts\Invoke-HyperVExecutableTest.ps1'
         $smokeJson = & $runner -ArtifactPath (Join-Path ([string]$layout.SoftwareRoot) 'Canaries\PoolCanary.exe') -ActionsPath (Join-Path ([string]$layout.SoftwareRoot) 'Canaries\smoke-actions.json') -BrokerRoot ([string]$layout.BrokerRoot) -QueueTimeoutSeconds 900 -ExecutionTimeoutSeconds 300
         $smoke = $smokeJson | ConvertFrom-Json
         if (-not [bool]$smoke.Success -or -not [bool]$smoke.PayloadChildDeleted) { throw "The isolated smoke test failed: $($smoke.Error)" }
@@ -609,8 +439,7 @@ try {
         $recovery = Join-Path ([string]$layout.RecoveryRoot) 'Current\manifest.json'
     }
 
-    Unregister-ResumeTaskIfOwned
-    $script:resumeHandoffCommitted = $true
+    Unregister-ScheduledTask -TaskName $resumeTaskName -Confirm:$false -ErrorAction SilentlyContinue
     $details = [ordered]@{
         ConfigPath = $configPath; BaselineVmId = [string]$baseline.Id; BaselineCheckpointId = [string]$baselineCheckpoint.Id
         SkillPath = $skillPath; PolicyPath = $policyPath; AuditPath = $auditPath; Smoke = $smoke
@@ -624,10 +453,7 @@ try {
 }
 catch {
     try {
-        if (-not $resumeHandoffCommitted) {
-            Unregister-ResultRunOnceIfOwned
-            Unregister-ResumeTaskIfOwned
-        }
+        if ($Resume) { Unregister-ScheduledTask -TaskName $resumeTaskName -Confirm:$false -ErrorAction SilentlyContinue }
         Write-SetupState -Phase 'Failed' -Message $_.Exception.Message -Details @{ ScriptStackTrace = $_.ScriptStackTrace }
         Write-SetupResult -Success $false -Message $_.Exception.Message -Details @{ ScriptStackTrace = $_.ScriptStackTrace }
     }
@@ -635,10 +461,6 @@ catch {
     throw
 }
 finally {
-    if (-not $resumeHandoffCommitted) {
-        Unregister-ResultRunOnceIfOwned
-        Unregister-ResumeTaskIfOwned
-    }
     Disable-InstallerAwake
     if ($transcriptStarted) { try { Stop-Transcript | Out-Null } catch { } }
     if ($mutexTaken) { $mutex.ReleaseMutex() }

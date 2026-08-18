@@ -30,46 +30,8 @@ $installationMutationStarted = $false
 $credentialExistedBefore = $false
 $installCommitted = $false
 $rollbackSucceeded = $false
-$installedFiles = @('HostBroker.ps1', 'PayloadCache.ps1', 'HostInputShare.ps1', 'RequestNetwork.ps1', 'PoolCommon.ps1', 'PoolBroker.ps1', 'PoolLifecycle.ps1', 'HostWorker.ps1')
+$installedFiles = @('HostBroker.ps1', 'PayloadCache.ps1', 'HostInputShare.ps1', 'PoolCommon.ps1', 'PoolBroker.ps1', 'PoolLifecycle.ps1', 'HostWorker.ps1')
 $backedUpNames = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-
-function New-FailClosedRequestNetworkPolicy {
-    [ordered]@{
-        FormatVersion = 1
-        DefaultProfile = 'None'
-        IsolatedTestNet = [ordered]@{
-            Enabled = $true
-            SwitchPrefix = 'Codex-Harness-TestNet'
-            NetworkPrefix = '10.254.0.0/24'
-        }
-        InternetOnly = [ordered]@{
-            Enabled = $false
-            SwitchName = ''
-            SwitchId = ''
-            NatName = ''
-            NatPrefix = ''
-            ExternalIPInterfaceAddressPrefix = ''
-            InternalRoutingDomainId = '{00000000-0000-0000-0000-000000000000}'
-            TcpFilteringBehavior = 'AddressDependentFiltering'
-            UdpFilteringBehavior = 'AddressDependentFiltering'
-            UdpInboundRefresh = $false
-            TcpEstablishedConnectionTimeout = 1800
-            TcpTransientConnectionTimeout = 120
-            UdpIdleSessionTimeout = 120
-            IcmpQueryTimeout = 30
-            GatewayAddress = ''
-            PrefixLength = 24
-            PrimaryVlanId = 0
-            SecondaryVlanId = 0
-            DnsServers = @()
-            DenyRemotePrefixes = @()
-        }
-        TrustedLan = [ordered]@{
-            Enabled = $false
-            AllowedSwitches = @()
-        }
-    }
-}
 
 function Write-InstallStatus {
     param([bool] $Success, [string] $Message, $Verification)
@@ -220,7 +182,6 @@ try {
     }
 
     $privateRoot = Join-Path $BrokerRoot 'Private'
-    $requestNetworkLeaseRoot = Join-Path $BrokerRoot 'State\NetworkLeases'
     $userWritable = @('Requests', 'Processing', 'Archive', 'Results', 'Staging', 'PayloadManifests', 'Cancellations', 'Cancelled') | ForEach-Object { Join-Path $BrokerRoot $_ }
     $systemWritable = @(
         (Join-Path $BrokerRoot 'State'),
@@ -232,7 +193,6 @@ try {
     )
     New-Item -ItemType Directory -Force -Path $BrokerRoot, $privateRoot, $backupRoot | Out-Null
     New-Item -ItemType Directory -Force -Path ($userWritable + $systemWritable) | Out-Null
-    New-Item -ItemType Directory -Force -Path $requestNetworkLeaseRoot | Out-Null
 
     # Establish a canonical DACL before any credential or configuration file is
     # created. Set-Acl replaces every prior explicit rule, so a reused install
@@ -240,7 +200,6 @@ try {
     Set-BrokerAcl -Path $BrokerRoot -ClientMode ReadExecute
     foreach ($directory in $userWritable) { Set-BrokerAcl -Path $directory -ClientMode Modify -ClientInherits }
     foreach ($directory in $systemWritable) { Set-BrokerAcl -Path $directory -ClientMode ReadExecute -ClientInherits }
-    Set-BrokerAcl -Path $requestNetworkLeaseRoot -ClientMode None
     Set-BrokerAcl -Path $privateRoot -ClientMode None
     Set-BrokerAcl -Path $backupRoot -ClientMode None
 
@@ -280,16 +239,6 @@ try {
     }
     Set-BrokerAcl -Path $credentialDestination -ClientMode None
 
-    $requestNetworkPolicy = if ($layout.PSObject.Properties['RequestNetworkPolicy'] -and $null -ne $layout.RequestNetworkPolicy) {
-        $layout.RequestNetworkPolicy
-    }
-    else {
-        [pscustomobject](New-FailClosedRequestNetworkPolicy)
-    }
-    if ([int]$requestNetworkPolicy.FormatVersion -ne 1) {
-        throw "Unsupported request-network policy version: $($requestNetworkPolicy.FormatVersion)"
-    }
-
     $config = [ordered]@{
         VmName = [string]$definition.Workers[0].VmName
         BaselineName = [string]$definition.SourceCheckpointName
@@ -310,7 +259,6 @@ try {
         HostInputSwitchPrefix = 'Codex-Harness-HostInput'
         HostInputColdShareThresholdBytes = [long]1GB
         HostInputIncrementalShareThresholdBytes = [long]256MB
-        RequestNetworkPolicy = $requestNetworkPolicy
         ClientSid = $ClientSid
         InstalledUtc = [DateTime]::UtcNow.ToString('o')
     }
@@ -324,7 +272,6 @@ try {
     foreach ($directory in $systemWritable) {
         Set-BrokerAcl -Path $directory -ClientMode ReadExecute -ClientInherits
     }
-    Set-BrokerAcl -Path $requestNetworkLeaseRoot -ClientMode None
     Set-BrokerAcl -Path $privateRoot -ClientMode None
     foreach ($name in $installedFiles) {
         Set-BrokerAcl -Path (Join-Path $BrokerRoot $name) -ClientMode Read

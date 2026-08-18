@@ -4,23 +4,6 @@ A source-only, recoverable backend for testing Windows executables in isolated H
 
 The repository contains the broker, guest agent, elastic pool of up to four VMs, immutable payload-VHDX cache, disposable differencing-disk lifecycle, evidence capture, read-only host-input transport, runtime Codex skill, and rebuild automation. It deliberately contains **no Windows image, VM disk, credential, executable build output, or activation material**.
 
-## Choose the faithful test boundary
-
-Use a browser first for a pure web application when browser automation can faithfully exercise the requested behavior. Use this Hyper-V harness for native shells, tray behavior, installers, WebView2, Windows integration, or proof of a VM network boundary. Electron remains a native-shell test even when its content is web-based.
-
-Workers use the `None` network profile by default. A request may explicitly ask for one of these named profiles; the SYSTEM broker, not the client, remains the authorization boundary:
-
-| Profile | Intended boundary |
-|---|---|
-| `None` | No general network adapter connection. This is the compatibility default. |
-| `IsolatedTestNet` | An explicitly named cohort on a private VM-only switch, with no host, LAN, or Internet route. |
-| `InternetOnly` | Outbound TCP/UDP through the host's sole, pinned, mapping-free WinNAT. A pinned private-VLAN pair isolates guest ports from peer guests at layer 2; the host gateway remains the necessary promiscuous Ethernet/ARP endpoint. Weighted stateful extended ACLs bind the guest source address, deny host IP/private destinations and unsolicited inbound traffic, and block everything else. Disabled until that exact policy is reviewed, configured, and live-verified. It is not the Hyper-V `Default Switch`. |
-| `TrustedLan` | Full exposure to an external switch pinned by name, ID, single physical-interface GUID/description, and management-OS sharing state. Disabled until deliberately configured and verified. |
-
-Non-`None` requests use the versioned `RunGuestJobNetworkV1` operation so an older broker rejects them instead of silently running with different connectivity. Clients may select only an approved profile and, where applicable, a cohort or exact allowlisted switch; they cannot supply raw NAT, DNS, route, or firewall configuration. See the [runtime skill](src/Software/Skill/SKILL.md) for request examples.
-
-This source contract does not enable or create live profile infrastructure. Adding switches, NAT, firewall policy, or allowlists remains part of the setup-harness informed-consent workflow, including a reviewed plan and separate approval before host mutation.
-
 ## Rebuild after losing everything local
 
 Give Codex this prompt:
@@ -45,7 +28,6 @@ Give Codex this prompt:
 > - Local recovery bundle — suggested: create it (`SkipLocalRecoveryBundle = false`) when disk capacity permits; it consumes substantial space and contains sensitive VM material, but makes later recovery much faster.
 > - Preservation — suggested: preserve every existing VM and file and keep `ForceRebuild = false`; replacement requires a separate, explicit destructive approval.
 > - Temporary guest-update switch — suggested: `Default Switch`, used only by the baseline while Windows and .NET are updated; workers remain disconnected, and the baseline is disconnected before sealing.
-> - Runtime request networking — suggested: keep `None` as the default, permit explicit installation-scoped `IsolatedTestNet` cohorts, and leave `InternetOnly` and `TrustedLan` disabled until a separate exact host-policy proposal and live positive/negative verification are approved. The temporary update switch never authorizes runtime networking.
 > - .NET SDK — suggested: stable LTS channel `10.0`, pinned to the exact latest stable SDK version resolved from Microsoft's official release metadata during review; do not install previews.
 > - Windows Update — suggested: applicable non-preview Microsoft software, security, quality, and Defender updates for the installed feature version; exclude optional drivers and feature-version upgrades.
 >
@@ -96,7 +78,7 @@ Codex-guided recovery must ask the user to choose every value. The entries below
 | .NET SDK | Stable `10.0` channel, exact version pinned during review |
 | Windows Update | Non-preview software/security/quality/Defender updates; no driver or feature-version upgrade |
 | Warm-spare rule | keep one ready VM while leases exist, up to four workers |
-| Worker network | `None` by default; explicitly authorized request-scoped profiles only, plus the separate scoped read-only host-input path |
+| Worker network | disconnected except a scoped, ephemeral read-only host-input path when requested |
 
 Override the location or sizing from PowerShell:
 
