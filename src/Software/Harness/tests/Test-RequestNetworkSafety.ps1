@@ -654,6 +654,9 @@ $recoveryText = $moduleText.Substring($recoveryStart)
 Assert-True (
     $recoveryText.Contains("Get-ChildItem -LiteralPath `$leaseRoot -Filter '*.json' -File -ErrorAction Stop") -and
     $recoveryText.Contains('Get-VMNetworkAdapter -VMName $vmName -ErrorAction Stop') -and
+    $recoveryText.Contains('$removalDeadline = [DateTime]::UtcNow.AddSeconds(5)') -and
+    $recoveryText.Contains('Get-RequestNetworkAdapterLeaseOwnership -LeaseInventory $currentLeases') -and
+    $recoveryText.Contains('still exists after bounded removal convergence') -and
     $recoveryText.Contains('Get-VMSwitch -ErrorAction Stop') -and
     $recoveryText.Contains('Get-VMNetworkAdapter -All -ErrorAction Stop') -and
     $recoveryText.Contains('Request-network orphan recovery failed closed:')
@@ -1029,6 +1032,8 @@ Assert-True (
     $guestIsolatedFirewallScope -gt $guestIsolatedFirewallCreate -and
     $guestIsolatedFirewallAttest -gt $guestIsolatedFirewallScope -and
     $guestInitText.Contains('-Direction Inbound -Action Allow -Enabled True -Profile Any -Protocol Any') -and
+    $guestInitText.Contains("(`$GuestAddress + '/32')") -and
+    $guestInitText.Contains('Exact observation: $firewallDiagnostic') -and
     $guestInitText.Contains("Scope = 'DisposableGuestRun'")
 ) 'IsolatedTestNet does not install and exactly attest disposable, interface-bound same-cohort guest ingress.'
 $scenarios.Add('isolated-same-cohort-ingress-is-request-scoped-and-attested')

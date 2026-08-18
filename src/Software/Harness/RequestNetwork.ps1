@@ -2072,14 +2072,38 @@ function Initialize-GuestRequestNetwork {
             $localAddresses = @($addressFilters | ForEach-Object { @($_.LocalAddress) } | ForEach-Object { [string]$_ })
             $remoteAddresses = @($addressFilters | ForEach-Object { @($_.RemoteAddress) } | ForEach-Object { [string]$_ })
             $interfaceAliases = @($interfaceFilters | ForEach-Object { @($_.InterfaceAlias) } | ForEach-Object { [string]$_ })
-            if ([string]$createdRules[0].Enabled -ne 'True' -or
-                [string]$createdRules[0].Direction -ne 'Inbound' -or
-                [string]$createdRules[0].Action -ne 'Allow' -or
-                $addressFilters.Count -ne 1 -or $interfaceFilters.Count -ne 1 -or
-                $localAddresses.Count -ne 1 -or -not [string]::Equals($localAddresses[0], $GuestAddress, [StringComparison]::OrdinalIgnoreCase) -or
-                $remoteAddresses.Count -ne 1 -or -not [string]::Equals($remoteAddresses[0], $NetworkPrefix, [StringComparison]::OrdinalIgnoreCase) -or
-                $interfaceAliases.Count -ne 1 -or -not [string]::Equals($interfaceAliases[0], [string]$adapter.InterfaceAlias, [StringComparison]::Ordinal)) {
-                throw 'IsolatedTestNet did not attest its exact broker-owned same-cohort guest firewall boundary.'
+            $enabledName = [string]$createdRules[0].Enabled
+            $directionName = [string]$createdRules[0].Direction
+            $actionName = [string]$createdRules[0].Action
+            $localAddressIsExact = $localAddresses.Count -eq 1 -and (
+                [string]::Equals($localAddresses[0], $GuestAddress, [StringComparison]::OrdinalIgnoreCase) -or
+                [string]::Equals($localAddresses[0], ($GuestAddress + '/32'), [StringComparison]::OrdinalIgnoreCase)
+            )
+            $firewallRuleIsExact = (
+                $enabledName -eq 'True' -and
+                $directionName -eq 'Inbound' -and
+                $actionName -eq 'Allow' -and
+                $addressFilters.Count -eq 1 -and $interfaceFilters.Count -eq 1 -and
+                $localAddressIsExact -and
+                $remoteAddresses.Count -eq 1 -and [string]::Equals($remoteAddresses[0], $NetworkPrefix, [StringComparison]::OrdinalIgnoreCase) -and
+                $interfaceAliases.Count -eq 1 -and [string]::Equals($interfaceAliases[0], [string]$adapter.InterfaceAlias, [StringComparison]::Ordinal)
+            )
+            if (-not $firewallRuleIsExact) {
+                $firewallDiagnostic = [ordered]@{
+                    Name = [string]$createdRules[0].Name
+                    Enabled = $enabledName
+                    Direction = $directionName
+                    Action = $actionName
+                    AddressFilterCount = [int]$addressFilters.Count
+                    InterfaceFilterCount = [int]$interfaceFilters.Count
+                    LocalAddresses = @($localAddresses)
+                    RemoteAddresses = @($remoteAddresses)
+                    InterfaceAliases = @($interfaceAliases)
+                    ExpectedLocalAddress = $GuestAddress
+                    ExpectedRemoteAddress = $NetworkPrefix
+                    ExpectedInterfaceAlias = [string]$adapter.InterfaceAlias
+                } | ConvertTo-Json -Depth 5 -Compress
+                throw "IsolatedTestNet did not attest its exact broker-owned same-cohort guest firewall boundary. Exact observation: $firewallDiagnostic"
             }
             $isolatedInboundFirewallRule = [ordered]@{
                 Name = [string]$createdRules[0].Name
@@ -2582,19 +2606,53 @@ function Recover-OrphanedRequestNetworkResources {
             # name-based deletion pass. Only an exact no-owner match is an
             # orphan candidate.
             if ($owner) { continue }
-            $adapterPlans.Add([pscustomobject][ordered]@{ VmName = $vmName; Adapter = $adapter })
+            $adapterPlans.Add([pscustomobject][ordered]@{
+                VmName = $vmName
+                VmId = $vmId
+                AdapterName = [string]$adapter.Name
+            })
         }
     }
     foreach ($plan in $adapterPlans) {
-        $adapter = $plan.Adapter
         $vmName = [string]$plan.VmName
+        $vmId = [string]$plan.VmId
+        $adapterName = [string]$plan.AdapterName
         try {
-            if (-not [string]::IsNullOrWhiteSpace([string]$adapter.SwitchName)) { Disconnect-VMNetworkAdapter -VMNetworkAdapter $adapter -ErrorAction Stop | Out-Null }
-            $remainingAdapter = @(Get-VMNetworkAdapter -VMName $vmName -ErrorAction Stop | Where-Object { [string]::Equals([string]$_.Name, [string]$adapter.Name, [StringComparison]::Ordinal) })
-            if ($remainingAdapter.Count -gt 1) { throw "Orphaned managed adapter '$($adapter.Name)' no longer resolves uniquely." }
-            if ($remainingAdapter.Count -eq 1) { Remove-VMNetworkAdapter -VMNetworkAdapter $remainingAdapter[0] -ErrorAction Stop }
-            if (@(Get-VMNetworkAdapter -VMName $vmName -ErrorAction Stop | Where-Object { [string]::Equals([string]$_.Name, [string]$adapter.Name, [StringComparison]::Ordinal) }).Count -ne 0) {
-                throw "Orphaned managed adapter '$($adapter.Name)' still exists after removal."
+            $removalDeadline = [DateTime]::UtcNow.AddSeconds(5)
+            $lastRemovalError = $null
+            do {
+                $currentAdapters = @(Get-VMNetworkAdapter -VMName $vmName -ErrorAction Stop | Where-Object {
+                    [string]::Equals([string]$_.Name, $adapterName, [StringComparison]::Ordinal)
+                })
+                if ($currentAdapters.Count -gt 1) { throw "Orphaned managed adapter '$adapterName' no longer resolves uniquely." }
+                if ($currentAdapters.Count -eq 0) { break }
+                $currentLeases = @(Get-RequestNetworkLeaseInventory -BrokerRoot $BrokerRoot)
+                $currentOwner = Get-RequestNetworkAdapterLeaseOwnership -LeaseInventory $currentLeases -VmName $vmName -VmId $vmId -AdapterName $adapterName
+                if ($currentOwner) { throw "Orphaned managed adapter '$adapterName' acquired an authoritative owner before removal." }
+                try {
+                    if (-not [string]::IsNullOrWhiteSpace([string]$currentAdapters[0].SwitchName)) {
+                        Disconnect-VMNetworkAdapter -VMNetworkAdapter $currentAdapters[0] -ErrorAction Stop | Out-Null
+                    }
+                    $afterDisconnect = @(Get-VMNetworkAdapter -VMName $vmName -ErrorAction Stop | Where-Object {
+                        [string]::Equals([string]$_.Name, $adapterName, [StringComparison]::Ordinal)
+                    })
+                    if ($afterDisconnect.Count -gt 1) { throw "Orphaned managed adapter '$adapterName' no longer resolves uniquely after disconnect." }
+                    if ($afterDisconnect.Count -eq 1) {
+                        Remove-VMNetworkAdapter -VMNetworkAdapter $afterDisconnect[0] -ErrorAction Stop
+                    }
+                    $lastRemovalError = $null
+                }
+                catch {
+                    $lastRemovalError = $_.Exception.Message
+                }
+                if ([DateTime]::UtcNow -lt $removalDeadline) { Start-Sleep -Milliseconds 250 }
+            } while ([DateTime]::UtcNow -lt $removalDeadline)
+            $remainingAdapter = @(Get-VMNetworkAdapter -VMName $vmName -ErrorAction Stop | Where-Object {
+                [string]::Equals([string]$_.Name, $adapterName, [StringComparison]::Ordinal)
+            })
+            if ($remainingAdapter.Count -ne 0) {
+                $suffix = if ([string]::IsNullOrWhiteSpace($lastRemovalError)) { '' } else { " Last provider error: $lastRemovalError" }
+                throw "Orphaned managed adapter '$adapterName' still exists after bounded removal convergence.$suffix"
             }
             $recovered.Add([pscustomobject][ordered]@{ RequestId = $null; Success = $true; Errors = @() })
         }
