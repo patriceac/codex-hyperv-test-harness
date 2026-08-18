@@ -2392,7 +2392,7 @@ try {
         Invoke-PoolBrokerLoop -Config $config
         return
     }
-    Recover-OrphanedPayloadChildren -VmName ([string]$config.VmName)
+    Recover-OrphanedPayloadChildren -VmName ([string]$config.VmName) -ClientSid ([string]$config.ClientSid)
     Recover-InterruptedRequests -Config $config
     $nextCleanupUtc = [DateTime]::MinValue
 

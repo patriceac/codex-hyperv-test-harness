@@ -13,6 +13,23 @@ if ($installer -notmatch 'function\s+Set-BrokerAcl' -or $installer -notmatch 'Di
 }
 $scenarios.Add('canonical-dacl-replaces-existing-rules')
 
+$payloadCachePath = Join-Path (Split-Path -Parent $PSScriptRoot) 'PayloadCache.ps1'
+$payloadCache = Get-Content -LiteralPath $payloadCachePath -Raw
+foreach ($required in @(
+    'function Reset-PayloadChildrenRootBrokerAcl',
+    '$acl.SetAccessRuleProtection($true, $false)',
+    '$acl.SetOwner($administratorsSid)',
+    '[Security.AccessControl.FileSystemRights]::ReadAndExecute',
+    'Reset-PayloadChildrenRootBrokerAcl -ClientSid $ClientSid',
+    'Recover-OrphanedPayloadChildren -VmName $VmName -ClientSid ([string]$Config.ClientSid)'
+)) {
+    if (-not $payloadCache.Contains($required)) { throw "Payload-child idle ACL recovery contract is missing: $required" }
+}
+if (-not $payloadCache.Contains('$remainingAttachments.Count -eq 0')) {
+    throw 'Payload-child ACL recovery is not gated on zero remaining Hyper-V disk attachments.'
+}
+$scenarios.Add('payload-child-transient-hyper-v-aces-removed-at-idle')
+
 if ($installer -notmatch 'ClientSid\s*=\s*\$ClientSid') {
     throw 'Broker configuration does not persist the intended client SID for later ACL audit.'
 }

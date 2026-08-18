@@ -899,8 +899,45 @@ function Remove-PayloadChildSafe {
     -not (Test-Path -LiteralPath $resolvedChild)
 }
 
+function Reset-PayloadChildrenRootBrokerAcl {
+    param([Parameter(Mandatory = $true)] [string] $ClientSid)
+
+    if (-not (Test-Path -LiteralPath $payloadChildrenPath -PathType Container)) {
+        throw "Payload child root is missing: $payloadChildrenPath"
+    }
+    $systemSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+    $administratorsSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+    $clientSidObject = [Security.Principal.SecurityIdentifier]::new($ClientSid)
+    $inheritance = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+    $propagation = [Security.AccessControl.PropagationFlags]::None
+    $allow = [Security.AccessControl.AccessControlType]::Allow
+    $acl = [Security.AccessControl.DirectorySecurity]::new()
+    $acl.SetAccessRuleProtection($true, $false)
+    $acl.SetOwner($administratorsSid)
+    foreach ($sid in @($systemSid, $administratorsSid)) {
+        $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            $sid,
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            $inheritance,
+            $propagation,
+            $allow
+        ))
+    }
+    $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+        $clientSidObject,
+        [Security.AccessControl.FileSystemRights]::ReadAndExecute,
+        $inheritance,
+        $propagation,
+        $allow
+    ))
+    [IO.Directory]::SetAccessControl([IO.Path]::GetFullPath($payloadChildrenPath), $acl)
+}
+
 function Recover-OrphanedPayloadChildren {
-    param([Parameter(Mandatory = $true)] [string[]] $VmName)
+    param(
+        [Parameter(Mandatory = $true)] [string[]] $VmName,
+        [Parameter(Mandatory = $true)] [string] $ClientSid
+    )
 
     $childPrefix = [IO.Path]::GetFullPath($payloadChildrenPath).TrimEnd('\') + '\'
     $allOff = $true
@@ -925,6 +962,18 @@ function Recover-OrphanedPayloadChildren {
     if ($allOff) {
         foreach ($child in Get-ChildItem -LiteralPath $payloadChildrenPath -Filter '*.vhdx' -File -ErrorAction SilentlyContinue) {
             try { Remove-PayloadVhdFileSafe -Path $child.FullName -Root $payloadChildrenPath } catch { }
+        }
+        $remainingAttachments = @(foreach ($name in @($VmName)) {
+            Get-VMHardDiskDrive -VMName $name -ErrorAction SilentlyContinue | Where-Object {
+                $_.Path -and [IO.Path]::GetFullPath($_.Path).StartsWith($childPrefix, [StringComparison]::OrdinalIgnoreCase)
+            }
+        })
+        if ($remainingAttachments.Count -eq 0) {
+            # Hyper-V adds virtualization-service ACEs to this directory while
+            # disposable disks are attached. Once every worker is off and no
+            # child remains attached, restore the broker's exact declared ACL
+            # so an idle pool cannot retain those transient grants.
+            Reset-PayloadChildrenRootBrokerAcl -ClientSid $ClientSid
         }
     }
 }
@@ -1035,7 +1084,7 @@ function Invoke-PayloadCacheGarbageCollection {
         })
         return
     }
-    Recover-OrphanedPayloadChildren -VmName $VmName
+    Recover-OrphanedPayloadChildren -VmName $VmName -ClientSid ([string]$Config.ClientSid)
     foreach ($leaseFile in Get-ChildItem -LiteralPath $payloadLeasePath -Filter '*.json' -File -ErrorAction SilentlyContinue) {
         try {
             $lease = Get-Content -Raw -LiteralPath $leaseFile.FullName | ConvertFrom-Json
