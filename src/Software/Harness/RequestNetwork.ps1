@@ -602,6 +602,16 @@ function Invoke-WithRequestNetworkMutex {
     }
 }
 
+function Invoke-WithRequestNetworkLifecycleMutex {
+    param(
+        [Parameter(Mandatory = $true)] [string] $BrokerRoot,
+        [Parameter(Mandatory = $true)] [scriptblock] $Operation
+    )
+
+    $canonicalBrokerRoot = [IO.Path]::GetFullPath($BrokerRoot).TrimEnd('\').ToUpperInvariant()
+    Invoke-WithRequestNetworkMutex -Key ('lifecycle:' + $canonicalBrokerRoot) -Operation $Operation
+}
+
 function Get-RequestNetworkCanonicalInternetDenyPrefixes {
     @(
         '0.0.0.0/8',

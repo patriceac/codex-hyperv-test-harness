@@ -622,7 +622,9 @@ function Invoke-PoolBrokerLoop {
     }
     Recover-PoolBrokerState
     $null = Recover-OrphanedHostInputResources -BrokerRoot $BrokerRoot
-    $null = Recover-OrphanedRequestNetworkResources -BrokerRoot $BrokerRoot
+    $null = Invoke-WithRequestNetworkLifecycleMutex -BrokerRoot $BrokerRoot -Operation {
+        Recover-OrphanedRequestNetworkResources -BrokerRoot $BrokerRoot
+    }
     $nextCleanupUtc = [DateTime]::MinValue
     $nextHostInputCleanupUtc = [DateTime]::UtcNow.AddSeconds(2)
     $nextRequestNetworkCleanupUtc = [DateTime]::UtcNow.AddSeconds(2)
@@ -634,7 +636,9 @@ function Invoke-PoolBrokerLoop {
             $nextHostInputCleanupUtc = [DateTime]::UtcNow.AddSeconds(2)
         }
         if ([DateTime]::UtcNow -ge $nextRequestNetworkCleanupUtc) {
-            $null = Recover-OrphanedRequestNetworkResources -BrokerRoot $BrokerRoot
+            $null = Invoke-WithRequestNetworkLifecycleMutex -BrokerRoot $BrokerRoot -Operation {
+                Recover-OrphanedRequestNetworkResources -BrokerRoot $BrokerRoot
+            }
             $nextRequestNetworkCleanupUtc = [DateTime]::UtcNow.AddSeconds(2)
         }
         Reconcile-PoolRecoveryRequests

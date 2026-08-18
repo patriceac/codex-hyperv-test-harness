@@ -46,6 +46,7 @@ function Assert-FailClosedExternalProfiles {
 
 $configurationPath = Join-Path $RepositoryRoot 'setup\New-HarnessConfiguration.ps1'
 $brokerPath = Join-Path $RepositoryRoot 'src\Software\Harness\HostBroker.ps1'
+$requestNetworkPath = Join-Path $RepositoryRoot 'src\Software\Harness\RequestNetwork.ps1'
 $installerPath = Join-Path $RepositoryRoot 'src\Software\Harness\Install-PoolHostBroker.ps1'
 $poolBrokerPath = Join-Path $RepositoryRoot 'src\Software\Harness\PoolBroker.ps1'
 $poolLifecyclePath = Join-Path $RepositoryRoot 'src\Software\Harness\PoolLifecycle.ps1'
@@ -88,6 +89,7 @@ Assert-True (-not $fallbackFunction[0].Extent.Text.Contains('Default Switch') -a
 $scenarios.Add('installer-copies-module-and-private-policy')
 
 $brokerText = Get-Content -LiteralPath $brokerPath -Raw
+$requestNetworkText = Get-Content -LiteralPath $requestNetworkPath -Raw
 $brokerSessionIndex = $brokerText.IndexOf('$session = Open-GuestSessionReliable', [StringComparison]::Ordinal)
 $brokerResidueCleanupIndex = $brokerText.IndexOf('Reset-GuestRequestNetworkResidue -Session $session -Policy $requestNetworkDefinition.Policy', [StringComparison]::Ordinal)
 $brokerNetworkConnectIndex = $brokerText.IndexOf('Connect-RequestVmNetwork -Runtime $requestNetworkRuntime', [StringComparison]::Ordinal)
@@ -119,6 +121,17 @@ Assert-True ($modeStopIndex -gt 0 -and $firstIsolationCall -gt 0 -and $firstIsol
 Assert-True ($secondIsolationCall -gt $modeStopIndex -and $secondIsolationCall -lt $startVmIndex) 'Pool worker restart does not repeat the disconnected-network gate.'
 Assert-True ($poolLifecycleText.Contains('$connected.Count -gt 0')) 'Pool lifecycle does not verify that every adapter is disconnected.'
 $scenarios.Add('pool-lifecycle-cleans-before-stop-and-restart')
+
+$hostLifecycleLocks = [regex]::Matches($brokerText, 'Invoke-WithRequestNetworkLifecycleMutex\s+-BrokerRoot\s+\$BrokerRoot\s+-Operation')
+$poolLifecycleLocks = [regex]::Matches($poolBrokerText, 'Invoke-WithRequestNetworkLifecycleMutex\s+-BrokerRoot\s+\$BrokerRoot\s+-Operation')
+Assert-True (
+    $requestNetworkText.Contains('function Invoke-WithRequestNetworkLifecycleMutex') -and
+    $requestNetworkText.Contains("Invoke-WithRequestNetworkMutex -Key ('lifecycle:' + `$canonicalBrokerRoot)") -and
+    $hostLifecycleLocks.Count -ge 6 -and
+    $poolLifecycleLocks.Count -ge 2 -and
+    $poolLifecycleText.Contains('Invoke-WithRequestNetworkLifecycleMutex -BrokerRoot $BrokerRoot -Operation')
+) 'Request creation, adapter mutation, cleanup, and orphan recovery are not serialized across broker processes.'
+$scenarios.Add('request-network-lifecycle-mutations-are-cross-process-serialized')
 
 $auditText = Get-Content -LiteralPath $auditPath -Raw
 foreach ($requiredAuditContract in @(

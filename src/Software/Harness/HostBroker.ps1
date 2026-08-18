@@ -1118,7 +1118,9 @@ function Invoke-GuestRequest {
         # Recovery is owner/identity-aware. Do not exclude the current
         # RequestId: a crashed attempt can leave a stale lease with the same
         # RequestId, and retries must reclaim it before reserving a new one.
-        $null = Recover-OrphanedRequestNetworkResources -BrokerRoot $BrokerRoot
+        $null = Invoke-WithRequestNetworkLifecycleMutex -BrokerRoot $BrokerRoot -Operation {
+            Recover-OrphanedRequestNetworkResources -BrokerRoot $BrokerRoot
+        }
         $failureStage = 'ValidatingRequest'
         Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
         $requestNetworkDefinition = Resolve-RequestNetworkProfile -Request $Request -Config $Config
@@ -1269,9 +1271,13 @@ function Invoke-GuestRequest {
             Write-BrokerState -Status 'PreparingNetwork' -RequestId $requestId -Message "Preparing the approved $($requestNetworkDefinition.EffectiveProfile) request network."
             Write-RequestState -ResultRoot $RequestStateRoot -RequestId $requestId -Status 'PreparingNetwork' -Message "Reserving and securing the approved $($requestNetworkDefinition.EffectiveProfile) adapter before it is connected." -CreatedUtc $createdUtc -ClaimedUtc $ClaimedUtc -ExecutionDeadlineUtc $executionDeadlineUtc -WorkerId $workerId
             $requestNetworkWorkerId = if ($poolMode) { [int]$workerId } else { 1 }
-            $requestNetworkRuntime = New-RequestNetworkRuntime -BrokerRoot $BrokerRoot -Definition $requestNetworkDefinition -RequestId $requestId -VmName $vmName -WorkerId $requestNetworkWorkerId
+            $requestNetworkRuntime = Invoke-WithRequestNetworkLifecycleMutex -BrokerRoot $BrokerRoot -Operation {
+                New-RequestNetworkRuntime -BrokerRoot $BrokerRoot -Definition $requestNetworkDefinition -RequestId $requestId -VmName $vmName -WorkerId $requestNetworkWorkerId
+            }
             Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
-            $requestNetworkAttachment = Prepare-RequestVmNetwork -Runtime $requestNetworkRuntime -VmName $vmName -BrokerRoot $BrokerRoot
+            $requestNetworkAttachment = Invoke-WithRequestNetworkLifecycleMutex -BrokerRoot $BrokerRoot -Operation {
+                Prepare-RequestVmNetwork -Runtime $requestNetworkRuntime -VmName $vmName -BrokerRoot $BrokerRoot
+            }
             Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
         }
 
@@ -1314,7 +1320,9 @@ function Invoke-GuestRequest {
             Write-BrokerState -Status 'VerifyingNetwork' -RequestId $requestId -Message "Connecting, configuring, and attesting the approved $($requestNetworkRuntime.Profile) guest adapter."
             Write-RequestState -ResultRoot $RequestStateRoot -RequestId $requestId -Status 'VerifyingNetwork' -Message 'Revalidating host policy, connecting the secured adapter last, and attesting exact guest address, route, DNS, and IPv6 state.' -CreatedUtc $createdUtc -ClaimedUtc $ClaimedUtc -ExecutionDeadlineUtc $executionDeadlineUtc -WorkerId $workerId
             Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
-            $requestNetworkConnection = Connect-RequestVmNetwork -Runtime $requestNetworkRuntime -VmName $vmName -BrokerRoot $BrokerRoot
+            $requestNetworkConnection = Invoke-WithRequestNetworkLifecycleMutex -BrokerRoot $BrokerRoot -Operation {
+                Connect-RequestVmNetwork -Runtime $requestNetworkRuntime -VmName $vmName -BrokerRoot $BrokerRoot
+            }
             Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
             $requestNetworkLastHostEvidence = $requestNetworkConnection.HostPolicyCheck
             $requestNetworkHostPolicyCheckCount++
@@ -1699,7 +1707,9 @@ function Invoke-GuestRequest {
             # Guest-job completion is the network-use boundary. Revoke the
             # request adapter before taking a potentially long evidence
             # snapshot or publishing any best-effort status update.
-            $requestNetworkCleanup = Remove-RequestNetworkRuntime -Runtime $requestNetworkRuntime -BrokerRoot $BrokerRoot -SuppressErrors
+            $requestNetworkCleanup = Invoke-WithRequestNetworkLifecycleMutex -BrokerRoot $BrokerRoot -Operation {
+                Remove-RequestNetworkRuntime -Runtime $requestNetworkRuntime -BrokerRoot $BrokerRoot -SuppressErrors
+            }
             if ($requestNetworkCleanup.Success) {
                 $requestNetworkCleanupPerformed = $true
             }
@@ -1869,7 +1879,9 @@ function Invoke-GuestRequest {
             try {
                 # Revoke first. Status publication is deliberately best effort
                 # and must never run ahead of a still-connected adapter.
-                $cleanup = Remove-RequestNetworkRuntime -Runtime $requestNetworkRuntime -BrokerRoot $BrokerRoot -SuppressErrors
+                $cleanup = Invoke-WithRequestNetworkLifecycleMutex -BrokerRoot $BrokerRoot -Operation {
+                    Remove-RequestNetworkRuntime -Runtime $requestNetworkRuntime -BrokerRoot $BrokerRoot -SuppressErrors
+                }
                 $requestNetworkCleanup = [pscustomobject][ordered]@{
                     Attempted = $true
                     Success = [bool]$cleanup.Success

@@ -51,8 +51,10 @@ function Remove-WorkerPayloadAttachments {
 }
 
 function Reset-WorkerNetworkIsolation {
-    $null = Recover-OrphanedRequestNetworkResources -BrokerRoot $BrokerRoot
-    Remove-ManagedRequestNetworkAdapters -VmName $vmName -BrokerRoot $BrokerRoot
+    $null = Invoke-WithRequestNetworkLifecycleMutex -BrokerRoot $BrokerRoot -Operation {
+        $null = Recover-OrphanedRequestNetworkResources -BrokerRoot $BrokerRoot
+        Remove-ManagedRequestNetworkAdapters -VmName $vmName -BrokerRoot $BrokerRoot
+    }
     Get-VMNetworkAdapter -VMName $vmName -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -like 'CodexHostInput-*' } |
         Remove-VMNetworkAdapter -ErrorAction SilentlyContinue
