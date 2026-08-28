@@ -55,7 +55,7 @@ function Write-JsonAtomic {
         for ($attempt = 1; $attempt -le 20; $attempt++) {
             try {
                 if ([IO.File]::Exists($Path)) {
-                    Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
+                    [IO.File]::Delete($backupPath)
                     [IO.File]::Replace($temporaryPath, $Path, $backupPath, $true)
                 }
                 else {
@@ -73,8 +73,8 @@ function Write-JsonAtomic {
         }
     }
     finally {
-        Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
+        [IO.File]::Delete($temporaryPath)
+        [IO.File]::Delete($backupPath)
     }
 }
 
@@ -93,6 +93,12 @@ if (-not (Test-Path -LiteralPath $requestNetworkModulePath -PathType Leaf)) {
     throw "Request-network module not found: $requestNetworkModulePath"
 }
 . $requestNetworkModulePath
+$liveEvidenceModulePath = Join-Path $PSScriptRoot 'LiveEvidence.ps1'
+if (-not (Test-Path -LiteralPath $liveEvidenceModulePath -PathType Leaf)) {
+    throw "Live-evidence module not found: $liveEvidenceModulePath"
+}
+. $liveEvidenceModulePath
+$null = Initialize-LiveEvidenceDirectories -BrokerRoot $BrokerRoot
 
 function Write-BrokerState {
     param(
@@ -1021,6 +1027,637 @@ function Remove-GuestEvidenceSnapshot {
     } -ArgumentList $StageRoot
 }
 
+function Remove-HostLiveEvidenceCommand {
+    param(
+        [Parameter(Mandatory = $true)] [string] $CaptureId,
+        [Parameter(Mandatory = $true)] [string] $CommandPath
+    )
+
+    Invoke-WithLiveEvidenceMutex -CaptureId $CaptureId -Operation {
+        Remove-Item -LiteralPath $CommandPath -Force -ErrorAction SilentlyContinue
+    } | Out-Null
+}
+
+function Complete-HostLiveEvidenceFailure {
+    param(
+        [Parameter(Mandatory = $true)] $Context,
+        [Parameter(Mandatory = $true)] [string] $Status,
+        [Parameter(Mandatory = $true)] [string] $FailureKind,
+        [Parameter(Mandatory = $true)] [string] $Message,
+        [string] $LifecycleStage,
+        [Nullable[int]] $ApplicationProcessId,
+        [string] $EvidencePath,
+        $Details
+    )
+
+    $command = $Context.Command
+    $outcome = New-LiveEvidenceOutcome -CaptureId ([string]$command.CaptureId) -RequestId ([string]$command.RequestId) -Status $Status -FailureKind $FailureKind -Message $Message -WorkerId $command.ExpectedWorkerId -LifecycleStage $LifecycleStage -ApplicationProcessId $ApplicationProcessId -EvidencePath $EvidencePath -Details $Details
+    Write-LiveEvidenceOutcome -BrokerRoot $BrokerRoot -CaptureId ([string]$command.CaptureId) -Outcome $outcome | Out-Null
+    Remove-HostLiveEvidenceCommand -CaptureId ([string]$command.CaptureId) -CommandPath ([string]$Context.CommandPath)
+}
+
+function Get-HostLiveEvidenceContext {
+    param(
+        [Parameter(Mandatory = $true)] [string] $RequestId,
+        [Parameter(Mandatory = $true)] $Config,
+        [Parameter(Mandatory = $true)] [int] $ApplicationProcessId
+    )
+
+    Route-LiveEvidenceRequests -BrokerRoot $BrokerRoot -Config $Config
+    Reconcile-LiveEvidenceCommands -BrokerRoot $BrokerRoot -Config $Config
+    $layout = Get-LiveEvidenceLayout -BrokerRoot $BrokerRoot
+    foreach ($commandFile in @(Get-ChildItem -LiteralPath $layout.Processing -Filter '*.json' -File -ErrorAction SilentlyContinue | Sort-Object CreationTimeUtc, Name)) {
+        $candidate = Read-LiveEvidenceJsonSafe -Path $commandFile.FullName
+        if (-not $candidate -or -not [string]::Equals([string]$candidate.RequestId, $RequestId, [StringComparison]::Ordinal)) { continue }
+        $captureId = [string]$candidate.CaptureId
+        $claimed = Invoke-WithLiveEvidenceMutex -CaptureId $captureId -Operation {
+            $command = Read-LiveEvidenceJsonSafe -Path $commandFile.FullName
+            if (-not $command -or [string]$command.Status -ne 'Bound') { return $null }
+            $responsePath = Join-Path $layout.Responses ($captureId + '.json')
+            if (Test-Path -LiteralPath $responsePath -PathType Leaf) {
+                Remove-Item -LiteralPath $commandFile.FullName -Force -ErrorAction SilentlyContinue
+                return $null
+            }
+            $binding = Get-LiveEvidencePoolBinding -BrokerRoot $BrokerRoot -Config $Config -RequestId $RequestId -ExpectedWorkerId $command.ExpectedWorkerId -ExpectedOperationId ([string]$command.ExpectedOperationId)
+            if (-not $binding.Valid) {
+                Complete-LiveEvidenceCommandFailure -BrokerRoot $BrokerRoot -Command $command -Status 'StaleWorkerRequestBinding' -FailureKind 'StaleWorkerRequestBinding' -Message ([string]$binding.Reason) -LifecycleStage ([string]$command.BoundLifecycleStage) -WorkerId $binding.WorkerId -ApplicationProcessId $ApplicationProcessId
+                Remove-Item -LiteralPath $commandFile.FullName -Force -ErrorAction SilentlyContinue
+                return $null
+            }
+            if ([int]$command.ExpectedApplicationProcessId -ne $ApplicationProcessId) {
+                Complete-LiveEvidenceCommandFailure -BrokerRoot $BrokerRoot -Command $command -Status 'StaleWorkerRequestBinding' -FailureKind 'StaleWorkerRequestBinding' -Message 'The application PID no longer matches the broker-bound capture command.' -LifecycleStage ([string]$command.BoundLifecycleStage) -WorkerId $binding.WorkerId -ApplicationProcessId $ApplicationProcessId
+                Remove-Item -LiteralPath $commandFile.FullName -Force -ErrorAction SilentlyContinue
+                return $null
+            }
+            $command | Add-Member -NotePropertyName Status -NotePropertyValue 'Capturing' -Force
+            $command | Add-Member -NotePropertyName HostWorkerProcessId -NotePropertyValue $PID -Force
+            $command | Add-Member -NotePropertyName HostWorkerProcessStartUtc -NotePropertyValue ([Diagnostics.Process]::GetCurrentProcess().StartTime.ToUniversalTime().ToString('o')) -Force
+            Write-JsonAtomic -Path $commandFile.FullName -Value $command
+            [pscustomobject][ordered]@{
+                Command = $command
+                CommandPath = $commandFile.FullName
+                State = 'Claimed'
+                GuestSubmittedUtc = $null
+                CaptureDeadlineUtc = $null
+            }
+        }
+        if ($claimed) { return $claimed }
+    }
+    $null
+}
+
+function Get-GuestLiveEvidenceInventory {
+    param(
+        [Parameter(Mandatory = $true)] [System.Management.Automation.Runspaces.PSSession] $Session,
+        [Parameter(Mandatory = $true)] [string] $ResponseRoot,
+        [Parameter(Mandatory = $true)] [string] $CaptureId,
+        [Parameter(Mandatory = $true)] [object[]] $AllowedFiles
+    )
+
+    Invoke-Command -Session $Session -ErrorAction Stop -ScriptBlock {
+        param($Path, $Id, $Allowed)
+        if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$') { throw 'Invalid live evidence capture ID.' }
+        $allowedRoot = [IO.Path]::GetFullPath('C:\CodexGuest\LiveEvidence\Responses').TrimEnd('\') + '\'
+        $root = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+        if (-not ($root + '\').StartsWith($allowedRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'Live evidence response path escaped the guest response root.' }
+        $rootItem = Get-Item -LiteralPath $root -Force -ErrorAction Stop
+        if (-not $rootItem.PSIsContainer -or ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Live evidence response root is invalid or reparse-backed.' }
+        foreach ($directory in @(Get-ChildItem -LiteralPath $root -Directory -Recurse -Force -ErrorAction Stop)) {
+            if ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Live evidence response contains a reparse directory: $($directory.FullName)" }
+        }
+
+        $allowedByPath = New-Object 'Collections.Generic.Dictionary[string,object]' ([StringComparer]::OrdinalIgnoreCase)
+        foreach ($definition in @($Allowed)) {
+            $relative = [string]$definition.RelativePath
+            if ([string]::IsNullOrWhiteSpace($relative) -or [IO.Path]::IsPathRooted($relative) -or $relative.Contains(':') -or $relative -match '(^|[\\/])\.\.?([\\/]|$)') {
+                throw "Invalid broker allowlist path: $relative"
+            }
+            if ($allowedByPath.ContainsKey($relative)) { throw "Duplicate broker allowlist path: $relative" }
+            $allowedByPath[$relative] = $definition
+        }
+        $sourceFiles = @(Get-ChildItem -LiteralPath $root -File -Recurse -Force -ErrorAction Stop | Sort-Object FullName)
+        if ($sourceFiles.Count -ne $allowedByPath.Count) { throw 'The guest response file count does not match the broker allowlist.' }
+
+        $stageBase = 'C:\Windows\Temp\CodexLiveEvidenceHostStage'
+        New-Item -ItemType Directory -Force -Path $stageBase | Out-Null
+        $stageRoot = Join-Path $stageBase ($Id + '-' + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Force -Path $stageRoot | Out-Null
+        $stageAcl = [Security.AccessControl.DirectorySecurity]::new()
+        $stageAcl.SetAccessRuleProtection($true, $false)
+        $administratorsSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+        $systemSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+        $stageAcl.SetOwner($administratorsSid)
+        $inherit = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+        foreach ($sid in @($administratorsSid, $systemSid)) {
+            $stageAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid, [Security.AccessControl.FileSystemRights]::FullControl, $inherit, [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Allow))
+        }
+        [IO.Directory]::SetAccessControl($stageRoot, $stageAcl)
+
+        $inventory = New-Object Collections.Generic.List[object]
+        $aggregateGuestBytes = [long]0
+        try {
+            foreach ($file in $sourceFiles) {
+                if ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Live evidence response contains a reparse file: $($file.FullName)" }
+                $relativePath = $file.FullName.Substring($root.Length).TrimStart('\')
+                if (-not $allowedByPath.ContainsKey($relativePath)) { throw "Guest live evidence returned an unrequested file: $relativePath" }
+                $definition = $allowedByPath[$relativePath]
+                $maximumBytes = [long]$definition.MaximumBytes
+                if ($maximumBytes -le 0 -or $file.Length -le 0 -or $file.Length -gt $maximumBytes) { throw "Live evidence file exceeded its broker bound: $relativePath" }
+                if ([string]$definition.Kind -eq 'guest-file') {
+                    $aggregateGuestBytes += [long]$file.Length
+                    if ($aggregateGuestBytes -gt 16MB) { throw 'Guest evidence files exceeded the 16 MiB aggregate bound.' }
+                }
+
+                $destination = Join-Path $stageRoot $relativePath
+                New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
+                $copied = $false
+                $lastError = $null
+                for ($attempt = 1; $attempt -le 4; $attempt++) {
+                    $temporary = $destination + '.' + [Guid]::NewGuid().ToString('N') + '.tmp'
+                    try {
+                        $before = Get-Item -LiteralPath $file.FullName -Force -ErrorAction Stop
+                        if ($before.Attributes -band [IO.FileAttributes]::ReparsePoint -or $before.Length -le 0 -or $before.Length -gt $maximumBytes) { throw 'Source validation changed before bounded copy.' }
+                        $beforeHash = (Get-FileHash -LiteralPath $before.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
+                        $sourceStream = $null
+                        $destinationStream = $null
+                        try {
+                            $share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+                            $sourceStream = [IO.File]::Open($before.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, $share)
+                            $destinationStream = [IO.File]::Open($temporary, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+                            $buffer = New-Object byte[] 65536
+                            $copiedBytes = [long]0
+                            while (($read = $sourceStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                                $copiedBytes += $read
+                                if ($copiedBytes -gt $maximumBytes) { throw 'Source grew beyond its broker transfer bound.' }
+                                $destinationStream.Write($buffer, 0, $read)
+                            }
+                            $destinationStream.Flush($true)
+                        }
+                        finally {
+                            if ($destinationStream) { $destinationStream.Dispose() }
+                            if ($sourceStream) { $sourceStream.Dispose() }
+                        }
+                        $after = Get-Item -LiteralPath $file.FullName -Force -ErrorAction Stop
+                        $destinationItem = Get-Item -LiteralPath $temporary -Force -ErrorAction Stop
+                        $destinationHash = (Get-FileHash -LiteralPath $temporary -Algorithm SHA256 -ErrorAction Stop).Hash
+                        $afterHash = (Get-FileHash -LiteralPath $after.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
+                        if ($before.Length -ne $after.Length -or $before.LastWriteTimeUtc -ne $after.LastWriteTimeUtc -or $destinationItem.Length -ne $after.Length -or $beforeHash -ne $destinationHash -or $destinationHash -ne $afterHash) {
+                            throw 'Source changed during the broker-owned bounded snapshot.'
+                        }
+                        [IO.File]::Move($temporary, $destination)
+                        $inventory.Add([ordered]@{
+                            FullName = $destination
+                            RelativePath = $relativePath
+                            Length = [long]$destinationItem.Length
+                            LastWriteUtc = $after.LastWriteTimeUtc.ToString('o')
+                            Sha256 = $destinationHash
+                        })
+                        $copied = $true
+                        break
+                    }
+                    catch {
+                        $lastError = $_.Exception.Message
+                        [IO.File]::Delete($temporary)
+                        if ($attempt -lt 4) { Start-Sleep -Milliseconds ([int](100 * [Math]::Pow(2, $attempt - 1))) }
+                    }
+                }
+                if (-not $copied) { throw "Could not create a stable broker-owned snapshot for '$relativePath': $lastError" }
+            }
+            [pscustomobject][ordered]@{ StageRoot = $stageRoot; Files = $inventory.ToArray() }
+        }
+        catch {
+            Remove-Item -LiteralPath $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
+            throw
+        }
+    } -ArgumentList $ResponseRoot, $CaptureId, $AllowedFiles
+}
+
+function Copy-GuestLiveEvidenceBounded {
+    param(
+        [Parameter(Mandatory = $true)] [System.Management.Automation.Runspaces.PSSession] $Session,
+        [Parameter(Mandatory = $true)] [string] $GuestResponseRoot,
+        [Parameter(Mandatory = $true)] [string] $HostStageRoot,
+        [Parameter(Mandatory = $true)] $GuestResult,
+        [Parameter(Mandatory = $true)] [string[]] $RequestedGuestPaths
+    )
+
+    $allowed = New-Object 'Collections.Generic.Dictionary[string,string]' ([StringComparer]::OrdinalIgnoreCase)
+    $allowed['live-evidence-result.json'] = 'manifest'
+    if ([bool]$GuestResult.Success) { $allowed['live-screenshot.png'] = 'screenshot' }
+    if ([bool]$GuestResult.Success) {
+        foreach ($relativePath in @(Assert-LiveEvidenceRelativePaths -Paths $RequestedGuestPaths)) {
+            $allowed['files\' + $relativePath] = 'guest-file'
+        }
+    }
+    $allowedFiles = @(
+        foreach ($relativePath in $allowed.Keys) {
+            $kind = $allowed[$relativePath]
+            [pscustomobject][ordered]@{
+                RelativePath = $relativePath
+                Kind = $kind
+                MaximumBytes = switch ($kind) {
+                    'manifest' { 256KB }
+                    'screenshot' { $script:LiveEvidenceMaximumScreenshotBytes }
+                    default { $script:LiveEvidenceMaximumGuestFileBytes }
+                }
+            }
+        }
+    )
+    $snapshot = Get-GuestLiveEvidenceInventory -Session $Session -ResponseRoot $GuestResponseRoot -CaptureId ([string]$GuestResult.CaptureId) -AllowedFiles $allowedFiles
+    $inventory = @($snapshot.Files)
+    if ($inventory.Count -lt 1 -or $inventory.Count -gt (2 + $script:LiveEvidenceMaximumGuestFileCount)) {
+        throw "The guest live evidence response contains an invalid file count: $($inventory.Count)."
+    }
+
+    $guestFileBytes = [long]0
+    foreach ($entry in $inventory) {
+        $relativePath = [string]$entry.RelativePath
+        if (-not $allowed.ContainsKey($relativePath)) { throw "Guest live evidence returned an unrequested file: $relativePath" }
+        switch ($allowed[$relativePath]) {
+            'manifest' { if ([long]$entry.Length -le 0 -or [long]$entry.Length -gt 256KB) { throw 'The guest live evidence manifest exceeded its size bound.' } }
+            'screenshot' { if ([long]$entry.Length -le 0 -or [long]$entry.Length -gt $script:LiveEvidenceMaximumScreenshotBytes) { throw 'The live screenshot exceeded its size bound.' } }
+            'guest-file' {
+                if ([long]$entry.Length -le 0 -or [long]$entry.Length -gt $script:LiveEvidenceMaximumGuestFileBytes) { throw "Guest evidence file exceeded its size bound: $relativePath" }
+                $guestFileBytes += [long]$entry.Length
+                if ($guestFileBytes -gt $script:LiveEvidenceMaximumGuestFilesTotalBytes) { throw 'Guest evidence files exceeded their aggregate size bound.' }
+            }
+        }
+    }
+    foreach ($requiredPath in $allowed.Keys) {
+        if ($allowed[$requiredPath] -eq 'guest-file' -and -not [bool]$GuestResult.Success) { continue }
+        if (@($inventory | Where-Object { [string]::Equals([string]$_.RelativePath, $requiredPath, [StringComparison]::OrdinalIgnoreCase) }).Count -ne 1) {
+            throw "Guest live evidence response is missing an expected file: $requiredPath"
+        }
+    }
+
+    try {
+        New-Item -ItemType Directory -Force -Path $HostStageRoot | Out-Null
+        foreach ($entry in $inventory) {
+            $destination = Join-Path $HostStageRoot ([string]$entry.RelativePath)
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
+            Copy-Item -LiteralPath ([string]$entry.FullName) -Destination $destination -FromSession $Session -Force -ErrorAction Stop
+            $hostItem = Get-Item -LiteralPath $destination -Force
+            $hostHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
+            if ([long]$hostItem.Length -ne [long]$entry.Length -or $hostHash -ne [string]$entry.Sha256) {
+                throw "Bounded live evidence transfer verification failed: $([string]$entry.RelativePath)"
+            }
+        }
+        $inventory
+    }
+    finally {
+        Invoke-Command -Session $Session -ErrorAction SilentlyContinue -ScriptBlock {
+            param($StageRoot)
+            $allowedStageRoot = [IO.Path]::GetFullPath('C:\Windows\Temp\CodexLiveEvidenceHostStage').TrimEnd('\') + '\'
+            $resolved = [IO.Path]::GetFullPath($StageRoot)
+            if ($resolved.StartsWith($allowedStageRoot, [StringComparison]::OrdinalIgnoreCase)) {
+                Remove-Item -LiteralPath $resolved -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        } -ArgumentList ([string]$snapshot.StageRoot) | Out-Null
+    }
+}
+
+function New-HostLiveEvidenceDirectorySecurity {
+    param(
+        [Parameter(Mandatory = $true)] [string] $ClientSid,
+        [switch] $ClientRead
+    )
+
+    $clientIdentity = [Security.Principal.SecurityIdentifier]::new($ClientSid)
+    $administratorsIdentity = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+    $systemIdentity = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+    $inheritance = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+    $security = [Security.AccessControl.DirectorySecurity]::new()
+    $security.SetAccessRuleProtection($true, $false)
+    foreach ($identity in @($administratorsIdentity, $systemIdentity)) {
+        $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            $identity,
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            $inheritance,
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Allow))
+    }
+    if ($ClientRead) {
+        $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            $clientIdentity,
+            [Security.AccessControl.FileSystemRights]::ReadAndExecute,
+            $inheritance,
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Allow))
+    }
+    $security
+}
+
+function Initialize-HostLiveEvidencePublicationRoot {
+    param(
+        [Parameter(Mandatory = $true)] [string] $RequestStateRoot,
+        [Parameter(Mandatory = $true)] [string] $ClientSid
+    )
+
+    $requestRoot = [IO.Path]::GetFullPath($RequestStateRoot).TrimEnd('\')
+    $liveRoot = Join-Path $requestRoot 'live-evidence'
+    if (-not (Test-Path -LiteralPath $liveRoot -PathType Container)) {
+        New-Item -ItemType Directory -Path $liveRoot -ErrorAction Stop | Out-Null
+    }
+    $item = Get-Item -LiteralPath $liveRoot -Force -ErrorAction Stop
+    if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw 'The request-scoped live evidence root is invalid or reparse-backed.'
+    }
+    [IO.Directory]::SetAccessControl($liveRoot, (New-HostLiveEvidenceDirectorySecurity -ClientSid $ClientSid -ClientRead))
+    $liveRoot
+}
+
+function Set-HostLiveEvidencePublishedAcl {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Path,
+        [Parameter(Mandatory = $true)] [string] $ClientSid
+    )
+
+    $root = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $item = Get-Item -LiteralPath $root -Force -ErrorAction Stop
+    if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw 'The completed live evidence staging root is invalid or reparse-backed.'
+    }
+    foreach ($descendant in @(Get-ChildItem -LiteralPath $root -Recurse -Force -ErrorAction Stop)) {
+        if ($descendant.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "The completed live evidence staging tree contains a reparse point: $($descendant.FullName)"
+        }
+    }
+    [IO.Directory]::SetAccessControl($root, (New-HostLiveEvidenceDirectorySecurity -ClientSid $ClientSid -ClientRead))
+}
+
+function Get-HostLiveEvidenceInventoryTotalBytes {
+    param([AllowEmptyCollection()] [object[]] $Inventory)
+
+    $total = [long]0
+    foreach ($entry in @($Inventory)) {
+        if ($null -eq $entry -or $null -eq $entry.Length) {
+            throw 'A bounded live-evidence inventory entry is missing its Length value.'
+        }
+        $length = [long]$entry.Length
+        if ($length -lt 0 -or $total -gt ([long]::MaxValue - $length)) {
+            throw 'The bounded live-evidence inventory byte total is invalid.'
+        }
+        $total += $length
+    }
+    $total
+}
+
+function Publish-HostLiveEvidenceDirectoryAtomic {
+    param(
+        [Parameter(Mandatory = $true)] [string] $IncomingPath,
+        [Parameter(Mandatory = $true)] [string] $FinalPath
+    )
+
+    $incoming = [IO.Path]::GetFullPath($IncomingPath).TrimEnd('\')
+    $final = [IO.Path]::GetFullPath($FinalPath).TrimEnd('\')
+    $incomingVolume = [IO.Path]::GetPathRoot($incoming)
+    $finalVolume = [IO.Path]::GetPathRoot($final)
+    if (-not [string]::Equals($incomingVolume, $finalVolume, [StringComparison]::OrdinalIgnoreCase) -or
+        -not [IO.Path]::GetFileName($incoming).StartsWith('.incoming-', [StringComparison]::Ordinal)) {
+        throw 'Live evidence publication requires a broker-private .incoming-* staging tree on the destination volume.'
+    }
+    if (-not (Test-Path -LiteralPath $incoming -PathType Container)) { throw 'Live evidence staging directory is missing.' }
+    if (-not (Test-Path -LiteralPath (Split-Path -Parent $final) -PathType Container)) { throw 'Live evidence destination parent is missing.' }
+    if (Test-Path -LiteralPath $final) { throw 'Live evidence destination already exists.' }
+    [IO.Directory]::Move($incoming, $final)
+}
+
+function Remove-GuestLiveEvidenceArtifacts {
+    param(
+        [Parameter(Mandatory = $true)] [System.Management.Automation.Runspaces.PSSession] $Session,
+        [Parameter(Mandatory = $true)] [string] $CaptureId
+    )
+
+    Invoke-Command -Session $Session -ErrorAction SilentlyContinue -ScriptBlock {
+        param($Id)
+        if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$') { return }
+        foreach ($path in @(
+            (Join-Path 'C:\CodexGuest\LiveEvidence\Inbox' ($Id + '.json')),
+            (Join-Path 'C:\CodexGuest\LiveEvidence\Processing' ($Id + '.json')),
+            (Join-Path 'C:\CodexGuest\LiveEvidence\Responses' $Id),
+            (Join-Path 'C:\CodexGuest\LiveEvidence\Transfer' ($Id + '.json'))
+        )) { Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue }
+    } -ArgumentList $CaptureId | Out-Null
+}
+
+function Invoke-HostLiveEvidenceService {
+    param(
+        $Context,
+        [Parameter(Mandatory = $true)] [System.Management.Automation.Runspaces.PSSession] $Session,
+        [Parameter(Mandatory = $true)] [string] $RequestId,
+        [Parameter(Mandatory = $true)] $Config,
+        [Parameter(Mandatory = $true)] [string] $RequestStateRoot,
+        [Parameter(Mandatory = $true)] [string] $LifecycleStage,
+        [Parameter(Mandatory = $true)] [int] $ApplicationProcessId,
+        [Parameter(Mandatory = $true)] [DateTime] $ExecutionDeadlineUtc
+    )
+
+    if (-not $Context) {
+        $Context = Get-HostLiveEvidenceContext -RequestId $RequestId -Config $Config -ApplicationProcessId $ApplicationProcessId
+        if (-not $Context) { return $null }
+    }
+    $command = $Context.Command
+    $captureId = [string]$command.CaptureId
+    $layout = Get-LiveEvidenceLayout -BrokerRoot $BrokerRoot
+    $responsePath = Join-Path $layout.Responses ($captureId + '.json')
+    if (Test-Path -LiteralPath $responsePath -PathType Leaf) {
+        Remove-HostLiveEvidenceCommand -CaptureId $captureId -CommandPath ([string]$Context.CommandPath)
+        return $null
+    }
+
+    $disposition = Get-LiveEvidenceLifecycleDisposition -LifecycleStage $LifecycleStage -ApplicationProcessId $ApplicationProcessId
+    if ($disposition -eq 'Terminal' -or [DateTime]::UtcNow -ge $ExecutionDeadlineUtc) {
+        Complete-HostLiveEvidenceFailure -Context $Context -Status 'RequestAlreadyTerminal' -FailureKind 'RequestAlreadyTerminal' -Message 'The request became terminal before the live capture could be published.' -LifecycleStage $LifecycleStage -ApplicationProcessId $ApplicationProcessId
+        return $null
+    }
+    if ($disposition -ne 'Supported' -or [int]$command.ExpectedApplicationProcessId -ne $ApplicationProcessId) {
+        Complete-HostLiveEvidenceFailure -Context $Context -Status 'StaleWorkerRequestBinding' -FailureKind 'StaleWorkerRequestBinding' -Message 'The request lifecycle or application PID changed after the capture was bound.' -LifecycleStage $LifecycleStage -ApplicationProcessId $ApplicationProcessId
+        return $null
+    }
+
+    try {
+        if ([string]$Context.State -eq 'Claimed') {
+            $guestTransferRoot = 'C:\CodexGuest\LiveEvidence\Transfer'
+            $guestTransferFile = Join-Path $guestTransferRoot ($captureId + '.json')
+            $guestInboxFile = Join-Path 'C:\CodexGuest\LiveEvidence\Inbox' ($captureId + '.json')
+            Remove-GuestLiveEvidenceArtifacts -Session $Session -CaptureId $captureId
+            Invoke-Command -Session $Session -ErrorAction Stop -ScriptBlock {
+                param($Root)
+                New-Item -ItemType Directory -Force -Path $Root | Out-Null
+            } -ArgumentList $guestTransferRoot
+            Copy-Item -LiteralPath ([string]$Context.CommandPath) -Destination $guestTransferFile -ToSession $Session -Force -ErrorAction Stop
+            Invoke-Command -Session $Session -ErrorAction Stop -ScriptBlock {
+                param($Transfer, $Inbox)
+                Move-Item -LiteralPath $Transfer -Destination $Inbox -Force
+            } -ArgumentList $guestTransferFile, $guestInboxFile
+            $Context.State = 'GuestSubmitted'
+            $Context.GuestSubmittedUtc = [DateTime]::UtcNow
+            $captureLimit = $Context.GuestSubmittedUtc.AddMilliseconds([int]$command.CaptureTimeoutMilliseconds + 10000)
+            $Context.CaptureDeadlineUtc = if ($captureLimit -lt $ExecutionDeadlineUtc) { $captureLimit } else { $ExecutionDeadlineUtc }
+            $command | Add-Member -NotePropertyName GuestSubmittedUtc -NotePropertyValue $Context.GuestSubmittedUtc.ToString('o') -Force
+            Write-JsonAtomic -Path ([string]$Context.CommandPath) -Value $command
+            return $Context
+        }
+
+        $guestResponseRoot = Join-Path 'C:\CodexGuest\LiveEvidence\Responses' $captureId
+        $guestResult = Invoke-Command -Session $Session -ErrorAction Stop -ScriptBlock {
+            param($Root)
+            $resultPath = Join-Path $Root 'live-evidence-result.json'
+            if (-not (Test-Path -LiteralPath $resultPath -PathType Leaf)) { return $null }
+            $item = Get-Item -LiteralPath $resultPath -Force
+            if ($item.Length -le 0 -or $item.Length -gt 256KB) { throw 'Guest live evidence result exceeded its size bound.' }
+            Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json -ErrorAction Stop
+        } -ArgumentList $guestResponseRoot
+        if (-not $guestResult) {
+            if ([DateTime]::UtcNow -ge [DateTime]$Context.CaptureDeadlineUtc) {
+                Complete-HostLiveEvidenceFailure -Context $Context -Status 'ScreenshotInfrastructureFailure' -FailureKind 'ScreenshotInfrastructureFailure' -Message 'The interactive guest did not publish a bounded live capture before its capture deadline.' -LifecycleStage $LifecycleStage -ApplicationProcessId $ApplicationProcessId
+                Remove-GuestLiveEvidenceArtifacts -Session $Session -CaptureId $captureId
+                return $null
+            }
+            return $Context
+        }
+        if (-not [string]::Equals([string]$guestResult.CaptureId, $captureId, [StringComparison]::Ordinal) -or
+            -not [string]::Equals([string]$guestResult.RequestId, $RequestId, [StringComparison]::Ordinal) -or
+            [int]$guestResult.ApplicationProcessId -ne $ApplicationProcessId) {
+            throw 'The guest live evidence result does not match the broker-bound capture identity.'
+        }
+
+        $liveRoot = Initialize-HostLiveEvidencePublicationRoot -RequestStateRoot $RequestStateRoot -ClientSid ([string]$Config.ClientSid)
+        $finalRoot = Join-Path $liveRoot $captureId
+        if (Test-Path -LiteralPath $finalRoot) { throw 'A live evidence directory already exists for this capture ID; refusing to treat it as a fresh capture.' }
+        $incomingRoot = Join-Path $layout.Processing ('.incoming-' + $captureId + '-' + [Guid]::NewGuid().ToString('N'))
+        $publishedRoot = $null
+        try {
+            $inventory = @(Copy-GuestLiveEvidenceBounded -Session $Session -GuestResponseRoot $guestResponseRoot -HostStageRoot $incomingRoot -GuestResult $guestResult -RequestedGuestPaths @($command.GuestEvidencePaths))
+            $copiedGuestResult = Get-Content -LiteralPath (Join-Path $incomingRoot 'live-evidence-result.json') -Raw | ConvertFrom-Json -ErrorAction Stop
+            if (-not [string]::Equals([string]$copiedGuestResult.CaptureId, [string]$guestResult.CaptureId, [StringComparison]::Ordinal) -or
+                -not [string]::Equals([string]$copiedGuestResult.RequestId, [string]$guestResult.RequestId, [StringComparison]::Ordinal) -or
+                [bool]$copiedGuestResult.Success -ne [bool]$guestResult.Success -or
+                -not [string]::Equals([string]$copiedGuestResult.Status, [string]$guestResult.Status, [StringComparison]::Ordinal)) {
+                throw 'The broker-owned guest manifest snapshot changed after the live result was observed.'
+            }
+            if ([bool]$guestResult.Success) {
+                if ((ConvertTo-LiveEvidenceUtcString -Value $copiedGuestResult.CapturedUtc) -ne (ConvertTo-LiveEvidenceUtcString -Value $guestResult.CapturedUtc) -or
+                    -not [string]::Equals([string]$copiedGuestResult.Screenshot.Sha256, [string]$guestResult.Screenshot.Sha256, [StringComparison]::OrdinalIgnoreCase)) {
+                    throw 'The broker-owned guest manifest snapshot does not match the captured screenshot identity.'
+                }
+                $guestRecords = @($guestResult.GuestEvidenceFiles)
+                $requestedPaths = @(Assert-LiveEvidenceRelativePaths -Paths @($command.GuestEvidencePaths))
+                if ($guestRecords.Count -ne $requestedPaths.Count) { throw 'The guest evidence manifest does not contain exactly the requested allowlist.' }
+                foreach ($relativePath in $requestedPaths) {
+                    $record = @($guestRecords | Where-Object { [string]::Equals([string]$_.RelativePath, $relativePath, [StringComparison]::OrdinalIgnoreCase) })
+                    if ($record.Count -ne 1) { throw "The guest evidence manifest is missing or duplicates '$relativePath'." }
+                    $hostGuestFile = Join-Path (Join-Path $incomingRoot 'files') $relativePath
+                    if (-not (Test-Path -LiteralPath $hostGuestFile -PathType Leaf)) { throw "The bounded transfer omitted guest evidence '$relativePath'." }
+                    $hostGuestItem = Get-Item -LiteralPath $hostGuestFile -Force
+                    $hostGuestHash = (Get-FileHash -LiteralPath $hostGuestFile -Algorithm SHA256).Hash
+                    if ([long]$hostGuestItem.Length -ne [long]$record[0].Length -or -not [string]::Equals($hostGuestHash, [string]$record[0].Sha256, [StringComparison]::OrdinalIgnoreCase)) {
+                        throw "Guest evidence integrity verification failed: $relativePath"
+                    }
+                }
+            }
+            $currentState = Read-LiveEvidenceJsonSafe -Path (Join-Path $RequestStateRoot 'request-state.json')
+            $currentLifecycle = if ($currentState) { [string]$currentState.Status } else { $LifecycleStage }
+            $binding = Get-LiveEvidencePoolBinding -BrokerRoot $BrokerRoot -Config $Config -RequestId $RequestId -ExpectedWorkerId $command.ExpectedWorkerId -ExpectedOperationId ([string]$command.ExpectedOperationId)
+            $guestProcessStillRunning = Invoke-Command -Session $Session -ErrorAction Stop -ScriptBlock {
+                param($ProcessId)
+                $null -ne (Get-Process -Id ([int]$ProcessId) -ErrorAction SilentlyContinue)
+            } -ArgumentList $ApplicationProcessId
+            $remainedActive = [bool]$guestResult.ApplicationRunningAfterCapture -and [bool]$guestProcessStillRunning -and [bool]$binding.Valid -and
+                -not (Test-Path -LiteralPath (Join-Path $RequestStateRoot 'broker-result.json') -PathType Leaf) -and
+                (Get-LiveEvidenceLifecycleDisposition -LifecycleStage $currentLifecycle -ApplicationProcessId $ApplicationProcessId) -eq 'Supported'
+
+            $screenshotRecord = $null
+            if ([bool]$guestResult.Success) {
+                $screenshotPath = Join-Path $incomingRoot 'live-screenshot.png'
+                if (-not (Test-Path -LiteralPath $screenshotPath -PathType Leaf)) { throw 'The successful guest response omitted the fresh screenshot.' }
+                $screenshotItem = Get-Item -LiteralPath $screenshotPath -Force
+                $screenshotHash = (Get-FileHash -LiteralPath $screenshotPath -Algorithm SHA256).Hash
+                if ([long]$screenshotItem.Length -ne [long]$guestResult.Screenshot.Length -or $screenshotHash -ne [string]$guestResult.Screenshot.Sha256) { throw 'The host screenshot does not match the guest capture manifest.' }
+                if ([int]$guestResult.Screenshot.Width -le 0 -or [int]$guestResult.Screenshot.Height -le 0) { throw 'The guest screenshot dimensions are invalid.' }
+                $requestedUtc = [DateTime]::MinValue
+                $capturedUtc = [DateTime]::MinValue
+                if (-not [DateTime]::TryParse([string]$command.RequestedUtc, [ref]$requestedUtc) -or -not [DateTime]::TryParse([string]$guestResult.CapturedUtc, [ref]$capturedUtc) -or $capturedUtc.ToUniversalTime() -lt $requestedUtc.ToUniversalTime().AddSeconds(-5)) {
+                    throw 'The guest screenshot freshness timestamps do not prove this capture attempt is current.'
+                }
+                $screenshotRecord = [ordered]@{
+                    Path = Join-Path $finalRoot 'live-screenshot.png'
+                    Length = [long]$screenshotItem.Length
+                    Width = [int]$guestResult.Screenshot.Width
+                    Height = [int]$guestResult.Screenshot.Height
+                    Sha256 = $screenshotHash
+                }
+            }
+
+            $hostManifest = [ordered]@{
+                FormatVersion = 1
+                CaptureId = $captureId
+                RequestId = $RequestId
+                Success = [bool]$guestResult.Success
+                Status = [string]$guestResult.Status
+                FailureKind = [string]$guestResult.FailureKind
+                RequestedUtc = [string]$command.RequestedUtc
+                CaptureStartedUtc = [string]$guestResult.CaptureStartedUtc
+                CapturedUtc = [string]$guestResult.CapturedUtc
+                HostPublishedUtc = [DateTime]::UtcNow.ToString('o')
+                WorkerId = if ($null -ne $command.ExpectedWorkerId) { [int]$command.ExpectedWorkerId } else { $null }
+                WorkerOperationId = [string]$command.ExpectedOperationId
+                LifecycleStage = [string]$command.BoundLifecycleStage
+                LifecycleStageAfterCapture = $currentLifecycle
+                ApplicationProcessId = $ApplicationProcessId
+                ApplicationRunningBeforeCapture = [bool]$guestResult.ApplicationRunningBeforeCapture
+                ApplicationRunningAfterCapture = [bool]$guestResult.ApplicationRunningAfterCapture
+                RequestRemainedActiveAfterCapture = [bool]$remainedActive
+                Screenshot = $screenshotRecord
+                GuestEvidenceFiles = @($guestResult.GuestEvidenceFiles | ForEach-Object {
+                    [ordered]@{
+                        RelativePath = [string]$_.RelativePath
+                        Path = Join-Path (Join-Path $finalRoot 'files') ([string]$_.RelativePath)
+                        Length = [long]$_.Length
+                        Sha256 = [string]$_.Sha256
+                        SourceLastWriteUtc = [string]$_.SourceLastWriteUtc
+                    }
+                })
+                BoundedTransferFileCount = $inventory.Count
+                BoundedTransferBytes = Get-HostLiveEvidenceInventoryTotalBytes -Inventory $inventory
+            }
+            Write-JsonAtomic -Path (Join-Path $incomingRoot 'capture.json') -Value $hostManifest
+            Set-HostLiveEvidencePublishedAcl -Path $incomingRoot -ClientSid ([string]$Config.ClientSid)
+            Publish-HostLiveEvidenceDirectoryAtomic -IncomingPath $incomingRoot -FinalPath $finalRoot
+            $publishedRoot = $finalRoot
+
+            if ([bool]$guestResult.Success) {
+                $outcome = New-LiveEvidenceOutcome -CaptureId $captureId -RequestId $RequestId -Status 'Captured' -Message 'Fresh broker-mediated live evidence was published atomically.' -Success $true -WorkerId $command.ExpectedWorkerId -LifecycleStage ([string]$command.BoundLifecycleStage) -ApplicationProcessId $ApplicationProcessId -EvidencePath $finalRoot -Details $hostManifest
+                $outcome['CapturedUtc'] = [string]$guestResult.CapturedUtc
+                $outcome['Screenshot'] = $screenshotRecord
+                $outcome['GuestEvidenceFiles'] = @($hostManifest.GuestEvidenceFiles)
+                $outcome['RequestRemainedActiveAfterCapture'] = [bool]$remainedActive
+                Write-LiveEvidenceOutcome -BrokerRoot $BrokerRoot -CaptureId $captureId -Outcome $outcome | Out-Null
+            }
+            else {
+                Complete-HostLiveEvidenceFailure -Context $Context -Status ([string]$guestResult.Status) -FailureKind ([string]$guestResult.FailureKind) -Message ([string]$guestResult.Message) -LifecycleStage $LifecycleStage -ApplicationProcessId $ApplicationProcessId -EvidencePath $finalRoot -Details $hostManifest
+            }
+        }
+        catch {
+            if ($publishedRoot -and (Test-Path -LiteralPath $publishedRoot -PathType Container)) {
+                Remove-Item -LiteralPath $publishedRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            throw
+        }
+        finally {
+            Remove-Item -LiteralPath $incomingRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        Remove-GuestLiveEvidenceArtifacts -Session $Session -CaptureId $captureId
+        Remove-HostLiveEvidenceCommand -CaptureId $captureId -CommandPath ([string]$Context.CommandPath)
+        return $null
+    }
+    catch {
+        Complete-HostLiveEvidenceFailure -Context $Context -Status 'ScreenshotInfrastructureFailure' -FailureKind 'ScreenshotInfrastructureFailure' -Message $_.Exception.Message -LifecycleStage $LifecycleStage -ApplicationProcessId $ApplicationProcessId
+        try { Remove-GuestLiveEvidenceArtifacts -Session $Session -CaptureId $captureId } catch { }
+        return $null
+    }
+}
+
 function Invoke-GuestRequest {
     param(
         [Parameter(Mandatory = $true)] $Request,
@@ -1108,6 +1745,7 @@ function Invoke-GuestRequest {
     $evidenceSnapshotAttempts = 0
     $evidenceTransferAttempts = 0
     $evidenceWarnings = New-Object Collections.Generic.List[string]
+    $liveEvidenceContext = $null
     $executionTimeoutSeconds = Get-BoundedTimeout -Value $Request.ExecutionTimeoutSeconds -Default 900 -Minimum 10 -Maximum 7200
     $executionDeadlineUtc = $ClaimedUtc.AddSeconds($executionTimeoutSeconds)
     $createdUtc = [DateTime]::Parse([string]$Request.CreatedUtc).ToUniversalTime()
@@ -1648,6 +2286,37 @@ function Invoke-GuestRequest {
             Write-BrokerState -Status ([string]$guestLifecycle.Status) -RequestId $requestId -Message ([string]$guestLifecycle.Message)
             Write-RequestState @lifecycleStateParameters
 
+            $liveApplicationProcessId = if ($null -ne $guestLifecycle.ApplicationProcessId) {
+                [int]$guestLifecycle.ApplicationProcessId
+            }
+            elseif ($completionState.ApplicationLease -and $null -ne $completionState.ApplicationLease.ProcessId) {
+                [int]$completionState.ApplicationLease.ProcessId
+            }
+            else { 0 }
+            if ($liveApplicationProcessId -gt 0 -and [string]$guestLifecycle.Status -in @('ApplicationRunning', 'GuestAction')) {
+                try {
+                    $liveEvidenceContext = Invoke-HostLiveEvidenceService `
+                        -Context $liveEvidenceContext `
+                        -Session $session `
+                        -RequestId $requestId `
+                        -Config $Config `
+                        -RequestStateRoot $RequestStateRoot `
+                        -LifecycleStage ([string]$guestLifecycle.Status) `
+                        -ApplicationProcessId $liveApplicationProcessId `
+                        -ExecutionDeadlineUtc $executionDeadlineUtc
+                }
+                catch {
+                    if ($liveEvidenceContext) {
+                        try {
+                            Complete-HostLiveEvidenceFailure -Context $liveEvidenceContext -Status 'ScreenshotInfrastructureFailure' -FailureKind 'ScreenshotInfrastructureFailure' -Message $_.Exception.Message -LifecycleStage ([string]$guestLifecycle.Status) -ApplicationProcessId $liveApplicationProcessId
+                        }
+                        catch {
+                        }
+                    }
+                    $liveEvidenceContext = $null
+                }
+            }
+
             $firstApplicationConfirmation = -not $applicationRunningPublished -and [bool]$guestLifecycle.ApplicationConfirmed
             if ($firstApplicationConfirmation) {
                 $applicationRunningPublished = $true
@@ -1658,6 +2327,10 @@ function Invoke-GuestRequest {
             }
 
             if ($completionState.Result -or $completionState.AgentError) {
+                if ($liveEvidenceContext) {
+                    Complete-HostLiveEvidenceFailure -Context $liveEvidenceContext -Status 'RequestAlreadyTerminal' -FailureKind 'RequestAlreadyTerminal' -Message 'The guest request reached terminal evidence before the live capture completed.' -LifecycleStage 'CollectingEvidence' -ApplicationProcessId $(if ($liveApplicationProcessId -gt 0) { $liveApplicationProcessId } else { $null })
+                    $liveEvidenceContext = $null
+                }
                 break
             }
             if ($completionState.Completed) {
@@ -1873,6 +2546,14 @@ function Invoke-GuestRequest {
         $lockEvidenceAfter = Get-HostLockEvidence
     }
     finally {
+        if ($liveEvidenceContext) {
+            try {
+                Complete-HostLiveEvidenceFailure -Context $liveEvidenceContext -Status 'RequestAlreadyTerminal' -FailureKind 'RequestAlreadyTerminal' -Message 'The request left its live application stage before capture publication completed.' -LifecycleStage 'StoppingVm' -ApplicationProcessId ([int]$liveEvidenceContext.Command.ExpectedApplicationProcessId)
+            }
+            catch {
+            }
+            $liveEvidenceContext = $null
+        }
         if ($requestNetworkRuntime -and -not $requestNetworkCleanupPerformed) {
             $failureStageBeforeCleanup = $failureStage
             $requestNetworkCleanup.Attempted = $true
@@ -2398,6 +3079,14 @@ try {
 
     while ($true) {
         Write-BrokerState
+        try {
+            Route-LiveEvidenceRequests -BrokerRoot $BrokerRoot -Config $config
+            Reconcile-LiveEvidenceCommands -BrokerRoot $BrokerRoot -Config $config
+        }
+        catch {
+            # Observation commands are auxiliary; malformed or contended
+            # requests must not stop the canonical execution queue.
+        }
         if (Test-Path -LiteralPath $maintenancePath -PathType Leaf) {
             Write-BrokerState -Status 'Maintenance' -Message 'The queue is paused for broker or baseline maintenance.'
             Start-Sleep -Milliseconds 500

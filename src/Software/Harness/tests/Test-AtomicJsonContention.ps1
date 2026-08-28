@@ -27,6 +27,7 @@ $targetPath = Join-Path $testRoot 'state.json'
 New-Item -ItemType Directory -Force -Path $testRoot | Out-Null
 $processes = New-Object Collections.Generic.List[object]
 $scenarios = New-Object Collections.Generic.List[string]
+$powerShellExecutable = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
 try {
     Set-Item -LiteralPath 'Function:\script:Write-JsonAtomic' -Value ([scriptblock]::Create($writerBody))
     Write-JsonAtomic -Path $targetPath -Value ([ordered]@{ Writer = -1; Iteration = -1; Token = [Guid]::NewGuid().ToString('N') })
@@ -45,7 +46,7 @@ for (`$iteration = 0; `$iteration -lt 80; `$iteration++) {
 [IO.File]::WriteAllText('$($successPath.Replace("'", "''"))', 'ok')
 "@
         $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($workerCommand))
-        $process = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList @(
+        $process = Start-Process -FilePath $powerShellExecutable -ArgumentList @(
             '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', $encodedCommand
         ) -WindowStyle Hidden -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
         $processes.Add([pscustomobject]@{ Process = $process; StdOut = $stdoutPath; StdErr = $stderrPath; Success = $successPath })

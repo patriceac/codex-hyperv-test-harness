@@ -7,6 +7,7 @@ $seedRoot = $seedVolume.DriveLetter + ':\guest'
 New-Item -ItemType Directory -Force -Path $agentRoot | Out-Null
 Copy-Item -LiteralPath (Join-Path $seedRoot 'GuestAgent.ps1') -Destination $agentRoot -Force
 Copy-Item -LiteralPath (Join-Path $seedRoot 'GuestAgentSupervisor.ps1') -Destination $agentRoot -Force
+Copy-Item -LiteralPath (Join-Path $seedRoot 'GuestLiveEvidence.ps1') -Destination $agentRoot -Force
 Copy-Item -LiteralPath (Join-Path $seedRoot 'InputProbe.exe') -Destination $agentRoot -Force
 
 foreach ($directoryName in @('Inbox', 'Processing', 'Completed', 'Outbox')) {

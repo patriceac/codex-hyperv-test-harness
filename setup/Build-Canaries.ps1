@@ -26,7 +26,8 @@ $targets = @(
     @{ Source = 'DetachedLockCanary.cs'; Output = 'DetachedLockCanary.exe' },
     @{ Source = 'HarnessContractCanary.cs'; Output = 'HarnessContractCanary.exe' },
     @{ Source = 'HostInputCanary.cs'; Output = 'HostInputCanary.exe' },
-    @{ Source = 'NetworkBoundaryCanary.cs'; Output = 'NetworkBoundaryCanary.exe' }
+    @{ Source = 'NetworkBoundaryCanary.cs'; Output = 'NetworkBoundaryCanary.exe' },
+    @{ Source = 'LiveEvidenceCanary.cs'; Output = 'LiveEvidenceCanary.exe' }
 )
 
 $lock = $null

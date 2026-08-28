@@ -123,6 +123,52 @@ Inspect the active request and queue without changing them:
 
 Each queued or claimed entry includes `OwnershipStatus` plus the current per-request `Status`, `Message`, worker/application PID, and guest action fields when available. This separates queue ownership from actual execution progress.
 
+## Observe a running request without changing it
+
+Capture fresh live evidence through the broker with the exact request ID reported by the runner:
+
+```powershell
+& "$env:USERPROFILE\.agents\skills\hyperv-test-executables\scripts\Capture-HyperVExecutableTestLiveEvidence.ps1" `
+  -RequestId 'executable-test-...' `
+  -GuestEvidencePath @('release-gate-progress.json', 'milestones\phase-2.png')
+```
+
+The screenshot is mandatory and always fresh for that invocation. `-GuestEvidencePath` is an optional per-capture allowlist of at most 16 literal relative paths below the active request's `{OUTDIR}`. Each requested file is limited to 4 MiB and all requested files together to 16 MiB. Absolute paths, wildcards, empty/`.`/`..` segments, alternate streams, traversal, directories, and any reparse-point traversal are rejected. `-CaptureTimeoutMilliseconds` accepts 3000 through 30000; `-WaitTimeoutSeconds` only controls how long the client waits for the broker response and never changes the original request's queue or execution deadline.
+
+Live screenshots are supported only while the broker confirms both an application PID and lifecycle `ApplicationRunning` or `GuestAction` (including a `wait_result_file` guest action). Other outcomes are explicit:
+
+- `RequestNotFound`: the ID is not queued, broker-owned/running, or terminal.
+- `QueuedNotRunning`: the request is still waiting for a worker.
+- `GuestDesktopNotReady`: the request is claimed or preparing, but no supported interactive application stage is confirmed.
+- `RequestAlreadyTerminal`: result/evidence collection, cleanup, or another terminal stage has begun.
+- `StaleWorkerRequestBinding`: the processing record, worker ID, worker operation, request state, or application PID no longer agrees.
+- `ScreenshotInfrastructureFailure`: the interactive capture or its bounded verified transfer failed.
+- `GuestEvidencePathRejected` / `GuestEvidenceUnavailable`: an optional file was unsafe, absent, too large, unstable while being copied, or otherwise unreadable.
+
+A successful JSON response has `Status=Captured` and reports `CaptureId`, `RequestId`, `WorkerId`, `LifecycleStage`, `ApplicationProcessId`, guest capture time, width, height, SHA-256, the request-scoped `EvidencePath`, copied guest-file metadata, and `RequestRemainedActiveAfterCapture`. The atomically published directory is `Results\<RequestId>\live-evidence\<CaptureId>` below the installed broker root and contains `capture.json`, `live-evidence-result.json`, `live-screenshot.png`, and any requested files under `files\`. A classified non-success returns JSON with `Success=false`, a distinct `Status`/`FailureKind`, and no stale screenshot substituted as current evidence.
+
+The client never opens a Hyper-V session, selects or manages a VM, injects keyboard/mouse input, changes networking, alters host inputs/payloads, or cancels/restarts/extends the request. The SYSTEM broker atomically claims the command, binds it to the current worker operation, relays only small control JSON over its existing Hyper-V Direct channel, and publishes only bounded hash-verified files. Capture state transitions are mutex-protected and the interactive guest agent services captures serially for its active request; publication uses a client-inaccessible broker staging tree plus an atomic same-volume rename into a request-scoped read-only directory, and terminal-evidence races resolve to either a complete capture directory or an explicit terminal/stale outcome.
+
+Limitations: this is a screenshot plus small-file snapshot, not video or remote control. It cannot inspect a queued request, a pre-login desktop, a recovering guest agent, or a request already collecting terminal evidence. An application can change immediately after the post-capture liveness check; use `RequestRemainedActiveAfterCapture` as the bounded observation, not a future-running guarantee.
+
+For a long `wait_result_file`, run the test in one terminal/task and observe it from another after the first terminal reports the request ID and `GuestAction ... wait_result_file`:
+
+```powershell
+# Terminal A: actions.json contains a long wait_result_file action.
+& "$env:USERPROFILE\.agents\skills\hyperv-test-executables\scripts\Invoke-HyperVExecutableTest.ps1" `
+  -ArtifactPath 'D:\build\LongRunningApp' `
+  -ExecutableRelativePath 'LongRunningApp.exe' `
+  -ActionsPath 'D:\build\actions.json' `
+  -ExecutionTimeoutSeconds 900
+
+# Terminal B, while Terminal A is still waiting:
+& "$env:USERPROFILE\.agents\skills\hyperv-test-executables\scripts\Capture-HyperVExecutableTestLiveEvidence.ps1" `
+  -RequestId 'executable-test-20260828T190000000Z-...' `
+  -GuestEvidencePath 'release-gate-progress.json'
+```
+
+Repeat the Terminal B command to obtain another unique capture and compare capture times/hashes. Let Terminal A finish normally and verify its ordinary terminal evidence and worker cleanup independently.
+
 Cancel a queued or running request by its reported ID:
 
 ```powershell

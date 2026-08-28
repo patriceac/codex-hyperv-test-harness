@@ -30,7 +30,7 @@ $installationMutationStarted = $false
 $credentialExistedBefore = $false
 $installCommitted = $false
 $rollbackSucceeded = $false
-$installedFiles = @('HostBroker.ps1', 'PayloadCache.ps1', 'HostInputShare.ps1', 'RequestNetwork.ps1', 'PoolCommon.ps1', 'PoolBroker.ps1', 'PoolLifecycle.ps1', 'HostWorker.ps1')
+$installedFiles = @('HostBroker.ps1', 'PayloadCache.ps1', 'HostInputShare.ps1', 'RequestNetwork.ps1', 'LiveEvidence.ps1', 'PoolCommon.ps1', 'PoolBroker.ps1', 'PoolLifecycle.ps1', 'HostWorker.ps1')
 $backedUpNames = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
 
 function New-FailClosedRequestNetworkPolicy {
@@ -221,6 +221,10 @@ try {
 
     $privateRoot = Join-Path $BrokerRoot 'Private'
     $requestNetworkLeaseRoot = Join-Path $BrokerRoot 'State\NetworkLeases'
+    $liveEvidenceRoot = Join-Path $BrokerRoot 'LiveEvidence'
+    $liveEvidenceRequestRoot = Join-Path $liveEvidenceRoot 'Requests'
+    $liveEvidenceProcessingRoot = Join-Path $liveEvidenceRoot 'Processing'
+    $liveEvidenceResponseRoot = Join-Path $liveEvidenceRoot 'Responses'
     $userWritable = @('Requests', 'Processing', 'Archive', 'Results', 'Staging', 'PayloadManifests', 'Cancellations', 'Cancelled') | ForEach-Object { Join-Path $BrokerRoot $_ }
     $systemWritable = @(
         (Join-Path $BrokerRoot 'State'),
@@ -233,6 +237,7 @@ try {
     New-Item -ItemType Directory -Force -Path $BrokerRoot, $privateRoot, $backupRoot | Out-Null
     New-Item -ItemType Directory -Force -Path ($userWritable + $systemWritable) | Out-Null
     New-Item -ItemType Directory -Force -Path $requestNetworkLeaseRoot | Out-Null
+    New-Item -ItemType Directory -Force -Path $liveEvidenceRoot, $liveEvidenceRequestRoot, $liveEvidenceProcessingRoot, $liveEvidenceResponseRoot | Out-Null
 
     # Establish a canonical DACL before any credential or configuration file is
     # created. Set-Acl replaces every prior explicit rule, so a reused install
@@ -241,6 +246,10 @@ try {
     foreach ($directory in $userWritable) { Set-BrokerAcl -Path $directory -ClientMode Modify -ClientInherits }
     foreach ($directory in $systemWritable) { Set-BrokerAcl -Path $directory -ClientMode ReadExecute -ClientInherits }
     Set-BrokerAcl -Path $requestNetworkLeaseRoot -ClientMode None
+    Set-BrokerAcl -Path $liveEvidenceRoot -ClientMode ReadExecute
+    Set-BrokerAcl -Path $liveEvidenceRequestRoot -ClientMode Modify -ClientInherits
+    Set-BrokerAcl -Path $liveEvidenceProcessingRoot -ClientMode None
+    Set-BrokerAcl -Path $liveEvidenceResponseRoot -ClientMode Read -ClientInherits
     Set-BrokerAcl -Path $privateRoot -ClientMode None
     Set-BrokerAcl -Path $backupRoot -ClientMode None
 
@@ -327,6 +336,10 @@ try {
         Set-BrokerAcl -Path $directory -ClientMode ReadExecute -ClientInherits
     }
     Set-BrokerAcl -Path $requestNetworkLeaseRoot -ClientMode None
+    Set-BrokerAcl -Path $liveEvidenceRoot -ClientMode ReadExecute
+    Set-BrokerAcl -Path $liveEvidenceRequestRoot -ClientMode Modify -ClientInherits
+    Set-BrokerAcl -Path $liveEvidenceProcessingRoot -ClientMode None
+    Set-BrokerAcl -Path $liveEvidenceResponseRoot -ClientMode Read -ClientInherits
     Set-BrokerAcl -Path $privateRoot -ClientMode None
     foreach ($name in $installedFiles) {
         Set-BrokerAcl -Path (Join-Path $BrokerRoot $name) -ClientMode Read

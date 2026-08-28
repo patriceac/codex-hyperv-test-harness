@@ -16,8 +16,8 @@ foreach ($script in @(Get-ChildItem -LiteralPath $repositoryRoot -Recurse -File 
 if ($parseFailures.Count -gt 0) { throw "PowerShell source contains $($parseFailures.Count) parse error(s): $($parseFailures | ConvertTo-Json -Compress)" }
 
 $built = @(& (Join-Path $PSScriptRoot 'Build-Canaries.ps1') -CanaryRoot (Join-Path $softwareRoot 'Canaries'))
-if ($built.Count -ne 5 -or @($built | Where-Object { -not (Test-Path -LiteralPath $_.Output -PathType Leaf) }).Count -gt 0) {
-    throw 'The five C# canaries were not rebuilt successfully.'
+if ($built.Count -ne 6 -or @($built | Where-Object { -not (Test-Path -LiteralPath $_.Output -PathType Leaf) }).Count -gt 0) {
+    throw 'The six C# canaries were not rebuilt successfully.'
 }
 $guestTool = & (Join-Path $softwareRoot 'Harness\Build-GuestTools.ps1')
 if (-not (Test-Path -LiteralPath $guestTool.Output -PathType Leaf)) { throw 'The guest input probe was not rebuilt successfully.' }

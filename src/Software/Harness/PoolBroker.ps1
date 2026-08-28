@@ -644,6 +644,14 @@ function Invoke-PoolBrokerLoop {
         Reconcile-PoolRecoveryRequests
         Complete-PoolQueuedTerminalRequests
         Write-PoolQueuePositions
+        try {
+            Route-LiveEvidenceRequests -BrokerRoot $BrokerRoot -Config $Config
+            Reconcile-LiveEvidenceCommands -BrokerRoot $BrokerRoot -Config $Config
+        }
+        catch {
+            # Live observation is auxiliary and must not interrupt queue,
+            # worker, deadline, network, or terminal-evidence processing.
+        }
 
         $maintenance = Test-Path -LiteralPath $maintenancePath -PathType Leaf
         if ($maintenance) {

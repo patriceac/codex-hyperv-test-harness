@@ -381,6 +381,10 @@ function Wait-GuestResultFile {
     $watch = [Diagnostics.Stopwatch]::StartNew()
     $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
     do {
+        if (Get-Command -Name Invoke-GuestLiveEvidenceHeartbeat -CommandType Function -ErrorAction SilentlyContinue) {
+            Invoke-GuestLiveEvidenceHeartbeat -NotAfterUtc $deadline
+        }
+        if ([DateTime]::UtcNow -ge $deadline) { break }
         $item = Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue
         if ($item -and -not $item.PSIsContainer -and $item.Length -gt 0) {
             $watch.Stop()
@@ -391,7 +395,9 @@ function Wait-GuestResultFile {
                 ElapsedMilliseconds = [Math]::Round($watch.Elapsed.TotalMilliseconds, 3)
             }
         }
-        Start-Sleep -Milliseconds 100
+        $remainingMilliseconds = [int][Math]::Ceiling(($deadline - [DateTime]::UtcNow).TotalMilliseconds)
+        if ($remainingMilliseconds -le 0) { break }
+        Start-Sleep -Milliseconds ([Math]::Min(100, $remainingMilliseconds))
     } while ([DateTime]::UtcNow -lt $deadline)
     $watch.Stop()
     [pscustomobject][ordered]@{
@@ -862,6 +868,12 @@ function Capture-Screen {
     throw "[CAPTURE_INFRASTRUCTURE] Screen capture failed after $($attemptLog.Count) attempts over $([Math]::Round($watch.Elapsed.TotalMilliseconds, 3)) ms: $lastError Attempts=$diagnostic"
 }
 
+$guestLiveEvidenceModule = Join-Path $agentRoot 'GuestLiveEvidence.ps1'
+if (-not (Test-Path -LiteralPath $guestLiveEvidenceModule -PathType Leaf)) {
+    throw "Guest live evidence module is missing: $guestLiveEvidenceModule"
+}
+. $guestLiveEvidenceModule
+
 function Mount-GuestHostInputs {
     param([object[]] $Definitions)
 
@@ -1017,6 +1029,8 @@ function Invoke-GuestJob {
             Executable = $executable
             StartedUtc = [DateTime]::UtcNow.ToString('o')
         })
+        Set-GuestLiveEvidenceContext -RequestId $jobId -OutputPath $jobOutputPath -ApplicationProcessId ([int]$process.Id) -LifecycleStage 'ApplicationRunning'
+        Invoke-GuestLiveEvidenceHeartbeat
 
         if ($Job.assertResultFile) {
             $assertionPath = Resolve-GuestOutputPath -Value ([string]$Job.assertResultFile) -JobOutputPath $jobOutputPath -Context 'assertResultFile'
@@ -1032,6 +1046,7 @@ function Invoke-GuestJob {
             $actionTestPassed = $null
             $stopActions = $false
             Write-AgentState -Status 'RunningJob' -JobId $jobId -ActionType $actionType -ActionIndex $actionIndex
+            Update-GuestLiveEvidenceContext -LifecycleStage 'GuestAction'
             try {
                 switch ($actionType) {
                     'wait_window' {
@@ -1091,7 +1106,13 @@ function Invoke-GuestJob {
                         if ($waitMilliseconds -lt 0 -or $waitMilliseconds -gt 300000) {
                             throw 'wait ms must be between 0 and 300000.'
                         }
-                        Start-Sleep -Milliseconds $waitMilliseconds
+                        $waitDeadline = [DateTime]::UtcNow.AddMilliseconds($waitMilliseconds)
+                        do {
+                            Invoke-GuestLiveEvidenceHeartbeat -NotAfterUtc $waitDeadline
+                            $remainingWait = [int][Math]::Ceiling(($waitDeadline - [DateTime]::UtcNow).TotalMilliseconds)
+                            if ($remainingWait -le 0) { break }
+                            Start-Sleep -Milliseconds ([Math]::Min(100, $remainingWait))
+                        } while ([DateTime]::UtcNow -lt $waitDeadline)
                     }
                     'wait_process_exit' {
                         $timeout = if ($action.timeoutMs) { [int]$action.timeoutMs } else { 300000 }
@@ -1099,7 +1120,20 @@ function Invoke-GuestJob {
                             throw 'wait_process_exit timeoutMs must be between 100 and 7200000.'
                         }
                         $waitWatch = [Diagnostics.Stopwatch]::StartNew()
-                        $exited = $process.WaitForExit($timeout)
+                        $waitDeadline = [DateTime]::UtcNow.AddMilliseconds($timeout)
+                        $exited = $false
+                        do {
+                            Invoke-GuestLiveEvidenceHeartbeat -NotAfterUtc $waitDeadline
+                            $process.Refresh()
+                            if ($process.HasExited) {
+                                $exitWithinDeadline = try { $process.ExitTime.ToUniversalTime() -le $waitDeadline } catch { [DateTime]::UtcNow -le $waitDeadline }
+                                if ($exitWithinDeadline) { $exited = $true }
+                                break
+                            }
+                            $remainingWait = [int][Math]::Ceiling(($waitDeadline - [DateTime]::UtcNow).TotalMilliseconds)
+                            if ($remainingWait -le 0) { break }
+                            $null = $process.WaitForExit([Math]::Min(100, $remainingWait))
+                        } while ([DateTime]::UtcNow -lt $waitDeadline)
                         $waitWatch.Stop()
                         $testEvaluated = $true
                         if (-not $exited) {
@@ -1211,6 +1245,8 @@ function Invoke-GuestJob {
                     $stoppedAfterActionIndex = $actionIndex
                     break
                 }
+                Update-GuestLiveEvidenceContext -LifecycleStage 'ApplicationRunning'
+                Invoke-GuestLiveEvidenceHeartbeat
             }
             catch {
                 if ($actionType -eq 'screenshot' -and $_.Exception.Message.StartsWith('[CAPTURE_INFRASTRUCTURE]', [StringComparison]::Ordinal)) {
@@ -1325,6 +1361,7 @@ function Invoke-GuestJob {
         if ([string]::IsNullOrWhiteSpace($failureKind)) { $failureKind = 'Harness' }
     }
     finally {
+        Clear-GuestLiveEvidenceContext
         if ($process) {
             Write-AgentState -Status 'CleaningUpJob' -JobId $jobId
             $processCleanup = Stop-GuestProcessTree -RootProcessId ([int]$process.Id)
