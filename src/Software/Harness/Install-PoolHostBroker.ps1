@@ -245,6 +245,15 @@ try {
     Set-BrokerAcl -Path $BrokerRoot -ClientMode ReadExecute
     foreach ($directory in $userWritable) { Set-BrokerAcl -Path $directory -ClientMode Modify -ClientInherits }
     foreach ($directory in $systemWritable) { Set-BrokerAcl -Path $directory -ClientMode ReadExecute -ClientInherits }
+    foreach ($publicStateName in @('broker-state.json', 'pool-state.json')) {
+        $publicStatePath = Join-Path (Join-Path $BrokerRoot 'State') $publicStateName
+        if (Test-Path -LiteralPath $publicStatePath -PathType Leaf) {
+            # Atomic replacement preserves the destination DACL. Normalize
+            # reused status files while the old broker is stopped so queue
+            # diagnostics remain readable after an in-place reinstall.
+            Set-BrokerAcl -Path $publicStatePath -ClientMode Read
+        }
+    }
     Set-BrokerAcl -Path $requestNetworkLeaseRoot -ClientMode None
     Set-BrokerAcl -Path $liveEvidenceRoot -ClientMode ReadExecute
     Set-BrokerAcl -Path $liveEvidenceRequestRoot -ClientMode Modify -ClientInherits
