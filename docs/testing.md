@@ -18,6 +18,8 @@ The guest `InputProbe.exe` had the same source-provenance gap. Its C# source and
 
 GitHub Actions runs layers 1 and 2. A release should also have current local evidence for layers 3 and 4.
 
+Keyboard interaction uses the request action `{ "type": "send_keys", "keys": "WIN+LEFT" }`. The runner, broker, and guest independently enforce the same named-key allowlist and bounded chord shape; no request may supply raw virtual-key numbers, scan codes, scripts, or more than one non-modifier key. For a release proof, capture screenshots immediately before and after the chord and verify the guest `Actions` evidence records the exact canonical chord and virtual-key codes.
+
 ## Network-profile expectations
 
 Pure web behavior should be tested browser-first when that is faithful. Hyper-V tests remain required for native shells, tray behavior, installers, WebView2, Windows integration, and claims about the VM network boundary.

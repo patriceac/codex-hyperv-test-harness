@@ -332,12 +332,14 @@ try {
         -BrokerRoot $BrokerRoot `
         -DefinitionPath $PoolDefinitionPath `
         -StatusPath (Join-Path $SourceRoot 'pool-provision-status.json') `
+        -ConfigPath $ConfigPath `
         -ForceRecreate
     & (Join-Path $SourceRoot 'Install-PoolHostBroker.ps1') `
         -SourceRoot $SourceRoot `
         -BrokerRoot $BrokerRoot `
         -PoolDefinitionPath $PoolDefinitionPath `
-        -StatusPath (Join-Path $SourceRoot 'pool-broker-install-status.json')
+        -StatusPath (Join-Path $SourceRoot 'pool-broker-install-status.json') `
+        -ConfigPath $ConfigPath
     $refreshedPoolDefinition = Get-Content -LiteralPath $PoolDefinitionPath -Raw | ConvertFrom-Json
     if ([string]$refreshedPoolDefinition.SourceCheckpointId -ne [string]$verifiedBaseline.Id) {
         throw 'The rebuilt pool definition does not reference the refreshed clean checkpoint.'

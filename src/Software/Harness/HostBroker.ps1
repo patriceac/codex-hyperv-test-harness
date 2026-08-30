@@ -5,6 +5,48 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+function Get-ValidatedKeyChord {
+    param(
+        [Parameter(Mandatory = $true)] $Action,
+        [Parameter(Mandatory = $true)] [string] $Context
+    )
+
+    $allowedProperties = @('type', 'keys', 'holdMs')
+    $unexpectedProperties = @($Action.PSObject.Properties.Name | Where-Object { $_ -notin $allowedProperties })
+    if ($unexpectedProperties.Count -gt 0) { throw "$Context send_keys contains unsupported properties: $($unexpectedProperties -join ', ')." }
+    $keySpec = [string]$Action.keys
+    if ([string]::IsNullOrWhiteSpace($keySpec)) { throw "$Context send_keys requires keys." }
+    if ($keySpec.Length -gt 64 -or $keySpec -cnotmatch '^[A-Z0-9]+(?:\+[A-Z0-9]+)*$') {
+        throw "$Context send_keys keys must be an uppercase '+'-separated chord of at most 64 characters."
+    }
+    $allowedKeys = @(
+        'CTRL', 'ALT', 'SHIFT', 'WIN', 'LEFT', 'UP', 'RIGHT', 'DOWN', 'ENTER', 'ESCAPE', 'TAB', 'SPACE',
+        'BACKSPACE', 'DELETE', 'INSERT', 'HOME', 'END', 'PAGEUP', 'PAGEDOWN',
+        'F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12',
+        'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S',
+        'T', 'U', 'V', 'W', 'X', 'Y', 'Z', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9'
+    )
+    $modifiers = @('CTRL', 'ALT', 'SHIFT', 'WIN')
+    $keys = @($keySpec.Split([char]'+'))
+    if ($keys.Count -gt 5) { throw "$Context send_keys may contain at most four modifiers and one non-modifier key." }
+    if (@($keys | Select-Object -Unique).Count -ne $keys.Count) { throw "$Context send_keys does not allow duplicate keys." }
+    foreach ($key in $keys) {
+        if ($key -notin $allowedKeys) { throw "$Context send_keys key '$key' is not supported." }
+    }
+    if ($keys.Count -gt 1 -and ($keys[-1] -in $modifiers -or @($keys[0..($keys.Count - 2)] | Where-Object { $_ -notin $modifiers }).Count -gt 0)) {
+        throw "$Context send_keys chords must list one or more modifiers followed by exactly one non-modifier key."
+    }
+    if ($Action.PSObject.Properties.Name -contains 'holdMs') {
+        try {
+            $holdMilliseconds = [int]$Action.holdMs
+            if ([double]$Action.holdMs -ne [double]$holdMilliseconds) { throw 'not an integer' }
+        }
+        catch { throw "$Context send_keys holdMs must be a whole number between 10 and 2000." }
+        if ($holdMilliseconds -lt 10 -or $holdMilliseconds -gt 2000) { throw "$Context send_keys holdMs must be between 10 and 2000." }
+    }
+    $keys
+}
+
 if ([string]::IsNullOrWhiteSpace($BrokerRoot)) {
     $pointerPath = Join-Path $env:ProgramData 'CodexHyperVBroker\location.json'
     if (-not (Test-Path -LiteralPath $pointerPath -PathType Leaf)) { throw "BrokerRoot was not supplied and the location pointer is missing: $pointerPath" }
@@ -2056,11 +2098,14 @@ function Invoke-GuestRequest {
         for ($actionIndex = 0; $actionIndex -lt @($job.actions).Count; $actionIndex++) {
             $action = @($job.actions)[$actionIndex]
             $actionType = [string]$action.type
+            if ($actionType -eq 'send_keys') {
+                $null = Get-ValidatedKeyChord -Action $action -Context "Action $($actionIndex + 1)"
+            }
             foreach ($property in @($action.PSObject.Properties)) {
                 if ($property.Value -isnot [string]) {
                     continue
                 }
-                $tokensAllowedHere = if ($property.Name -eq 'type' -or ($actionType -eq 'screenshot' -and $property.Name -eq 'name')) {
+                $tokensAllowedHere = if ($property.Name -eq 'type' -or ($actionType -eq 'screenshot' -and $property.Name -eq 'name') -or ($actionType -eq 'send_keys' -and $property.Name -eq 'keys')) {
                     @()
                 }
                 elseif ($actionType -eq 'wait_result_file' -and $property.Name -eq 'path') {
