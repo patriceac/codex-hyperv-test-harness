@@ -22,8 +22,9 @@ The host runner accepts `wait_window`, `focus_window`, `click_control`, `click_r
 
 ## User-visible control lease
 
-- A fuchsia halo appears around every attached display for five seconds before the application launches.
-- Physical mouse movement, mouse buttons, wheel input, or keyboard input pauses the action sequence immediately. Controller-generated input is marked and ignored by the physical-input detector.
+- One thin, continuous fuchsia frame with a soft inward glow appears around every attached display for five seconds before the application launches. Its frame bands do not overlap, so the corners cannot accumulate into solid blocks.
+- During that initial five-second grace period, ordinary mouse and keyboard activity does not pause the countdown or turn the halo amber. Physical `Escape` still cancels immediately.
+- After the grace period expires, physical mouse movement, mouse buttons, wheel input, or keyboard input pauses the action sequence immediately. Controller-generated input is marked and ignored by the physical-input detector.
 - The halo turns amber while paused. After ten uninterrupted seconds without physical input, the controller brings the tracked application back to the foreground, verifies that focus belongs to its process tree, turns the halo fuchsia, and continues.
 - Physical `Escape` cancels and is swallowed so it is not also delivered to the application.
 - The halo uses non-activating, click-through windows and requests Windows capture protection. The runner keeps its own evidence clean by copying only the controlled app bounds; when full exclusion is unavailable, it briefly suppresses only the halo windows for that copy. The JSON records both the capture method and whether OS-level protection was available.
@@ -31,4 +32,4 @@ The host runner accepts `wait_window`, `focus_window`, `click_control`, `click_r
 
 Synthetic input is global to the interactive session even though the runner verifies the intended foreground process immediately before injection. Stop and report a focus-restoration failure; never type or click into an unverified foreground window. Host execution exposes the application to the real user profile, files, registry, credentials, devices, network, and persistence mechanisms. Use it for trusted software or a genuinely host-only test, not merely for convenience.
 
-The JSON result records the five/ten-second policy, monitor count, OS capture-protection state, user-pause count, focus-restoration count, total paused time, action log (including screenshot capture method), assertion, and process cleanup under `%LOCALAPPDATA%\Codex\HostControl\Results` unless `-ResultsRoot` was selected.
+The JSON result records the five/ten-second policy, grace-versus-post-grace input behavior, continuous frame geometry, monitor count, OS capture-protection state, user-pause count, focus-restoration count, total paused time, action log (including screenshot capture method), assertion, and process cleanup under `%LOCALAPPDATA%\Codex\HostControl\Results` unless `-ResultsRoot` was selected.

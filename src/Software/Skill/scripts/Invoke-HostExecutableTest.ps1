@@ -17,10 +17,12 @@ param(
 $ErrorActionPreference = 'Stop'
 $initialWarningSeconds = 5
 $resumeIdleSeconds = 10
+$haloFrameThicknessPixels = 12
 $script:observedPhysicalInputVersion = [long]0
 $script:userPauseCount = 0
 $script:focusRestoreCount = 0
 $script:totalPausedMilliseconds = [long]0
+$script:pauseDetectionArmed = $false
 $script:windowHandle = [IntPtr]::Zero
 $script:runtime = $null
 $script:rootProcess = $null
@@ -311,7 +313,10 @@ function Wait-ForHostControlReady {
     param([switch] $RefocusAfterResume)
 
     $snapshot = Throw-IfHostControlCancelled
-    if (-not [Codex.HostControl.HostControlContract]::HasUnobservedPhysicalInput($snapshot.PhysicalInputVersion, $script:observedPhysicalInputVersion)) { return $false }
+    if (-not [Codex.HostControl.HostControlContract]::ShouldPauseForPhysicalInput(
+        $script:pauseDetectionArmed,
+        $snapshot.PhysicalInputVersion,
+        $script:observedPhysicalInputVersion)) { return $false }
 
     $pauseStarted = [DateTime]::UtcNow
     $script:userPauseCount++
@@ -336,14 +341,13 @@ function Wait-InitialHostControlWarning {
     $script:runtime.SetState([Codex.HostControl.HaloState]::Warning)
     $deadline = [DateTime]::UtcNow.AddSeconds($initialWarningSeconds)
     while ([DateTime]::UtcNow -lt $deadline) {
-        $snapshot = Throw-IfHostControlCancelled
-        if ([Codex.HostControl.HostControlContract]::HasUnobservedPhysicalInput($snapshot.PhysicalInputVersion, $script:observedPhysicalInputVersion)) {
-            $null = Wait-ForHostControlReady
-            return
-        }
+        $null = Throw-IfHostControlCancelled
         Start-Sleep -Milliseconds 50
     }
+    $snapshot = Throw-IfHostControlCancelled
+    $script:observedPhysicalInputVersion = [long]$snapshot.PhysicalInputVersion
     $script:runtime.SetState([Codex.HostControl.HaloState]::Active)
+    $script:pauseDetectionArmed = $true
 }
 
 function Wait-HostControlDelay {
@@ -624,8 +628,11 @@ $contract = [ordered]@{
     ResumeIdleSeconds = $resumeIdleSeconds
     CancelKey = 'Escape'
     ActiveHaloColor = '#F000FF'
-    UserActivityBehavior = 'PauseImmediately'
+    InitialGraceInputBehavior = 'IgnoreForPause'
+    PostGraceInputBehavior = 'PauseImmediately'
     ResumeBehavior = 'RefocusThenContinue'
+    HaloRendering = 'ContinuousNonOverlappingBands'
+    HaloFrameThicknessPixels = $haloFrameThicknessPixels
     ExecutionTarget = 'PhysicalHost'
 }
 if ($ValidateOnly) {
@@ -643,8 +650,9 @@ if ($ValidateOnly) {
 Assert-InteractiveHostSession
 Import-HostControlNative
 if ([Codex.HostControl.HostControlContract]::InitialWarningSeconds -ne $initialWarningSeconds -or
-    [Codex.HostControl.HostControlContract]::ResumeIdleSeconds -ne $resumeIdleSeconds) {
-    throw 'The PowerShell and native host-control timing contracts disagree.'
+    [Codex.HostControl.HostControlContract]::ResumeIdleSeconds -ne $resumeIdleSeconds -or
+    [Codex.HostControl.HostControlContract]::HaloFrameThicknessPixels -ne $haloFrameThicknessPixels) {
+    throw 'The PowerShell and native host-control timing or visual contracts disagree.'
 }
 
 if ([string]::IsNullOrWhiteSpace($ResultsRoot)) {
@@ -668,7 +676,7 @@ try {
     $script:runtime = New-Object Codex.HostControl.HostControlRuntime
     $initialSnapshot = $script:runtime.GetSnapshot()
     $script:observedPhysicalInputVersion = [long]$initialSnapshot.PhysicalInputVersion
-    Write-Host "Host control armed for '$($artifact.Name)'. Fuchsia halo visible; control begins in five seconds. Press Escape to cancel."
+    Write-Host "Host control armed for '$($artifact.Name)'. Fuchsia halo visible; control begins in five seconds. Mouse and keyboard activity will not pause this grace period; press Escape to cancel."
     Wait-InitialHostControlWarning
     $null = Wait-ForHostControlReady
 
@@ -824,6 +832,10 @@ $result = [ordered]@{
         ResumeIdleSeconds = $resumeIdleSeconds
         CancelKey = 'Escape'
         ActiveHaloColor = '#F000FF'
+        InitialGraceInputBehavior = 'IgnoreForPause'
+        PostGraceInputBehavior = 'PauseImmediately'
+        HaloRendering = 'ContinuousNonOverlappingBands'
+        HaloFrameThicknessPixels = [Codex.HostControl.HostControlContract]::HaloFrameThicknessPixels
         MonitorCount = if ($initialSnapshot) { $initialSnapshot.MonitorCount } else { 0 }
         OsCaptureProtectionSucceeded = if ($initialSnapshot) { [bool]$initialSnapshot.CaptureProtectionSucceeded } else { $false }
         FullCaptureExclusionSucceeded = if ($initialSnapshot) { [string]$initialSnapshot.CaptureProtectionMode -eq 'ExcludeFromCapture' } else { $false }
