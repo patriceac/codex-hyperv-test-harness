@@ -10,13 +10,14 @@ $deployPath = Join-Path $setupRoot 'Deploy-HarnessRelease.ps1'
 $acceptancePath = Join-Path $setupRoot 'Invoke-HarnessReleaseAcceptance.ps1'
 $installPath = Join-Path $setupRoot 'Install.ps1'
 $runnerPath = Join-Path $softwareRoot 'Skill\scripts\Invoke-HyperVExecutableTest.ps1'
+$poolBrokerPath = Join-Path $harnessRoot 'PoolBroker.ps1'
 $recoveryWrapperPath = Join-Path $setupRoot 'Refresh-LocalRecovery.ps1'
 $publicAuditPath = Join-Path $setupRoot 'Test-PublicRepository.ps1'
 $deploymentDocPath = Join-Path $repositoryRoot 'docs\deployment.md'
 $skillPath = Join-Path $repositoryRoot '.agents\skills\setup-hyperv-harness\SKILL.md'
 $scenarios = New-Object Collections.Generic.List[string]
 
-foreach ($path in @($deployPath, $acceptancePath, $installPath, $runnerPath, $recoveryWrapperPath, $publicAuditPath, $deploymentDocPath, $skillPath)) {
+foreach ($path in @($deployPath, $acceptancePath, $installPath, $runnerPath, $poolBrokerPath, $recoveryWrapperPath, $publicAuditPath, $deploymentDocPath, $skillPath)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Release contract input is missing: $path" }
 }
 
@@ -67,6 +68,30 @@ if ($acceptanceSource -match '\.Parameters\.ActionsPath' -or
     throw "Release acceptance does not handle the expected-power-off test's absent optional ActionsPath safely."
 }
 $scenarios.Add('three-path-isolated-acceptance-is-exactly-bound')
+
+if ($acceptanceSource -notmatch "Invoke-PoolAuditUnderMaintenance -Name 'pre-acceptance-audit'" -or
+    $acceptanceSource -notmatch "Invoke-PoolAuditUnderMaintenance -Name 'post-acceptance-audit'" -or
+    $acceptanceSource -notmatch 'MaintenanceCleanupCompleted' -or
+    $acceptanceSource -notmatch 'OwnerToken' -or
+    $acceptanceSource -notmatch 'finally\s*\{' -or
+    $acceptanceSource -notmatch 'Remove-Item -LiteralPath \$maintenancePath') {
+    throw 'Strict release audits are not bracketed by an owned, cleanup-proven broker maintenance drain.'
+}
+. $poolBrokerPath
+$cleanupNowUtc = [DateTime]::UtcNow
+if (-not (Test-PoolPayloadCleanupDue -MaintenanceActive $true -MaintenanceCleanupCompleted $false -AllWorkerStatesOff $true -NowUtc $cleanupNowUtc -NextCleanupUtc $cleanupNowUtc.AddMinutes(5)) -or
+    (Test-PoolPayloadCleanupDue -MaintenanceActive $true -MaintenanceCleanupCompleted $true -AllWorkerStatesOff $true -NowUtc $cleanupNowUtc -NextCleanupUtc $cleanupNowUtc.AddMinutes(5)) -or
+    (Test-PoolPayloadCleanupDue -MaintenanceActive $true -MaintenanceCleanupCompleted $false -AllWorkerStatesOff $false -NowUtc $cleanupNowUtc -NextCleanupUtc $cleanupNowUtc.AddMinutes(5)) -or
+    -not (Test-PoolPayloadCleanupDue -MaintenanceActive $false -MaintenanceCleanupCompleted $false -AllWorkerStatesOff $true -NowUtc $cleanupNowUtc -NextCleanupUtc $cleanupNowUtc.AddSeconds(-1))) {
+    throw 'Pool payload cleanup scheduling does not distinguish a new drained maintenance cycle from normal periodic cleanup.'
+}
+$poolBrokerSource = Get-Content -LiteralPath $poolBrokerPath -Raw
+if ($poolBrokerSource -notmatch '\$maintenanceGcState\.Status -eq ''Completed''' -or
+    $poolBrokerSource -notmatch '\$maintenanceGcStartedUtc -ge \$nowUtc' -or
+    $poolBrokerSource.IndexOf('Invoke-PayloadCacheGarbageCollection', [StringComparison]::Ordinal) -gt $poolBrokerSource.IndexOf('$maintenanceGcState = Get-Content', [StringComparison]::Ordinal)) {
+    throw 'The broker does not record maintenance cleanup only after payload garbage collection restores transient ACLs.'
+}
+$scenarios.Add('strict-release-audits-use-maintenance-drain-and-immediate-acl-cleanup')
 
 $parsedKeyboardActions = Get-Content -LiteralPath (Join-Path $softwareRoot 'Canaries\release-keyboard-actions.json') -Raw | ConvertFrom-Json
 $keyboardActions = @($parsedKeyboardActions)

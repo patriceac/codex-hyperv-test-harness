@@ -10,6 +10,31 @@ $ErrorActionPreference = 'Stop'
 $InstallRoot = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')
 if ([IO.Path]::GetPathRoot($InstallRoot) -eq $InstallRoot) { throw 'InstallRoot must be a specific non-root directory.' }
 
+function Write-JsonAtomic {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Path,
+        [Parameter(Mandatory = $true)] $Value
+    )
+
+    $parent = Split-Path -Parent $Path
+    New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    $temporaryPath = $Path + '.' + [Guid]::NewGuid().ToString('N') + '.tmp'
+    $backupPath = $temporaryPath + '.bak'
+    try {
+        $Value | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $temporaryPath -Encoding UTF8
+        if ([IO.File]::Exists($Path)) {
+            [IO.File]::Replace($temporaryPath, $Path, $backupPath, $true)
+        }
+        else {
+            [IO.File]::Move($temporaryPath, $Path)
+        }
+    }
+    finally {
+        [IO.File]::Delete($temporaryPath)
+        [IO.File]::Delete($backupPath)
+    }
+}
+
 function New-HarnessReleaseAcceptanceInvocations {
     [CmdletBinding()]
     param(
@@ -90,6 +115,10 @@ $softwareRoot = [string]$layout.SoftwareRoot
 $brokerRoot = [string]$layout.BrokerRoot
 $definitionPath = Join-Path ([string]$layout.HarnessSourceRoot) 'pool-definition.json'
 $runner = Join-Path $softwareRoot 'Skill\scripts\Invoke-HyperVExecutableTest.ps1'
+$maintenancePath = Join-Path $brokerRoot 'State\maintenance.json'
+$poolStatePath = Join-Path $brokerRoot 'State\pool-state.json'
+$brokerStatePath = Join-Path $brokerRoot 'State\broker-state.json'
+$payloadGcStatePath = Join-Path $brokerRoot 'State\payload-cache-gc.json'
 if ([string]::IsNullOrWhiteSpace($EvidenceRoot)) {
     $EvidenceRoot = Join-Path $InstallRoot ('Live\Setup\ReleaseAcceptance\' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ'))
 }
@@ -98,6 +127,9 @@ if (-not ($EvidenceRoot + '\').StartsWith($InstallRoot + '\', [StringComparison]
     throw 'EvidenceRoot must remain below InstallRoot.'
 }
 New-Item -ItemType Directory -Force -Path $EvidenceRoot | Out-Null
+Import-Module Hyper-V
+$poolDefinition = Get-Content -LiteralPath $definitionPath -Raw | ConvertFrom-Json
+$workerVmNames = @($poolDefinition.Workers | ForEach-Object { [string]$_.VmName })
 
 function Invoke-PoolAudit {
     param([Parameter(Mandatory = $true)] [string] $Name)
@@ -113,6 +145,120 @@ function Invoke-PoolAudit {
     $audit = Get-Content -LiteralPath $statusPath -Raw | ConvertFrom-Json
     if (-not [bool]$audit.Success) { throw "The $Name release audit failed." }
     $statusPath
+}
+
+function Read-JsonIfPresent {
+    param([Parameter(Mandatory = $true)] [string] $Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+    try { Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json } catch { $null }
+}
+
+function Get-ReleaseAuditMaintenanceSnapshot {
+    param([Parameter(Mandatory = $true)] [DateTime] $RequestedUtc)
+
+    $poolState = Read-JsonIfPresent -Path $poolStatePath
+    $brokerState = Read-JsonIfPresent -Path $brokerStatePath
+    $payloadGcState = Read-JsonIfPresent -Path $payloadGcStatePath
+    $processingCount = @(Get-ChildItem -LiteralPath (Join-Path $brokerRoot 'Processing') -Filter '*.json' -File -ErrorAction SilentlyContinue).Count
+    $workerStates = if ($poolState) { @($poolState.Workers) } else { @() }
+    $nonOffWorkerStates = @($workerStates | Where-Object { [string]$_.Status -ne 'Off' })
+    $vmStates = @(foreach ($vmName in $workerVmNames) {
+        $vm = Get-VM -Name $vmName -ErrorAction SilentlyContinue
+        [pscustomobject][ordered]@{
+            VmName = $vmName
+            Present = $null -ne $vm
+            State = if ($vm) { [string]$vm.State } else { 'Missing' }
+        }
+    })
+    $runningVmNames = @($vmStates | Where-Object { -not $_.Present -or $_.State -ne 'Off' } | ForEach-Object { [string]$_.VmName })
+    $brokerHeartbeatUtc = [DateTime]::MinValue
+    if ($brokerState -and -not [string]::IsNullOrWhiteSpace([string]$brokerState.HeartbeatUtc)) {
+        try { $brokerHeartbeatUtc = [DateTime]::Parse([string]$brokerState.HeartbeatUtc).ToUniversalTime() } catch { }
+    }
+    $gcStartedUtc = [DateTime]::MinValue
+    if ($payloadGcState -and -not [string]::IsNullOrWhiteSpace([string]$payloadGcState.StartedUtc)) {
+        try { $gcStartedUtc = [DateTime]::Parse([string]$payloadGcState.StartedUtc).ToUniversalTime() } catch { }
+    }
+    $heartbeatFresh = $brokerHeartbeatUtc -ge [DateTime]::UtcNow.AddSeconds(-5)
+    $maintenanceObserved = $poolState -and [bool]$poolState.MaintenanceActive -and [string]$brokerState.Status -eq 'Maintenance' -and $heartbeatFresh
+    $workerStatesOff = $workerStates.Count -eq $workerVmNames.Count -and $nonOffWorkerStates.Count -eq 0
+    $workerVmsOff = $vmStates.Count -eq $workerVmNames.Count -and $runningVmNames.Count -eq 0
+    $maintenanceCleanupCompleted = $payloadGcState -and [string]$payloadGcState.Status -eq 'Completed' -and $gcStartedUtc -ge $RequestedUtc
+
+    [pscustomobject][ordered]@{
+        Ready = $maintenanceObserved -and $processingCount -eq 0 -and $workerStatesOff -and $workerVmsOff -and $maintenanceCleanupCompleted
+        ObservedUtc = [DateTime]::UtcNow.ToString('o')
+        RequestedUtc = $RequestedUtc.ToString('o')
+        ProcessingCount = $processingCount
+        MaintenanceObserved = [bool]$maintenanceObserved
+        BrokerStatus = if ($brokerState) { [string]$brokerState.Status } else { $null }
+        BrokerHeartbeatUtc = if ($brokerHeartbeatUtc -eq [DateTime]::MinValue) { $null } else { $brokerHeartbeatUtc.ToString('o') }
+        WorkerStatesOff = [bool]$workerStatesOff
+        NonOffWorkerStates = @($nonOffWorkerStates | ForEach-Object { [pscustomobject]@{ WorkerId = [int]$_.WorkerId; Status = [string]$_.Status } })
+        WorkerVmsOff = [bool]$workerVmsOff
+        NonOffOrMissingVmNames = $runningVmNames
+        MaintenanceCleanupCompleted = [bool]$maintenanceCleanupCompleted
+        PayloadCleanupStatus = if ($payloadGcState) { [string]$payloadGcState.Status } else { $null }
+        PayloadCleanupStartedUtc = if ($gcStartedUtc -eq [DateTime]::MinValue) { $null } else { $gcStartedUtc.ToString('o') }
+    }
+}
+
+function Invoke-PoolAuditUnderMaintenance {
+    param([Parameter(Mandatory = $true)] [string] $Name)
+
+    if (Test-Path -LiteralPath $maintenancePath -PathType Leaf) {
+        throw "Cannot start the $Name release audit because another broker maintenance owner is active."
+    }
+    $ownerToken = [Guid]::NewGuid().ToString('N')
+    $requestedUtc = [DateTime]::UtcNow
+    $markerCreated = $false
+    try {
+        Write-JsonAtomic -Path $maintenancePath -Value ([ordered]@{
+            Status = 'MaintenanceRequested'
+            Reason = "Draining the pool for the strict $Name release audit."
+            RequestedUtc = $requestedUtc.ToString('o')
+            RequestedBy = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+            Owner = 'HarnessReleaseAcceptance'
+            OwnerToken = $ownerToken
+        })
+        $markerCreated = $true
+
+        $deadline = [DateTime]::UtcNow.AddMinutes(10)
+        $snapshot = $null
+        do {
+            $marker = Read-JsonIfPresent -Path $maintenancePath
+            if (-not $marker -or [string]$marker.OwnerToken -cne $ownerToken) {
+                throw "The $Name release audit lost ownership of broker maintenance."
+            }
+            $snapshot = Get-ReleaseAuditMaintenanceSnapshot -RequestedUtc $requestedUtc
+            if ([bool]$snapshot.Ready) { break }
+            Start-Sleep -Milliseconds 500
+        } while ([DateTime]::UtcNow -lt $deadline)
+        if (-not $snapshot -or -not [bool]$snapshot.Ready) {
+            $details = if ($snapshot) { $snapshot | ConvertTo-Json -Depth 8 -Compress } else { 'no maintenance snapshot' }
+            throw "Timed out draining broker maintenance for the $Name release audit: $details"
+        }
+
+        $maintenanceEvidencePath = Join-Path $EvidenceRoot ($Name + '-maintenance.json')
+        Write-JsonAtomic -Path $maintenanceEvidencePath -Value $snapshot
+        $auditPath = Invoke-PoolAudit -Name $Name
+        [pscustomobject][ordered]@{
+            AuditPath = $auditPath
+            MaintenanceEvidencePath = $maintenanceEvidencePath
+        }
+    }
+    finally {
+        if ($markerCreated) {
+            $currentMarker = Read-JsonIfPresent -Path $maintenancePath
+            if ($currentMarker -and [string]$currentMarker.OwnerToken -ceq $ownerToken) {
+                Remove-Item -LiteralPath $maintenancePath -Force -ErrorAction Stop
+            }
+            elseif (Test-Path -LiteralPath $maintenancePath -PathType Leaf) {
+                throw "The $Name release audit did not remove a maintenance marker now owned by another operation."
+            }
+        }
+    }
 }
 
 function Invoke-AcceptanceTest {
@@ -139,7 +285,8 @@ function Invoke-AcceptanceTest {
 }
 
 $startedUtc = [DateTime]::UtcNow
-$preAuditPath = Invoke-PoolAudit -Name 'pre-acceptance-audit'
+$preAudit = Invoke-PoolAuditUnderMaintenance -Name 'pre-acceptance-audit'
+$preAuditPath = [string]$preAudit.AuditPath
 $invocations = @(New-HarnessReleaseAcceptanceInvocations -SoftwareRoot $softwareRoot -BrokerRoot $brokerRoot)
 $results = [ordered]@{}
 foreach ($invocation in $invocations) {
@@ -173,14 +320,17 @@ if (-not [bool]$shutdown.ExpectedGuestPowerOffContractProven -or
     throw 'Expected-guest-power-off acceptance did not prove ordered shutdown and no replay.'
 }
 
-$postAuditPath = Invoke-PoolAudit -Name 'post-acceptance-audit'
+$postAudit = Invoke-PoolAuditUnderMaintenance -Name 'post-acceptance-audit'
+$postAuditPath = [string]$postAudit.AuditPath
 [pscustomobject][ordered]@{
     Success = $true
     StartedUtc = $startedUtc.ToString('o')
     CompletedUtc = [DateTime]::UtcNow.ToString('o')
     EvidenceRoot = $EvidenceRoot
     PreAuditPath = $preAuditPath
+    PreAuditMaintenanceEvidencePath = [string]$preAudit.MaintenanceEvidencePath
     PostAuditPath = $postAuditPath
+    PostAuditMaintenanceEvidencePath = [string]$postAudit.MaintenanceEvidencePath
     Tests = @($invocations | ForEach-Object {
         $summary = $results[[string]$_.Name]
         [pscustomobject][ordered]@{

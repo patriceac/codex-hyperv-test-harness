@@ -10,6 +10,21 @@ function Get-PoolProcessingFiles {
         Sort-Object CreationTimeUtc, Name)
 }
 
+function Test-PoolPayloadCleanupDue {
+    param(
+        [Parameter(Mandatory = $true)] [bool] $MaintenanceActive,
+        [Parameter(Mandatory = $true)] [bool] $MaintenanceCleanupCompleted,
+        [Parameter(Mandatory = $true)] [bool] $AllWorkerStatesOff,
+        [Parameter(Mandatory = $true)] [DateTime] $NowUtc,
+        [Parameter(Mandatory = $true)] [DateTime] $NextCleanupUtc
+    )
+
+    $AllWorkerStatesOff -and (
+        $NowUtc -ge $NextCleanupUtc -or
+        ($MaintenanceActive -and -not $MaintenanceCleanupCompleted)
+    )
+}
+
 function Start-PoolProcess {
     param(
         [Parameter(Mandatory = $true)] [string] $ScriptPath,
@@ -1241,6 +1256,7 @@ function Invoke-PoolBrokerLoop {
     $nextCleanupUtc = [DateTime]::MinValue
     $nextHostInputCleanupUtc = [DateTime]::UtcNow.AddSeconds(2)
     $nextRequestNetworkCleanupUtc = [DateTime]::UtcNow.AddSeconds(2)
+    $maintenanceCleanupCompleted = $false
 
     while ($true) {
         Reap-PoolProcesses
@@ -1275,6 +1291,7 @@ function Invoke-PoolBrokerLoop {
             }
         }
         else {
+            $maintenanceCleanupCompleted = $false
             Assign-PoolRequests
             Ensure-PoolDemandCapacity
             Ensure-PoolWarmSpareInvariant
@@ -1284,10 +1301,33 @@ function Invoke-PoolBrokerLoop {
 
         Start-PendingPoolLifecycles
         $states = Get-PoolWorkerStates -BrokerRoot $BrokerRoot -Config $Config
-        if ([DateTime]::UtcNow -ge $nextCleanupUtc -and @($states | Where-Object Status -ne 'Off').Count -eq 0) {
-            Remove-StaleQueueArtifacts
-            Invoke-PayloadCacheGarbageCollection -Config $Config -VmName @($Config.PoolWorkers | ForEach-Object { [string]$_.VmName })
-            $nextCleanupUtc = [DateTime]::UtcNow.AddMinutes(5)
+        $nowUtc = [DateTime]::UtcNow
+        $allWorkerStatesOff = @($states | Where-Object Status -ne 'Off').Count -eq 0
+        $cleanupDue = Test-PoolPayloadCleanupDue `
+            -MaintenanceActive $maintenance `
+            -MaintenanceCleanupCompleted $maintenanceCleanupCompleted `
+            -AllWorkerStatesOff $allWorkerStatesOff `
+            -NowUtc $nowUtc `
+            -NextCleanupUtc $nextCleanupUtc
+        if ($cleanupDue) {
+            $runningWorkerVms = @($Config.PoolWorkers | Where-Object {
+                $workerVm = Get-VM -Name ([string]$_.VmName) -ErrorAction SilentlyContinue
+                $workerVm -and $workerVm.State -ne 'Off'
+            })
+            if ($runningWorkerVms.Count -eq 0) {
+                Remove-StaleQueueArtifacts
+                Invoke-PayloadCacheGarbageCollection -Config $Config -VmName @($Config.PoolWorkers | ForEach-Object { [string]$_.VmName })
+                $nextCleanupUtc = [DateTime]::UtcNow.AddMinutes(5)
+                if ($maintenance) {
+                    $maintenanceCleanupCompleted = $false
+                    try {
+                        $maintenanceGcState = Get-Content -LiteralPath $payloadGcStatePath -Raw | ConvertFrom-Json
+                        $maintenanceGcStartedUtc = [DateTime]::Parse([string]$maintenanceGcState.StartedUtc).ToUniversalTime()
+                        $maintenanceCleanupCompleted = [string]$maintenanceGcState.Status -eq 'Completed' -and $maintenanceGcStartedUtc -ge $nowUtc
+                    }
+                    catch { }
+                }
+            }
         }
 
         Write-PoolBrokerSnapshot
