@@ -364,6 +364,35 @@ function Get-OptionalRequestStateValue {
     $property.Value
 }
 
+function ConvertTo-UtcRequestStateTimestamp {
+    [OutputType([DateTime])]
+    param(
+        [Parameter(Mandatory = $true)] $Value,
+        [Parameter(Mandatory = $true)] [string] $PropertyName
+    )
+
+    if ($Value -is [DateTimeOffset]) {
+        return ([DateTimeOffset]$Value).UtcDateTime
+    }
+    if ($Value -is [DateTime]) {
+        $dateTimeValue = [DateTime]$Value
+        if ($dateTimeValue.Kind -eq [DateTimeKind]::Unspecified) {
+            throw "$PropertyName must include an explicit UTC offset."
+        }
+        return $dateTimeValue.ToUniversalTime()
+    }
+    try {
+        return [DateTimeOffset]::Parse(
+            [string]$Value,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind
+        ).UtcDateTime
+    }
+    catch {
+        throw "$PropertyName is not a valid round-trip timestamp: $($_.Exception.Message)"
+    }
+}
+
 function Get-RequestLifecycleDisplay {
     param(
         $RequestState,
@@ -1377,16 +1406,8 @@ try {
                         throw 'Broker request state published PowerOffRecoveryDeadlineUtc without GuestPowerOffObservedUtc.'
                     }
                     try {
-                        $parsedRecoveryDeadlineUtc = [DateTimeOffset]::Parse(
-                            [string]$publishedRecoveryDeadline,
-                            [Globalization.CultureInfo]::InvariantCulture,
-                            [Globalization.DateTimeStyles]::RoundtripKind
-                        ).UtcDateTime
-                        $parsedShutdownUtc = [DateTimeOffset]::Parse(
-                            [string]$publishedShutdownUtc,
-                            [Globalization.CultureInfo]::InvariantCulture,
-                            [Globalization.DateTimeStyles]::RoundtripKind
-                        ).UtcDateTime
+                        $parsedRecoveryDeadlineUtc = ConvertTo-UtcRequestStateTimestamp -Value $publishedRecoveryDeadline -PropertyName 'PowerOffRecoveryDeadlineUtc'
+                        $parsedShutdownUtc = ConvertTo-UtcRequestStateTimestamp -Value $publishedShutdownUtc -PropertyName 'GuestPowerOffObservedUtc'
                     }
                     catch {
                         throw "Broker request state published an invalid expected-power-off recovery timestamp: $($_.Exception.Message)"

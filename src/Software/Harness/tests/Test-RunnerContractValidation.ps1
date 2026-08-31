@@ -35,6 +35,26 @@ function Assert-Equal {
     }
 }
 
+function Import-RunnerFunction {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Path,
+        [Parameter(Mandatory = $true)] [string] $Name
+    )
+
+    $tokens = $null
+    $parseErrors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$parseErrors)
+    if ($parseErrors.Count -gt 0) { throw "$Path has a parse error: $($parseErrors[0].Message)" }
+    $definition = @($ast.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $Name
+    }, $true)) | Select-Object -First 1
+    if (-not $definition) { throw "Function not found: $Name" }
+    $body = $definition.Body.Extent.Text
+    $body = $body.Substring(1, $body.Length - 2)
+    Set-Item -LiteralPath ("Function:\script:$Name") -Value ([scriptblock]::Create($body))
+}
+
 function Get-QueuedRequest {
     param(
         [Parameter(Mandatory = $true)] [hashtable] $InvocationParameters,
@@ -88,6 +108,32 @@ New-Item -ItemType Directory -Force -Path $hostInput | Out-Null
 [IO.File]::WriteAllText((Join-Path $hostInput 'fixture.txt'), 'fixture')
 $scenarios = New-Object Collections.Generic.List[string]
 try {
+    Import-RunnerFunction -Path $RunnerPath -Name 'ConvertTo-UtcRequestStateTimestamp'
+    $typedDeadline = [DateTime]::Parse(
+        '2026-08-31T15:13:49.6772745Z',
+        [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::RoundtripKind
+    )
+    $typedShutdown = [DateTime]::Parse(
+        '2026-08-31T15:10:49.6772745Z',
+        [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::RoundtripKind
+    )
+    $parsedDeadline = ConvertTo-UtcRequestStateTimestamp -Value $typedDeadline -PropertyName 'PowerOffRecoveryDeadlineUtc'
+    $parsedShutdown = ConvertTo-UtcRequestStateTimestamp -Value $typedShutdown -PropertyName 'GuestPowerOffObservedUtc'
+    $justAfterPowerOff = [DateTime]::Parse(
+        '2026-08-31T15:10:50.6001326Z',
+        [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::RoundtripKind
+    )
+    if ($parsedDeadline.Kind -ne [DateTimeKind]::Utc -or
+        $parsedShutdown.Kind -ne [DateTimeKind]::Utc -or
+        $parsedDeadline.Ticks -ne $typedDeadline.Ticks -or
+        $justAfterPowerOff -ge $parsedDeadline) {
+        throw 'A UTC DateTime deserialized from request state was reinterpreted through the local timezone.'
+    }
+    $scenarios.Add('typed-request-state-deadline-preserves-utc')
+
     Assert-Rejected -Scenario 'paired assertion arguments' -ExpectedMessage 'must be specified together' -Operation {
         & $RunnerPath -ArtifactPath $artifact -BrokerRoot $root -AssertResultFile '{OUTDIR}\result.json' -AssertResultJsonPointer '/passed'
     }
@@ -288,6 +334,7 @@ try {
     if (-not $runnerText.Contains('Broker result ExpectGuestPowerOff is not exact Boolean true.') -or
         -not $runnerText.Contains('Broker result GuestPowerOffRecoveryTimeoutSeconds does not exactly match the requested recovery timeout.') -or
         -not $runnerText.Contains('ResultFileEvidence does not prove that a present assertion marker predates the controlled recovery boot.') -or
+        -not $runnerText.Contains("ConvertTo-UtcRequestStateTimestamp -Value `$publishedRecoveryDeadline -PropertyName 'PowerOffRecoveryDeadlineUtc'") -or
         -not $runnerText.Contains('if ($baseHarnessSucceeded -and $ExpectGuestPowerOff -and -not $expectedGuestPowerOffContractProven)')) {
         throw 'The runner can claim or misclassify the expected-power-off contract when opt-in metadata or pre-recovery marker proof is invalid.'
     }
