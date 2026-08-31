@@ -41,7 +41,10 @@ if ($deployPreview.GuestBaselineInvocation.ContainsKey('PlanOnly') -or
 $scenarios.Add('exact-apply-invocations-defer-duplicate-work-without-expanding-scope')
 
 $acceptancePreview = & $acceptancePath -InstallRoot $probeRoot -InvocationPreflightOnly
-if (-not [bool]$acceptancePreview.Success -or -not [bool]$acceptancePreview.NoMutationPerformed -or (Test-Path -LiteralPath $probeRoot)) {
+if (-not [bool]$acceptancePreview.Success -or
+    -not [bool]$acceptancePreview.NoMutationPerformed -or
+    -not [bool]$acceptancePreview.MaintenanceSnapshotShapeSafe -or
+    (Test-Path -LiteralPath $probeRoot)) {
     throw 'Acceptance invocation preflight was not successful and mutation-free.'
 }
 if ((@($acceptancePreview.TestNames) -join ',') -ne 'LegacyLaunch,KeyboardInput,ExpectedGuestPowerOff') {
@@ -72,6 +75,8 @@ $scenarios.Add('three-path-isolated-acceptance-is-exactly-bound')
 if ($acceptanceSource -notmatch "Invoke-PoolAuditUnderMaintenance -Name 'pre-acceptance-audit'" -or
     $acceptanceSource -notmatch "Invoke-PoolAuditUnderMaintenance -Name 'post-acceptance-audit'" -or
     $acceptanceSource -notmatch 'MaintenanceCleanupCompleted' -or
+    $acceptanceSource -notmatch 'Get-ReleaseCollectionCount -Value \$workerStates' -or
+    $acceptanceSource -notmatch 'Get-ReleaseOptionalPropertyValue -InputObject \$poolState' -or
     $acceptanceSource -notmatch 'OwnerToken' -or
     $acceptanceSource -notmatch 'finally\s*\{' -or
     $acceptanceSource -notmatch 'Remove-Item -LiteralPath \$maintenancePath') {

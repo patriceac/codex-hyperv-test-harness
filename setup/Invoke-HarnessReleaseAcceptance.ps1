@@ -35,6 +35,24 @@ function Write-JsonAtomic {
     }
 }
 
+function Get-ReleaseOptionalPropertyValue {
+    param(
+        [AllowNull()] $InputObject,
+        [Parameter(Mandatory = $true)] [string] $Name
+    )
+
+    if ($null -eq $InputObject) { return $null }
+    $property = $InputObject.PSObject.Properties[$Name]
+    if ($property) { $property.Value } else { $null }
+}
+
+function Get-ReleaseCollectionCount {
+    param([AllowNull()] $Value)
+
+    if ($null -eq $Value) { return 0 }
+    @($Value).Count
+}
+
 function New-HarnessReleaseAcceptanceInvocations {
     [CmdletBinding()]
     param(
@@ -91,9 +109,18 @@ function New-HarnessReleaseAcceptanceInvocations {
 
 if ($InvocationPreflightOnly) {
     $preview = @(New-HarnessReleaseAcceptanceInvocations -SoftwareRoot (Join-Path $InstallRoot 'Software') -BrokerRoot (Join-Path $InstallRoot 'Live\Broker'))
+    $shapeProbe = [pscustomobject]@{ Present = $false }
+    $maintenanceSnapshotShapeSafe =
+        (Get-ReleaseCollectionCount -Value $null) -eq 0 -and
+        (Get-ReleaseCollectionCount -Value $shapeProbe) -eq 1 -and
+        (Get-ReleaseCollectionCount -Value @($shapeProbe, $shapeProbe)) -eq 2 -and
+        $null -eq (Get-ReleaseOptionalPropertyValue -InputObject $null -Name 'Missing') -and
+        $null -eq (Get-ReleaseOptionalPropertyValue -InputObject $shapeProbe -Name 'Missing') -and
+        (Get-ReleaseOptionalPropertyValue -InputObject $shapeProbe -Name 'Present') -is [bool]
     [pscustomobject][ordered]@{
-        Success = $preview.Count -eq 3
+        Success = $preview.Count -eq 3 -and $maintenanceSnapshotShapeSafe
         NoMutationPerformed = $true
+        MaintenanceSnapshotShapeSafe = [bool]$maintenanceSnapshotShapeSafe
         TestNames = @($preview.Name)
         Invocations = $preview
     }
@@ -161,8 +188,8 @@ function Get-ReleaseAuditMaintenanceSnapshot {
     $brokerState = Read-JsonIfPresent -Path $brokerStatePath
     $payloadGcState = Read-JsonIfPresent -Path $payloadGcStatePath
     $processingCount = @(Get-ChildItem -LiteralPath (Join-Path $brokerRoot 'Processing') -Filter '*.json' -File -ErrorAction SilentlyContinue).Count
-    $workerStates = if ($poolState) { @($poolState.Workers) } else { @() }
-    $nonOffWorkerStates = @($workerStates | Where-Object { [string]$_.Status -ne 'Off' })
+    $workerStates = @(Get-ReleaseOptionalPropertyValue -InputObject $poolState -Name 'Workers')
+    $nonOffWorkerStates = @($workerStates | Where-Object { [string](Get-ReleaseOptionalPropertyValue -InputObject $_ -Name 'Status') -ne 'Off' })
     $vmStates = @(foreach ($vmName in $workerVmNames) {
         $vm = Get-VM -Name $vmName -ErrorAction SilentlyContinue
         [pscustomobject][ordered]@{
@@ -173,18 +200,23 @@ function Get-ReleaseAuditMaintenanceSnapshot {
     })
     $runningVmNames = @($vmStates | Where-Object { -not $_.Present -or $_.State -ne 'Off' } | ForEach-Object { [string]$_.VmName })
     $brokerHeartbeatUtc = [DateTime]::MinValue
-    if ($brokerState -and -not [string]::IsNullOrWhiteSpace([string]$brokerState.HeartbeatUtc)) {
-        try { $brokerHeartbeatUtc = [DateTime]::Parse([string]$brokerState.HeartbeatUtc).ToUniversalTime() } catch { }
+    $brokerHeartbeatText = [string](Get-ReleaseOptionalPropertyValue -InputObject $brokerState -Name 'HeartbeatUtc')
+    if (-not [string]::IsNullOrWhiteSpace($brokerHeartbeatText)) {
+        try { $brokerHeartbeatUtc = [DateTime]::Parse($brokerHeartbeatText).ToUniversalTime() } catch { }
     }
     $gcStartedUtc = [DateTime]::MinValue
-    if ($payloadGcState -and -not [string]::IsNullOrWhiteSpace([string]$payloadGcState.StartedUtc)) {
-        try { $gcStartedUtc = [DateTime]::Parse([string]$payloadGcState.StartedUtc).ToUniversalTime() } catch { }
+    $gcStartedText = [string](Get-ReleaseOptionalPropertyValue -InputObject $payloadGcState -Name 'StartedUtc')
+    if (-not [string]::IsNullOrWhiteSpace($gcStartedText)) {
+        try { $gcStartedUtc = [DateTime]::Parse($gcStartedText).ToUniversalTime() } catch { }
     }
+    $brokerStatus = [string](Get-ReleaseOptionalPropertyValue -InputObject $brokerState -Name 'Status')
+    $maintenanceActive = [bool](Get-ReleaseOptionalPropertyValue -InputObject $poolState -Name 'MaintenanceActive')
+    $payloadCleanupStatus = [string](Get-ReleaseOptionalPropertyValue -InputObject $payloadGcState -Name 'Status')
     $heartbeatFresh = $brokerHeartbeatUtc -ge [DateTime]::UtcNow.AddSeconds(-5)
-    $maintenanceObserved = $poolState -and [bool]$poolState.MaintenanceActive -and [string]$brokerState.Status -eq 'Maintenance' -and $heartbeatFresh
-    $workerStatesOff = $workerStates.Count -eq $workerVmNames.Count -and $nonOffWorkerStates.Count -eq 0
-    $workerVmsOff = $vmStates.Count -eq $workerVmNames.Count -and $runningVmNames.Count -eq 0
-    $maintenanceCleanupCompleted = $payloadGcState -and [string]$payloadGcState.Status -eq 'Completed' -and $gcStartedUtc -ge $RequestedUtc
+    $maintenanceObserved = $null -ne $poolState -and $null -ne $brokerState -and $maintenanceActive -and $brokerStatus -eq 'Maintenance' -and $heartbeatFresh
+    $workerStatesOff = (Get-ReleaseCollectionCount -Value $workerStates) -eq (Get-ReleaseCollectionCount -Value $workerVmNames) -and (Get-ReleaseCollectionCount -Value $nonOffWorkerStates) -eq 0
+    $workerVmsOff = (Get-ReleaseCollectionCount -Value $vmStates) -eq (Get-ReleaseCollectionCount -Value $workerVmNames) -and (Get-ReleaseCollectionCount -Value $runningVmNames) -eq 0
+    $maintenanceCleanupCompleted = $null -ne $payloadGcState -and $payloadCleanupStatus -eq 'Completed' -and $gcStartedUtc -ge $RequestedUtc
 
     [pscustomobject][ordered]@{
         Ready = $maintenanceObserved -and $processingCount -eq 0 -and $workerStatesOff -and $workerVmsOff -and $maintenanceCleanupCompleted
@@ -192,14 +224,19 @@ function Get-ReleaseAuditMaintenanceSnapshot {
         RequestedUtc = $RequestedUtc.ToString('o')
         ProcessingCount = $processingCount
         MaintenanceObserved = [bool]$maintenanceObserved
-        BrokerStatus = if ($brokerState) { [string]$brokerState.Status } else { $null }
+        BrokerStatus = if ($brokerState) { $brokerStatus } else { $null }
         BrokerHeartbeatUtc = if ($brokerHeartbeatUtc -eq [DateTime]::MinValue) { $null } else { $brokerHeartbeatUtc.ToString('o') }
         WorkerStatesOff = [bool]$workerStatesOff
-        NonOffWorkerStates = @($nonOffWorkerStates | ForEach-Object { [pscustomobject]@{ WorkerId = [int]$_.WorkerId; Status = [string]$_.Status } })
+        NonOffWorkerStates = @($nonOffWorkerStates | ForEach-Object {
+            [pscustomobject]@{
+                WorkerId = [int](Get-ReleaseOptionalPropertyValue -InputObject $_ -Name 'WorkerId')
+                Status = [string](Get-ReleaseOptionalPropertyValue -InputObject $_ -Name 'Status')
+            }
+        })
         WorkerVmsOff = [bool]$workerVmsOff
         NonOffOrMissingVmNames = $runningVmNames
         MaintenanceCleanupCompleted = [bool]$maintenanceCleanupCompleted
-        PayloadCleanupStatus = if ($payloadGcState) { [string]$payloadGcState.Status } else { $null }
+        PayloadCleanupStatus = if ($payloadGcState) { $payloadCleanupStatus } else { $null }
         PayloadCleanupStartedUtc = if ($gcStartedUtc -eq [DateTime]::MinValue) { $null } else { $gcStartedUtc.ToString('o') }
     }
 }
