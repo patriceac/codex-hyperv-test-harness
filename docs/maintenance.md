@@ -1,5 +1,9 @@
 # Maintenance
 
+## Publish an ordinary harness software release
+
+Use `setup\Deploy-HarnessRelease.ps1`, documented in [deployment.md](deployment.md), for committed source, broker, runtime-skill, canary, or guest-agent releases to an existing installation. It is the single owner for source qualification, component preflight, promotion, isolated acceptance, and the one final recovery refresh. Do not manually repeat those steps around it. The controller deliberately excludes Windows/.NET image servicing and request-network infrastructure changes.
+
 ## Update Windows and .NET images
 
 Treat a baseline image update as a controlled rebuild. Begin with the setup skill's proposal and approval gate, then run the source-only public audit and an exact non-mutating plan:

@@ -1,0 +1,28 @@
+[
+  {
+    "type": "wait_window",
+    "timeoutMs": 30000
+  },
+  {
+    "type": "screenshot",
+    "name": "keyboard-before.png",
+    "timeoutMs": 30000,
+    "attempts": 5
+  },
+  {
+    "type": "send_keys",
+    "keys": "WIN+LEFT",
+    "holdMs": 75
+  },
+  {
+    "type": "screenshot",
+    "name": "keyboard-after.png",
+    "timeoutMs": 30000,
+    "attempts": 5
+  },
+  {
+    "type": "wait_result_file",
+    "path": "{OUTDIR}\\keyboard-result.json",
+    "timeoutMs": 30000
+  }
+]

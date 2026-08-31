@@ -20,7 +20,8 @@ param(
     [Alias('TimeoutSeconds')] [ValidateRange(10, 7200)] [int] $ExecutionTimeoutSeconds = 900,
     [ValidateRange(30, 600)] [int] $GuestPowerOffRecoveryTimeoutSeconds = 180,
     [ValidateRange(30, 600)] [int] $CancellationGraceSeconds = 180,
-    [string] $BrokerRoot
+    [string] $BrokerRoot,
+    [switch] $ThrowOnFailure
 )
 
 $ErrorActionPreference = 'Stop'
@@ -1872,5 +1873,8 @@ finally {
 }
 
 if ($finalExitCode -ne 0) {
+    if ($ThrowOnFailure) {
+        throw "The isolated executable test failed with exit code $finalExitCode."
+    }
     exit $finalExitCode
 }

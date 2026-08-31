@@ -86,6 +86,10 @@ On an existing installation, PlanOnly reports the installed configuration and re
 
 Windows activation and licensing are intentionally outside this project. The guest may remain unactivated until the user handles licensing.
 
+## Deploy an ordinary software release
+
+For an existing installation, use the resumable [harness release controller](docs/deployment.md) instead of manually chaining source refresh, guest-baseline replacement, acceptance, and recovery commands. It binds a clean commit and installed configuration into an immutable PlanOnly result, applies through one elevated state machine, runs three isolated acceptance paths, and refreshes the large local recovery bundle once at the end. Image servicing, networking changes, first installation, and `ForceRebuild` remain separate reviewed workflows.
+
 ## Reference profile and compatibility defaults
 
 Codex-guided recovery must ask the user to choose every value. The entries below describe the project's established profile and the fallback retained for manual script compatibility; they are not consent to use them.
@@ -145,7 +149,7 @@ src/Software/Recovery/                 fast local recovery generator and install
 docs/                                  architecture, security, recovery, maintenance, diagnosis
 ```
 
-Start with [Disaster recovery](docs/disaster-recovery.md), [Architecture](docs/architecture.md), [Payload-cache performance](docs/payload-cache.md), [Security model](docs/security-model.md), and [Testing/provenance](docs/testing.md).
+Start with [Disaster recovery](docs/disaster-recovery.md), [Software releases](docs/deployment.md), [Architecture](docs/architecture.md), [Payload-cache performance](docs/payload-cache.md), [Security model](docs/security-model.md), and [Testing/provenance](docs/testing.md).
 
 ## Public-release guardrail
 

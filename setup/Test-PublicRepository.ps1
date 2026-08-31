@@ -16,7 +16,7 @@ function Add-Violation([string] $Path, [string] $Rule, [string] $Message) {
 
 $git = Get-Command git.exe -ErrorAction SilentlyContinue
 $files = @()
-if ($git -and (Test-Path -LiteralPath (Join-Path $RepositoryRoot '.git') -PathType Container)) {
+if ($git -and (Test-Path -LiteralPath (Join-Path $RepositoryRoot '.git'))) {
     $relativeFiles = @(& $git.Source -C $RepositoryRoot ls-files --cached --others --exclude-standard)
     if ($LASTEXITCODE -ne 0) { throw 'git ls-files failed during public-payload inspection.' }
     $files = @($relativeFiles | Where-Object { $_ } | ForEach-Object { Get-Item -LiteralPath (Join-Path $RepositoryRoot $_) -ErrorAction Stop } | Where-Object { -not $_.PSIsContainer })

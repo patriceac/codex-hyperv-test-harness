@@ -29,6 +29,14 @@ This repository rebuilds a privileged Hyper-V executable-test backend. Use the r
 5. Require the `Ready` terminal state and run `setup\Verify.ps1 -InstallRoot <chosen-install-root>`.
 6. Use `setup\Refresh-LocalRecovery.ps1 -InstallRoot <chosen-install-root>` after intentional baseline or harness changes.
 
+## Ordinary software release deployment
+
+- Use `setup\Deploy-HarnessRelease.ps1` as the canonical owner for an ordinary committed source, broker, skill, canary, or guest-agent release to an existing harness. Do not replace it with an ad hoc chain of installer, guest-update, canary, and recovery commands.
+- Run its exact `-PlanOnly` path first and obtain explicit approval before `-Apply`. Clear ordinary wording that refers to the displayed plan is sufficient; do not demand a magic approval phrase.
+- Resume the same immutable plan from its completed checkpoints. Prefer a linked fix-forward plan over rollback for ordinary source defects. Rollback and `ForceRebuild` remain separately approved hard-boundary operations.
+- The controller owns one final broad source suite, three isolated live acceptance paths, and one recovery refresh. Do not repeat the full suite or deep-hash recovery after each successful sub-step.
+- Keep the controller and its contract tests current when the deployment topology or acceptance boundary changes. Do not claim a live shadow pool until one is actually implemented and verified.
+
 The installer must resolve the current x64 multi-edition Windows 11 ISO through Microsoft's official download page, validate Microsoft media, enumerate `install.wim` or `install.esd`, and select the sole `EditionId=Professional` image. Never replace this with a fixed release URL, third-party mirror, hard-coded image index, or activation automation.
 
 For a newly built baseline, the installer must use only the explicitly approved temporary Hyper-V switch, apply applicable non-preview Microsoft software/security/quality/Defender updates without drivers or a feature-version upgrade, resolve the stable .NET SDK from Microsoft's official release metadata, verify SHA-512 and Microsoft Authenticode, and disconnect networking before the clean checkpoint. A guided plan pins the resolved SDK version so a release change stops for renewed review.

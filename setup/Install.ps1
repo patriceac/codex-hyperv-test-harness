@@ -18,6 +18,7 @@ param(
     [switch] $NoRestart,
     [switch] $SkipSmokeTest,
     [switch] $SkipLocalRecoveryBundle,
+    [switch] $DeferPoolRebuildForGuestBaselineUpdate,
     [switch] $AllowLowResources,
     [switch] $ForceRebuild,
     [ValidatePattern('^[A-Fa-f0-9]{64}$')] [string] $ExpectedExistingConfigurationSha256,
@@ -35,6 +36,12 @@ if ([string]::IsNullOrWhiteSpace($TargetUserSid)) { $TargetUserSid = [Security.P
 if ([string]::IsNullOrWhiteSpace($AttemptId)) { $AttemptId = [Guid]::NewGuid().ToString('N') }
 try { [void][Security.Principal.SecurityIdentifier]::new($TargetUserSid) } catch { throw "Invalid target-user SID: $TargetUserSid" }
 try { [void][Guid]::ParseExact($AttemptId, 'N') } catch { throw "Invalid attempt ID: $AttemptId" }
+if ($DeferPoolRebuildForGuestBaselineUpdate -and (-not $SkipSmokeTest -or -not $SkipLocalRecoveryBundle)) {
+    throw 'DeferPoolRebuildForGuestBaselineUpdate requires SkipSmokeTest and SkipLocalRecoveryBundle; the release orchestrator owns final acceptance and recovery.'
+}
+if ($DeferPoolRebuildForGuestBaselineUpdate -and $ForceRebuild) {
+    throw 'DeferPoolRebuildForGuestBaselineUpdate cannot be combined with ForceRebuild.'
+}
 
 $checkoutSoftware = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\src\Software'))
 $runningFromCheckout = Test-Path -LiteralPath (Join-Path $checkoutSoftware 'Harness\HarnessPaths.ps1') -PathType Leaf
@@ -141,7 +148,7 @@ function Get-ElevationArguments {
     )
     if (-not [string]::IsNullOrWhiteSpace($ExpectedDotNetSdkVersion)) { $arguments += @('-ExpectedDotNetSdkVersion', $ExpectedDotNetSdkVersion) }
     if (-not [string]::IsNullOrWhiteSpace($ExpectedExistingConfigurationSha256)) { $arguments += @('-ExpectedExistingConfigurationSha256', $ExpectedExistingConfigurationSha256) }
-    foreach ($switchName in @('Resume','NoRestart','SkipSmokeTest','SkipLocalRecoveryBundle','AllowLowResources','ForceRebuild','ResetRequestNetworkPolicy','SkipGlobalPolicy')) {
+    foreach ($switchName in @('Resume','NoRestart','SkipSmokeTest','SkipLocalRecoveryBundle','DeferPoolRebuildForGuestBaselineUpdate','AllowLowResources','ForceRebuild','ResetRequestNetworkPolicy','SkipGlobalPolicy')) {
         if ((Get-Variable -Name $switchName -ValueOnly)) { $arguments += '-' + $switchName }
     }
     $arguments
@@ -295,6 +302,9 @@ $configurationParameters = @{
 if (-not [string]::IsNullOrWhiteSpace($ExpectedExistingConfigurationSha256)) { $configurationParameters.ExpectedExistingConfigurationSha256 = $ExpectedExistingConfigurationSha256 }
 if ($ResetRequestNetworkPolicy) { $configurationParameters.ResetRequestNetworkPolicy = $true }
 $configurationPreview = & $configurationScript @configurationParameters
+if ($DeferPoolRebuildForGuestBaselineUpdate -and -not [bool]$configurationPreview.ExistingConfigurationDetected) {
+    throw 'DeferPoolRebuildForGuestBaselineUpdate is valid only for an existing harness whose installed pool will be replaced by the next approved deployment phase.'
+}
 if (-not $PlanOnly -and [bool]$configurationPreview.ExistingConfigurationDetected -and [string]::IsNullOrWhiteSpace($ExpectedExistingConfigurationSha256)) {
     throw 'An existing harness configuration can be refreshed only with ExpectedExistingConfigurationSha256 from the reviewed PlanOnly result.'
 }
@@ -326,6 +336,11 @@ if ($PlanOnly) {
             IntentionalPolicyReset = [bool]$configurationPreview.IntentionalPolicyReset
             PolicyResetApproval = if ($ResetRequestNetworkPolicy) { 'Separate explicit approval required before apply' } else { 'Not requested' }
             NoMutationPerformed = $true
+        }
+        DeploymentCoordination = [ordered]@{
+            PoolRebuildDeferredForGuestBaselineUpdate = [bool]$DeferPoolRebuildForGuestBaselineUpdate
+            FinalAcceptanceOwnedByCaller = [bool]$SkipSmokeTest
+            FinalRecoveryOwnedByCaller = [bool]$SkipLocalRecoveryBundle
         }
         Licensing = 'Not configured; activation and licensing remain the user responsibility'
         Preflight = $preflightJson | ConvertFrom-Json
@@ -436,16 +451,24 @@ try {
         Write-SetupState -Phase 'ReusingBaseline' -Message 'Reusing the existing clean Windows 11 Pro baseline checkpoint.' -Details @{ VmId = [string]$baseline.Id; CheckpointId = [string]$baselineCheckpoint.Id }
     }
 
-    Write-SetupState -Phase 'BuildingPool' -Message "Creating or refreshing the $($layout.PoolSize)-slot disposable worker pool."
     $definitionPath = Join-Path ([string]$layout.HarnessSourceRoot) 'pool-definition.json'
-    $initialize = @{
-        SourceVmName = [string]$layout.BaselineVmName; BaselineName = [string]$layout.BaselineCheckpointName
-        PoolSize = [int]$layout.PoolSize; PoolVmPrefix = [string]$layout.PoolVmPrefix
-        BrokerRoot = [string]$layout.BrokerRoot; DefinitionPath = $definitionPath
-        StatusPath = Join-Path ([string]$layout.BrokerRoot) 'State\Management\pool-provision-status.json'; ConfigPath = $configPath
+    if ($DeferPoolRebuildForGuestBaselineUpdate) {
+        if (-not (Test-Path -LiteralPath $definitionPath -PathType Leaf)) {
+            throw 'The installed pool definition is missing; the pool rebuild cannot be deferred.'
+        }
+        Write-SetupState -Phase 'PoolRefreshDeferred' -Message 'Preserving the current pool until the immediately following guest-baseline update replaces it once.'
     }
-    if ($ForceRebuild) { $initialize.ForceRecreate = $true }
-    & (Join-Path ([string]$layout.HarnessSourceRoot) 'Initialize-HyperVTestPool.ps1') @initialize
+    else {
+        Write-SetupState -Phase 'BuildingPool' -Message "Creating or refreshing the $($layout.PoolSize)-slot disposable worker pool."
+        $initialize = @{
+            SourceVmName = [string]$layout.BaselineVmName; BaselineName = [string]$layout.BaselineCheckpointName
+            PoolSize = [int]$layout.PoolSize; PoolVmPrefix = [string]$layout.PoolVmPrefix
+            BrokerRoot = [string]$layout.BrokerRoot; DefinitionPath = $definitionPath
+            StatusPath = Join-Path ([string]$layout.BrokerRoot) 'State\Management\pool-provision-status.json'; ConfigPath = $configPath
+        }
+        if ($ForceRebuild) { $initialize.ForceRecreate = $true }
+        & (Join-Path ([string]$layout.HarnessSourceRoot) 'Initialize-HyperVTestPool.ps1') @initialize
+    }
 
     Write-SetupState -Phase 'InstallingBroker' -Message 'Installing and starting the ACL-restricted SYSTEM broker.'
     & (Join-Path ([string]$layout.HarnessSourceRoot) 'Install-PoolHostBroker.ps1') -SourceRoot ([string]$layout.HarnessSourceRoot) -BrokerRoot ([string]$layout.BrokerRoot) -PoolDefinitionPath $definitionPath -StatusPath (Join-Path ([string]$layout.BrokerRoot) 'State\Management\pool-broker-install-status.json') -ConfigPath $configPath -ClientSid $TargetUserSid
@@ -480,11 +503,17 @@ try {
         ConfigPath = $configPath; BaselineVmId = [string]$baseline.Id; BaselineCheckpointId = [string]$baselineCheckpoint.Id
         SkillPath = $skillPath; PolicyPath = $policyPath; AuditPath = $auditPath; Smoke = $smoke
         LocalRecoveryManifest = $recovery; Canaries = $canaries; GuestTool = $guestTool; Iso = $isoResult
+        PoolRefreshDeferredForGuestBaselineUpdate = [bool]$DeferPoolRebuildForGuestBaselineUpdate
         GuestServicing = if ($null -ne (Get-Variable -Name guestServicing -ValueOnly -ErrorAction SilentlyContinue)) { $guestServicing } else { $null }
         Licensing = 'Windows activation and licensing were intentionally not configured.'
     }
-    Write-SetupState -Phase 'Ready' -Message 'The source-rebuilt Codex Hyper-V executable-test backend is ready.' -Details $details
-    Write-SetupResult -Success $true -Message 'READY - the Codex Hyper-V executable-test backend was rebuilt successfully.' -Details $details
+    $terminalPhase = if ($DeferPoolRebuildForGuestBaselineUpdate) { 'ReadyForGuestBaselineUpdate' } else { 'Ready' }
+    $terminalMessage = if ($DeferPoolRebuildForGuestBaselineUpdate) {
+        'The reviewed source is installed; the release orchestrator must now replace the guest baseline and pool before acceptance.'
+    }
+    else { 'The source-rebuilt Codex Hyper-V executable-test backend is ready.' }
+    Write-SetupState -Phase $terminalPhase -Message $terminalMessage -Details $details
+    Write-SetupResult -Success $true -Message $terminalMessage -Details $details
     [pscustomobject]([ordered]@{ Success = $true; ResultPath = $resultPath; Details = $details })
 }
 catch {

@@ -10,6 +10,7 @@ param(
     [string] $BrokerRoot,
     [string] $StatusPath,
     [string] $ConfigPath,
+    [string] $ClientSid,
     [switch] $PlanOnly
 )
 
@@ -24,6 +25,8 @@ if ([string]::IsNullOrWhiteSpace($CredentialPath)) { $CredentialPath = Join-Path
 if ([string]::IsNullOrWhiteSpace($PoolDefinitionPath)) { $PoolDefinitionPath = Join-Path $SourceRoot 'pool-definition.json' }
 if ([string]::IsNullOrWhiteSpace($BrokerRoot)) { $BrokerRoot = [string]$layout.BrokerRoot }
 if ([string]::IsNullOrWhiteSpace($StatusPath)) { $StatusPath = Get-CodexHarnessManagementStatusPath -Config $layout -Name 'guest-update-status.json' }
+if ([string]::IsNullOrWhiteSpace($ClientSid)) { $ClientSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value }
+try { [void][Security.Principal.SecurityIdentifier]::new($ClientSid) } catch { throw "Invalid client SID: $ClientSid" }
 $taskName = [string]$layout.BrokerTaskName
 $taskWasStopped = $false
 $maintenanceCreated = $false
@@ -66,6 +69,7 @@ function Get-GuestHarnessBaselineUpdatePlan {
         ConfigPath = [IO.Path]::GetFullPath($ConfigPath)
         SourceRoot = [IO.Path]::GetFullPath($SourceRoot)
         BrokerRoot = [IO.Path]::GetFullPath($BrokerRoot)
+        ClientSid = $ClientSid
         BaselineVmName = $VmName
         BaselineCheckpointName = $BaselineName
         PoolSize = [int]$poolDefinition.PoolSize
@@ -79,7 +83,7 @@ function Get-GuestHarnessBaselineUpdatePlan {
         PersistentChanges = @(
             'Install the reviewed guest-agent and live-evidence module into the canonical clean baseline.',
             'Transactionally replace the canonical clean checkpoint after preserving the prior checkpoint until promotion succeeds.',
-            'Force-recreate only the pool workers named by the installed pool definition from the new checkpoint.',
+            "Force-recreate only the $([int]$poolDefinition.PoolSize) pool workers named by the installed pool definition from the new checkpoint.",
             'Transactionally reinstall and restart the ACL-restricted SYSTEM broker from the reviewed source.'
         )
         SafetyBoundaries = @(
@@ -90,7 +94,7 @@ function Get-GuestHarnessBaselineUpdatePlan {
             'No request cancellation or deadline extension; apply waits for active processing to drain.'
         )
         DestructiveApprovalRequired = $true
-        DestructiveScope = 'Replace the canonical baseline checkpoint and force-recreate only the four named disposable pool workers.'
+        DestructiveScope = "Replace the canonical baseline checkpoint and force-recreate only the $([int]$poolDefinition.PoolSize) named disposable pool workers."
         RecoveryRefreshRequired = $true
         LiveCanaryRequired = $true
     }
@@ -323,12 +327,14 @@ try {
         throw
     }
 
-    # The pool base is a sealed copy of this checkpoint. Rebuild the four
+    # The pool base is a sealed copy of this checkpoint. Rebuild the configured
     # disposable shells now so a successful baseline refresh cannot leave the
     # broker serving an older guest harness.
     & (Join-Path $SourceRoot 'Initialize-HyperVTestPool.ps1') `
         -SourceVmName $VmName `
         -BaselineName $BaselineName `
+        -PoolSize ([int]$layout.PoolSize) `
+        -PoolVmPrefix ([string]$layout.PoolVmPrefix) `
         -BrokerRoot $BrokerRoot `
         -DefinitionPath $PoolDefinitionPath `
         -StatusPath (Join-Path $SourceRoot 'pool-provision-status.json') `
@@ -339,13 +345,14 @@ try {
         -BrokerRoot $BrokerRoot `
         -PoolDefinitionPath $PoolDefinitionPath `
         -StatusPath (Join-Path $SourceRoot 'pool-broker-install-status.json') `
-        -ConfigPath $ConfigPath
+        -ConfigPath $ConfigPath `
+        -ClientSid $ClientSid
     $refreshedPoolDefinition = Get-Content -LiteralPath $PoolDefinitionPath -Raw | ConvertFrom-Json
     if ([string]$refreshedPoolDefinition.SourceCheckpointId -ne [string]$verifiedBaseline.Id) {
         throw 'The rebuilt pool definition does not reference the refreshed clean checkpoint.'
     }
 
-    Write-UpdateResult -Success $true -Message 'Updated guest agent is installed in the clean baseline and the four-VM pool was rebuilt from it.' -Details @{
+    Write-UpdateResult -Success $true -Message 'Updated guest agent is installed in the clean baseline and the configured pool was rebuilt from it.' -Details @{
         GuestAgentSha256 = $sourceHash
         GuestSupervisorSha256 = $supervisorSourceHash
         GuestLiveEvidenceSha256 = $liveEvidenceSourceHash
