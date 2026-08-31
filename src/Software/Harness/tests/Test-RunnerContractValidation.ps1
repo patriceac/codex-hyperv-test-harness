@@ -138,6 +138,26 @@ try {
     }
     $scenarios.Add('process-wait-bounded')
 
+    Assert-Rejected -Scenario 'key chord uppercase vocabulary' -ExpectedMessage "uppercase '+'-separated" -Operation {
+        & $RunnerPath -ArtifactPath $artifact -BrokerRoot $root -ActionsJson '[{"type":"send_keys","keys":"Win+Left"}]'
+    }
+    $scenarios.Add('key-chord-uppercase-vocabulary')
+
+    Assert-Rejected -Scenario 'key chord narrow shape' -ExpectedMessage 'unsupported properties: command' -Operation {
+        & $RunnerPath -ArtifactPath $artifact -BrokerRoot $root -ActionsJson '[{"type":"send_keys","keys":"WIN+LEFT","command":"ignored"}]'
+    }
+    $scenarios.Add('key-chord-narrow-shape')
+
+    Assert-Rejected -Scenario 'key chord semantic shape' -ExpectedMessage 'one or more modifiers followed by exactly one non-modifier' -Operation {
+        & $RunnerPath -ArtifactPath $artifact -BrokerRoot $root -ActionsJson '[{"type":"send_keys","keys":"A+B"}]'
+    }
+    $scenarios.Add('key-chord-semantic-shape')
+
+    Assert-Rejected -Scenario 'key chord hold bound' -ExpectedMessage 'holdMs must be between 10 and 2000' -Operation {
+        & $RunnerPath -ArtifactPath $artifact -BrokerRoot $root -ActionsJson '[{"type":"send_keys","keys":"ENTER","holdMs":2001}]'
+    }
+    $scenarios.Add('key-chord-hold-bounded')
+
     Assert-Rejected -Scenario 'undeclared host input token' -ExpectedMessage 'unresolved reserved token' -Operation {
         & $RunnerPath -ArtifactPath $artifact -BrokerRoot $root -Arguments '--input "{HOSTINPUT:media}"'
     }
@@ -287,6 +307,14 @@ try {
         throw 'The default network contract must serialize null Cohort and AllowHostInputs=false without a switch selector.'
     }
     $scenarios.Add('network-default-serialized-none')
+
+    $keyboardInvocation = $baseInvocation.Clone()
+    $keyboardInvocation.ActionsJson = '[{"type":"send_keys","keys":"WIN+LEFT","holdMs":75}]'
+    $keyboardRequest = Get-QueuedRequest -Scenario 'keyboard action contract' -InvocationParameters $keyboardInvocation
+    Assert-Equal -Scenario 'keyboard action type' -Actual ([string]$keyboardRequest.Job.actions[0].type) -Expected 'send_keys'
+    Assert-Equal -Scenario 'keyboard action chord' -Actual ([string]$keyboardRequest.Job.actions[0].keys) -Expected 'WIN+LEFT'
+    Assert-Equal -Scenario 'keyboard action hold' -Actual ([int]$keyboardRequest.Job.actions[0].holdMs) -Expected 75
+    $scenarios.Add('key-chord-valid-shape-serialized')
 
     $isolatedInvocation = $baseInvocation.Clone()
     $isolatedInvocation.NetworkProfile = 'IsolatedTestNet'

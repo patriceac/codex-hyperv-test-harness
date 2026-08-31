@@ -13,6 +13,16 @@ if ($installer -notmatch 'function\s+Set-BrokerAcl' -or $installer -notmatch 'Di
 }
 $scenarios.Add('canonical-dacl-replaces-existing-rules')
 
+foreach ($publicStateName in @('broker-state.json', 'pool-state.json')) {
+    if ($installer -notmatch [regex]::Escape($publicStateName)) {
+        throw "Broker installation does not normalize the reused public state ACL: $publicStateName"
+    }
+}
+if ($installer -notmatch 'Set-BrokerAcl\s+-Path\s+\$publicStatePath\s+-ClientMode\s+Read') {
+    throw 'Broker installation does not restore read-only client access to reused queue-health state files.'
+}
+$scenarios.Add('reused-public-state-files-remain-client-readable')
+
 $payloadCachePath = Join-Path (Split-Path -Parent $PSScriptRoot) 'PayloadCache.ps1'
 $payloadCache = Get-Content -LiteralPath $payloadCachePath -Raw
 foreach ($required in @(

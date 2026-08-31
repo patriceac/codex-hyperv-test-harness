@@ -29,6 +29,8 @@ Baseline servicing is a separate, approval-gated exception. Only the canonical b
 
 The locally generated guest credential is stored in ACL-restricted files and is embedded in the local unattended seed ISO. Both are recovery secrets even though the VM is disposable. Never publish either. The baseline export and VHDX cache may also contain application data and screenshots.
 
+Guest keyboard input is exposed only as the bounded `send_keys` action. It accepts a canonical chord made from allowlisted symbolic names, rejects raw codes, scripts, text payloads, extra fields, duplicate keys, and ambiguous multi-character chords, and releases pressed modifiers in reverse order. The unprivileged runner validates before queueing, the privileged broker revalidates before guest submission, and the guest validates once more before calling `SendInput` in its isolated interactive session.
+
 The public repository contains source only. `setup\Test-PublicRepository.ps1` enforces the release boundary.
 
 ## Host override

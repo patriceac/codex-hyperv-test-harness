@@ -109,6 +109,7 @@ An actions file is a JSON array. Supported action shapes are:
   { "type": "click_control", "automationId": "saveButton", "name": "Save", "timeoutMs": 10000 },
   { "type": "click_relative", "x": 320, "y": 180 },
   { "type": "type_text", "text": "{PAYLOAD}\\fixture-project" },
+  { "type": "send_keys", "keys": "WIN+LEFT", "holdMs": 75 },
   { "type": "wait", "ms": 1000 },
   { "type": "wait_result_file", "path": "{OUTDIR}\\result.json", "timeoutMs": 300000 },
   { "type": "wait_process_exit", "timeoutMs": 300000, "expectedExitCode": 0 },
@@ -119,6 +120,8 @@ An actions file is a JSON array. Supported action shapes are:
 `wait_result_file` is the preferred completion signal for Electron apps, installers, and launchers whose initial process may hand work to child processes. A matching JSON assertion is evaluated as soon as that file appears; a false assertion skips the remaining waits and input actions. Any later requested screenshots run immediately as diagnostic finalizers. `wait_process_exit` is appropriate when the lifetime and exit code of the directly launched process are authoritative.
 
 Prefer stable UI Automation IDs with `click_control`; `name` is also supported. Automation IDs are provider-defined at runtime and may not match control names from source code, especially in WinForms or Electron. If lookup fails, use the element inventory in the guest error to select the actual runtime `name`/ID, or use a verified relative coordinate when the provider exposes no stable selector. Capture a screenshot before and after consequential interactions.
+
+Use `send_keys` for one named key press or chord after the application window is focused. `keys` is a canonical uppercase `+`-separated value such as `ENTER`, `ALT+F4`, `CTRL+SHIFT+S`, or `WIN+LEFT`; modifiers must precede exactly one non-modifier key. The allowlist is limited to `CTRL`, `ALT`, `SHIFT`, `WIN`, arrows, common navigation/editing keys, `F1`-`F12`, letters, and digits. Duplicate keys, arbitrary virtual-key numbers, scan codes, text, scripts, extra fields, and chords with multiple non-modifier keys are rejected before queueing and again by the broker and guest. `holdMs` is optional, defaults to 50, and is bounded from 10 through 2000. The guest releases the chord in reverse order and records the canonical key names, allowlisted virtual-key codes, hold duration, and target window handle in `result.json` action evidence.
 
 The runner validates the action schema before queueing and rejects evidence paths that escape the request output directory. Screenshot capture first proves that the input desktop, Explorer, DWM, and display geometry are ready, then uses fresh out-of-process helpers with bounded exponential retries. A persistent invalid-handle capture failure is classified as harness infrastructure: the request is replayed at most once on another clean worker while the failed worker recycles asynchronously. The result records the retry count and worker history.
 
