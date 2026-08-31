@@ -21,6 +21,8 @@ Non-`None` requests use the versioned `RunGuestJobNetworkV1` operation so an old
 
 This source contract does not enable or create live profile infrastructure. Adding switches, NAT, firewall policy, or allowlists remains part of the setup-harness informed-consent workflow, including a reviewed plan and separate approval before host mutation. See [request-scoped networking](docs/request-networking.md) for the exact request contract, lifecycle, preflight, and live acceptance matrix.
 
+Applications that intentionally shut down their disposable guest may opt in with `-ExpectGuestPowerOff`. The application must atomically write a required `{OUTDIR}` result marker before calling the real guest `shutdown.exe /s /t 0`. Under the harness's exclusive-worker/no-external-intervention boundary, the broker records an application-era VM `Running` to `Off` transition before cleanup, revokes networking, and performs one networkless boot of the same disposable worker solely to finalize and copy marker evidence. The marker must predate that recovery boot, and the harness never resubmits the job or relaunches the application. Runs without the opt-in keep the legacy behavior unchanged. See the [runtime skill](src/Software/Skill/SKILL.md#test-an-intentional-guest-shutdown) for the contract and isolated-VM example.
+
 ## Rebuild after losing everything local
 
 Give Codex this prompt:

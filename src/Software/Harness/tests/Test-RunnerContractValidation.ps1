@@ -53,7 +53,9 @@ function Get-QueuedRequest {
             if ($queuedFile) { break }
             if ($runnerJob.State -in @('Completed', 'Failed', 'Stopped')) {
                 $jobOutput = @(Receive-Job -Job $runnerJob -Keep -ErrorAction SilentlyContinue) -join [Environment]::NewLine
-                throw "$Scenario did not reach the broker queue. Runner job state: $($runnerJob.State). Output: $jobOutput"
+                $jobErrors = @($runnerJob.ChildJobs[0].Error | ForEach-Object { $_.ToString() }) -join ' | '
+                $jobReason = if ($runnerJob.ChildJobs[0].JobStateInfo.Reason) { $runnerJob.ChildJobs[0].JobStateInfo.Reason.ToString() } else { $null }
+                throw "$Scenario did not reach the broker queue. Runner job state: $($runnerJob.State). Reason: $jobReason Errors: $jobErrors Output: $jobOutput"
             }
             Start-Sleep -Milliseconds 100
         }
@@ -95,6 +97,31 @@ try {
         & $RunnerPath -ArtifactPath $artifact -BrokerRoot $root -AssertResultFile '{OUTDIR}\result.json' -AssertResultJsonPointer '/passed' -AssertResultEqualsJson 'not-json'
     }
     $scenarios.Add('typed-expected-json')
+
+    Assert-Rejected -Scenario 'expected power-off marker requirement' -ExpectedMessage 'AssertResultFile is required when ExpectGuestPowerOff is specified' -Operation {
+        & $RunnerPath -ArtifactPath $artifact -BrokerRoot $root -ExpectGuestPowerOff
+    }
+    $scenarios.Add('expected-power-off-requires-result-marker')
+
+    foreach ($reservedMarker in @('result.json', 'agent-error.json', 'lease.json')) {
+        Assert-Rejected -Scenario "reserved expected power-off marker $reservedMarker" -ExpectedMessage 'must not use reserved guest protocol filename' -Operation {
+            & $RunnerPath -ArtifactPath $artifact -BrokerRoot $root -ExpectGuestPowerOff -AssertResultFile ("{OUTDIR}\$reservedMarker")
+        }
+    }
+    $scenarios.Add('expected-power-off-marker-does-not-collide-with-protocol')
+
+    Assert-Rejected -Scenario 'power-off recovery timeout requires opt-in' -ExpectedMessage 'may be specified only with ExpectGuestPowerOff' -Operation {
+        & $RunnerPath -ArtifactPath $artifact -BrokerRoot $root -GuestPowerOffRecoveryTimeoutSeconds 60
+    }
+    $scenarios.Add('power-off-recovery-timeout-requires-opt-in')
+
+    Assert-Rejected -Scenario 'power-off recovery timeout lower bound' -ExpectedMessage 'minimum allowed range of 30' -Operation {
+        & $RunnerPath -ArtifactPath $artifact -BrokerRoot $root -ExpectGuestPowerOff -AssertResultFile '{OUTDIR}\result.json' -GuestPowerOffRecoveryTimeoutSeconds 29
+    }
+    Assert-Rejected -Scenario 'power-off recovery timeout upper bound' -ExpectedMessage 'maximum allowed range of 600' -Operation {
+        & $RunnerPath -ArtifactPath $artifact -BrokerRoot $root -ExpectGuestPowerOff -AssertResultFile '{OUTDIR}\result.json' -GuestPowerOffRecoveryTimeoutSeconds 601
+    }
+    $scenarios.Add('power-off-recovery-timeout-bounded')
 
     Assert-Rejected -Scenario 'wait result token scope' -ExpectedMessage 'Allowed tokens: {OUTDIR}' -Operation {
         & $RunnerPath -ArtifactPath $artifact -BrokerRoot $root -ActionsJson '[{"type":"wait_result_file","path":"{PAYLOAD}\\result.json","timeoutMs":1000}]'
@@ -197,6 +224,61 @@ try {
         ActionsJson = '[{"type":"wait","ms":0}]'
         QueueTimeoutSeconds = 300
     }
+
+    $legacyDefaultInvocation = @{
+        ArtifactPath = $artifact
+        BrokerRoot = $root
+        QueueTimeoutSeconds = 300
+    }
+    $legacyDefaultRequest = Get-QueuedRequest -Scenario 'legacy default request shape' -InvocationParameters $legacyDefaultInvocation
+    if ($legacyDefaultRequest.PSObject.Properties.Name -contains 'ExpectGuestPowerOff' -or
+        $legacyDefaultRequest.PSObject.Properties.Name -contains 'GuestPowerOffRecoveryTimeoutSeconds' -or
+        $legacyDefaultRequest.Job.PSObject.Properties.Name -contains 'expectGuestPowerOff') {
+        throw 'The legacy default request serialized expected-power-off properties without opt-in.'
+    }
+    $legacyDefaultActionsJson = @($legacyDefaultRequest.Job.actions) | ConvertTo-Json -Compress
+    $expectedLegacyDefaultActionsJson = '[{"type":"wait_window","timeoutMs":30000},{"type":"screenshot","name":"launched.png"},{"type":"wait","ms":2000},{"type":"screenshot","name":"after-wait.png"}]'
+    Assert-Equal -Scenario 'legacy default action compatibility' -Actual $legacyDefaultActionsJson -Expected $expectedLegacyDefaultActionsJson
+    $scenarios.Add('legacy-default-shape-omits-power-off-contract')
+
+    $powerOffInvocation = @{
+        ArtifactPath = $artifact
+        BrokerRoot = $root
+        AssertResultFile = '{OUTDIR}\shutdown-marker.json'
+        AssertResultJsonPointer = '/passed'
+        AssertResultEqualsJson = 'true'
+        ExpectGuestPowerOff = $true
+        GuestPowerOffRecoveryTimeoutSeconds = 240
+        ExecutionTimeoutSeconds = 45
+        QueueTimeoutSeconds = 300
+    }
+    $powerOffRequest = Get-QueuedRequest -Scenario 'expected guest power-off contract' -InvocationParameters $powerOffInvocation
+    if ($powerOffRequest.ExpectGuestPowerOff -isnot [bool] -or -not $powerOffRequest.ExpectGuestPowerOff -or
+        $powerOffRequest.Job.expectGuestPowerOff -isnot [bool] -or -not $powerOffRequest.Job.expectGuestPowerOff) {
+        throw 'Expected guest power-off flags were not serialized as exact Boolean true values.'
+    }
+    Assert-Equal -Scenario 'power-off recovery timeout serialization' -Actual ([int]$powerOffRequest.GuestPowerOffRecoveryTimeoutSeconds) -Expected 240
+    Assert-Equal -Scenario 'power-off marker default action count' -Actual (@($powerOffRequest.Job.actions).Count) -Expected 1
+    Assert-Equal -Scenario 'power-off marker default action type' -Actual ([string]$powerOffRequest.Job.actions[0].type) -Expected 'wait_result_file'
+    Assert-Equal -Scenario 'power-off marker default action path' -Actual ([string]$powerOffRequest.Job.actions[0].path) -Expected '{OUTDIR}\shutdown-marker.json'
+    Assert-Equal -Scenario 'power-off marker default action timeout' -Actual ([int64]$powerOffRequest.Job.actions[0].timeoutMs) -Expected 45000
+    $scenarios.Add('expected-power-off-shape-and-marker-default')
+
+    $runnerText = Get-Content -Raw -LiteralPath $RunnerPath
+    if (-not $runnerText.Contains('Broker result ExpectGuestPowerOff is not exact Boolean true.') -or
+        -not $runnerText.Contains('Broker result GuestPowerOffRecoveryTimeoutSeconds does not exactly match the requested recovery timeout.') -or
+        -not $runnerText.Contains('ResultFileEvidence does not prove that a present assertion marker predates the controlled recovery boot.') -or
+        -not $runnerText.Contains('if ($baseHarnessSucceeded -and $ExpectGuestPowerOff -and -not $expectedGuestPowerOffContractProven)')) {
+        throw 'The runner can claim or misclassify the expected-power-off contract when opt-in metadata or pre-recovery marker proof is invalid.'
+    }
+    $scenarios.Add('expected-power-off-final-proof-binds-request-metadata')
+
+    $powerOffExplicitActionsInvocation = $powerOffInvocation.Clone()
+    $powerOffExplicitActionsInvocation.ActionsJson = '[{"type":"screenshot","name":"mandatory.png"}]'
+    $powerOffExplicitActionsRequest = Get-QueuedRequest -Scenario 'expected power-off explicit screenshot' -InvocationParameters $powerOffExplicitActionsInvocation
+    Assert-Equal -Scenario 'explicit screenshot remains mandatory' -Actual ([string]$powerOffExplicitActionsRequest.Job.actions[0].type) -Expected 'screenshot'
+    Assert-Equal -Scenario 'explicit screenshot name remains unchanged' -Actual ([string]$powerOffExplicitActionsRequest.Job.actions[0].name) -Expected 'mandatory.png'
+    $scenarios.Add('expected-power-off-keeps-explicit-actions')
 
     $defaultRequest = Get-QueuedRequest -Scenario 'default network contract' -InvocationParameters $baseInvocation
     Assert-Equal -Scenario 'default operation compatibility' -Actual ([string]$defaultRequest.Operation) -Expected 'RunGuestJob'

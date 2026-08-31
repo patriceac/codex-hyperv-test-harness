@@ -51,7 +51,7 @@ $runnerAst = Get-ScriptAst -Path $RunnerPath
 $brokerAst = Get-ScriptAst -Path $HostBrokerPath
 $queueAst = Get-ScriptAst -Path $QueueInspectorPath
 foreach ($name in @('Read-RequestStateSafe', 'Resolve-RequestStateWithLastReadable', 'Get-OptionalRequestStateValue', 'Get-RequestLifecycleDisplay', 'Test-LifecycleProgressChanged')) { Import-AstFunction -Ast $runnerAst -Name $name }
-foreach ($name in @('Write-JsonAtomic', 'Write-RequestState', 'Get-GuestLifecycleProgress')) { Import-AstFunction -Ast $brokerAst -Name $name }
+foreach ($name in @('Write-JsonAtomic', 'Invoke-WithTerminalResultPublicationMutex', 'Read-BrokerJsonWithRetry', 'ConvertTo-BrokerTimestampText', 'Write-RequestState', 'Get-GuestLifecycleProgress')) { Import-AstFunction -Ast $brokerAst -Name $name }
 foreach ($name in @('Read-JsonSafe', 'Get-RequestDetails')) { Import-AstFunction -Ast $queueAst -Name $name }
 
 $scenarios = New-Object Collections.Generic.List[string]
@@ -89,6 +89,17 @@ $scenarios.Add('pre-confirmation-stages-never-say-running')
 $cleaningNetwork = Get-RequestLifecycleDisplay -RequestState ([pscustomobject]@{ Status = 'CleaningNetwork'; Message = 'Disconnecting adapter.'; WorkerId = 2 }) -RequestId $requestId -ProcessingPresent:$true
 Assert-True ($cleaningNetwork.Text -eq 'Revoking request network: Disconnecting adapter.') 'Request-network cleanup was not rendered as an explicit revocation stage.'
 $scenarios.Add('network-lifecycle-stages-rendered')
+
+$expectedPowerOffDisplays = [ordered]@{
+    AwaitingExpectedGuestPowerOff = 'Waiting for expected guest power-off:'
+    GuestPowerOffObserved = 'Expected guest power-off observed:'
+    RecoveringPowerOffEvidence = 'Recovering post-power-off evidence:'
+}
+foreach ($entry in $expectedPowerOffDisplays.GetEnumerator()) {
+    $display = Get-RequestLifecycleDisplay -RequestState ([pscustomobject]@{ Status = [string]$entry.Key; Message = 'contract detail'; WorkerId = 2 }) -RequestId $requestId -ProcessingPresent:$true
+    Assert-True ($display.Text -eq "$($entry.Value) contract detail") "Expected-power-off state $($entry.Key) was not rendered explicitly: $($display.Text)"
+}
+$scenarios.Add('expected-power-off-recovery-stages-rendered')
 
 $withoutLease = [pscustomobject]@{
     ApplicationLease = $null

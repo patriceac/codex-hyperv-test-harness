@@ -641,7 +641,7 @@ Assert-True (
     $cleanupFailedState -gt $leaseDeleteFailure
 ) 'Request-network cleanup is not identity-bound, disconnect-first, and failure-reporting on lease deletion.'
 $brokerCleanup = $brokerText.IndexOf('Remove-RequestNetworkRuntime -Runtime $requestNetworkRuntime', [StringComparison]::Ordinal)
-$terminalResult = $brokerText.IndexOf("Write-JsonAtomic -Path (Join-Path `$ResultRoot 'broker-result.json')", [StringComparison]::Ordinal)
+$terminalResult = $brokerText.IndexOf('Write-TerminalJsonAtomic -Path $brokerResultPath -Value $brokerResultValue', [StringComparison]::Ordinal)
 Assert-True (
     $brokerCleanup -ge 0 -and
     $terminalResult -gt $brokerCleanup -and
@@ -662,7 +662,7 @@ Assert-True (
     $recoveryText.Contains('Request-network orphan recovery failed closed:')
 ) 'Orphan recovery can ignore an authoritative lease or Hyper-V inventory failure.'
 $scenarios.Add('orphan-recovery-inventory-fails-closed')
-$cleanupKindIndex = $brokerText.IndexOf("elseif (`$cleanupFailureObserved)", [StringComparison]::Ordinal)
+$cleanupKindIndex = $brokerText.IndexOf("elseif (`$cleanupFailureObserved", [StringComparison]::Ordinal)
 $cleanupFailedIndex = $brokerText.IndexOf("`$cleanupFailed = -not `$success", $cleanupKindIndex, [StringComparison]::Ordinal)
 $finalStatusIndex = $brokerText.IndexOf("`$finalStatus = if (`$applicationTestFailed)", $cleanupFailedIndex, [StringComparison]::Ordinal)
 Assert-True (

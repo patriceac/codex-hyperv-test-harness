@@ -1,9 +1,10 @@
 [CmdletBinding()]
-param(
-    [string] $SourceRoot = (Split-Path -Parent $PSScriptRoot)
-)
+param([string] $SourceRoot)
 
 $ErrorActionPreference = 'Stop'
+if ([string]::IsNullOrWhiteSpace($SourceRoot)) {
+    $SourceRoot = Split-Path -Parent $PSScriptRoot
+}
 
 function Import-NamedFunction {
     param([string] $Path, [string] $Name)
@@ -28,6 +29,7 @@ $captureFailure = [pscustomobject]@{ Success = $false; FailureKind = 'CaptureInf
 Assert-True (Test-WorkerCaptureRetryAllowed -AttemptResult $captureFailure -RetryCount 0 -CancellationRequested $false) 'The first capture infrastructure failure was not retryable.'
 Assert-True (-not (Test-WorkerCaptureRetryAllowed -AttemptResult $captureFailure -RetryCount 1 -CancellationRequested $false)) 'A second capture infrastructure failure was incorrectly retryable.'
 Assert-True (-not (Test-WorkerCaptureRetryAllowed -AttemptResult $captureFailure -RetryCount 0 -CancellationRequested $true)) 'A cancelled request was incorrectly retryable.'
+Assert-True (-not (Test-WorkerCaptureRetryAllowed -AttemptResult $captureFailure -RetryCount 0 -CancellationRequested $false -ExpectGuestPowerOff $true)) 'An expected-power-off application could be relaunched after a capture infrastructure failure.'
 Assert-True (-not (Test-WorkerCaptureRetryAllowed -AttemptResult ([pscustomobject]@{ Success = $false; FailureKind = 'TestAssertion' }) -RetryCount 0 -CancellationRequested $false)) 'An application test failure was incorrectly treated as capture infrastructure.'
 Assert-True (-not (Test-WorkerCaptureRetryAllowed -AttemptResult ([pscustomobject]@{ Success = $true; FailureKind = $null }) -RetryCount 0 -CancellationRequested $false)) 'A successful attempt was incorrectly retryable.'
 
@@ -80,7 +82,25 @@ function Write-PoolJsonAtomic {
     $Value | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $Path -Encoding UTF8
 }
 function Update-PoolWorkerState {
-    param([string] $BrokerRoot, [int] $WorkerId, [Collections.IDictionary] $Patch)
+    param(
+        [string] $BrokerRoot,
+        [int] $WorkerId,
+        [Collections.IDictionary] $Patch,
+        [string] $ExpectedOperationId,
+        [string] $ExpectedRequestId,
+        [Nullable[int]] $ExpectedProcessId,
+        [switch] $RequireExpectation,
+        [switch] $RequireProcessExpectation
+    )
+    if ($RequireExpectation -and
+        (-not [string]::Equals([string]$script:state.OperationId, $ExpectedOperationId, [StringComparison]::Ordinal) -or
+         -not [string]::Equals([string]$script:state.RequestId, $ExpectedRequestId, [StringComparison]::Ordinal))) {
+        return $null
+    }
+    if ($RequireProcessExpectation) {
+        $currentProcessId = if ($null -ne $script:state.ProcessId) { [Nullable[int]]([int]$script:state.ProcessId) } else { $null }
+        if ($currentProcessId -ne $ExpectedProcessId) { return $null }
+    }
     foreach ($key in $Patch.Keys) {
         if ($script:state.PSObject.Properties.Name -contains [string]$key) { $script:state.([string]$key) = $Patch[$key] }
         else { $script:state | Add-Member -NotePropertyName ([string]$key) -NotePropertyValue $Patch[$key] }
@@ -88,6 +108,17 @@ function Update-PoolWorkerState {
     $script:state
 }
 function Read-PoolWorkerState { param([string] $BrokerRoot, [int] $WorkerId) $script:state }
+function Test-PoolProcessAlive { param($ProcessId, $ProcessStartUtc) $false }
+function Read-BrokerJsonWithRetry {
+    param([string] $Path)
+    Get-Content -Raw -LiteralPath $Path -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+}
+function Test-ExactExpectedGuestPowerOffRequest {
+    param($Request)
+    if (-not $Request) { return $false }
+    $property = @($Request.PSObject.Properties | Where-Object { $_.Name -ceq 'ExpectGuestPowerOff' }) | Select-Object -First 1
+    $property -and $property.Value -is [bool] -and [bool]$property.Value
+}
 function Set-PoolLifecycleQueued {
     param($State, [string] $Mode, [string] $IdleDeadlineUtc)
     $script:lifecycleMode = $Mode
@@ -114,11 +145,12 @@ finally {
 
 [pscustomobject][ordered]@{
     Success = $true
-    ScenarioCount = 6
+    ScenarioCount = 7
     Scenarios = @(
         'first-capture-failure-retryable',
         'retry-bounded-to-one',
         'cancellation-disables-retry',
+        'expected-poweroff-disables-capture-retry',
         'test-failure-not-retried',
         'success-not-retried',
         'retry-requeued-before-worker-recycle'

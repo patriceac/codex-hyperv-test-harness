@@ -35,6 +35,7 @@ Use `scripts/Invoke-HyperVExecutableTest.ps1`.
 - A source update does not create or enable switches, NAT, firewall rules, or allowlists. If a requested profile is disabled, stop and explain that setup requires the setup-harness informed-consent plan, preflight, and separate approval before host mutation. Never substitute another switch.
 - Reserved tokens are uppercase and validated before queueing. Unknown tokens, lowercase spellings, and tokens in structural fields such as an action `type` or screenshot evidence `name` are rejected. `-AssertResultFile` continues to require `{OUTDIR}\` and does not accept `{PAYLOAD}`.
 - Use `-AssertResultFile` to require an application-produced result. To evaluate its content, add `-AssertResultJsonPointer '/passed' -AssertResultEqualsJson 'true'`. The pointer follows RFC 6901 and the expected value is typed JSON, not a string expression.
+- Use `-ExpectGuestPowerOff` only when the application is expected to shut down an exclusively owned disposable worker with no external administrator intervention. It requires `-AssertResultFile` below `{OUTDIR}\`; `-AssertResultJsonPointer` and `-AssertResultEqualsJson` remain an optional pair. The exact path closes its parent guest session, makes one watchdog-bounded child submission, monitors through killable read-only probes, and does not offer guest live capture. `-GuestPowerOffRecoveryTimeoutSeconds` accepts 30 through 600 seconds and defaults to 180. Omit both power-off parameters for the unchanged legacy launch, action, timeout, evidence, and cleanup behavior.
 - Omit actions for a basic launch-and-screenshot smoke test. For interaction, provide an actions JSON file with `-ActionsPath`.
 - Add `-RequireHostLocked` only when the test specifically needs proof that the physical workstation stayed locked. Ordinary VM runs remain isolated without touching the host desktop whether it is locked or unlocked.
 - The default queue deadline is 30 minutes and the execution deadline is 15 minutes. Override them independently with `-QueueTimeoutSeconds` and `-ExecutionTimeoutSeconds`; time spent waiting in line never consumes the execution budget.
@@ -76,6 +77,26 @@ The example above uses the default `None` profile. Explicit profile examples are
   -AllowNetworkWithHostInputs `
   -ReadOnlyHostInput @{ Name = 'fixtures'; Path = 'D:\fixtures'; Mode = 'Auto' }
 ```
+
+### Test an intentional guest shutdown
+
+`-ExpectGuestPowerOff` is an explicit contract for an application expected to power off its isolated worker. Prefer `-NetworkProfile None` for shutdown qualification. Before calling the real guest command `shutdown.exe /s /t 0`, the application must atomically publish and close its required marker below `{OUTDIR}`: write a temporary file in the same directory, flush and close it, then replace or rename it to the final path. Its last-write time must precede the later recovery boot; a post-boot marker fails as `ResultFileNotPrePowerOff`. The file and its timestamp are application-controlled test evidence, not a hostile-guest security attestation. Omitting actions under this contract selects a marker-oriented `wait_result_file` action instead of the legacy launch screenshots; an explicit actions file is still enforced as written.
+
+The example below assumes `ShutdownProbe.exe` accepts the shown marker argument, atomically writes `{"passed":true}` to that path, and then invokes `%SystemRoot%\System32\shutdown.exe /s /t 0` inside the disposable guest. The application is not launched on the physical host.
+
+```powershell
+& "$env:USERPROFILE\.agents\skills\hyperv-test-executables\scripts\Invoke-HyperVExecutableTest.ps1" `
+  -ArtifactPath 'D:\build\ShutdownProbe.exe' `
+  -Arguments '--marker "{OUTDIR}\shutdown-result.json"' `
+  -NetworkProfile None `
+  -ExpectGuestPowerOff `
+  -GuestPowerOffRecoveryTimeoutSeconds 180 `
+  -AssertResultFile '{OUTDIR}\shutdown-result.json' `
+  -AssertResultJsonPointer '/passed' `
+  -AssertResultEqualsJson 'true'
+```
+
+After the guest agent confirms the application process, the host records an application-era VM `Running` observation and must later observe `Off` before broker cleanup begins. This ordering and a final `VmFinalState=Off` do not prove which in-guest process requested shutdown; attribution assumes exclusive worker ownership and no external administrator intervention. The exact path closes its parent session, records the durable ambiguity/no-replay boundary, makes exactly one bounded child submission, and uses killable read-only child probes thereafter. Once `Off` is observed, the broker revokes request networking and any ephemeral host-input share, verifies that no adapter remains connected, and boots that same disposable worker once without networking solely to finalize and copy the persisted marker through a unique stable evidence stage. Guest live capture is unavailable, and the harness never resubmits or relaunches after the durable boundary. Recovery has its own bounded timeout; cancellation and the execution deadline remain authoritative.
 
 An actions file is a JSON array. Supported action shapes are:
 
@@ -195,6 +216,7 @@ Payload cache garbage collection is automatic while the pool is fully idle and o
 Require all of the following before claiming success:
 
 - Treat the runner's `HarnessSucceeded`, `TestEvaluated`, and nullable `TestPassed` as separate facts. `Success` and `OverallSucceeded` are false when either harness execution fails or a declared application assertion fails. Without an application assertion, a successful smoke run has `TestEvaluated=false` and `TestPassed=null`.
+- For `-ExpectGuestPowerOff`, require `ExpectedGuestPowerOffContractProven=true`, `GuestPowerOffBeforeCleanup=true`, ordered application-era `Running` and host-observed `Off` timestamps, `GuestPowerOffEvidenceRecoveryMode=ControlledReboot`, and `ApplicationRelaunchedByHarnessAfterGuestPowerOff=false`. When the marker exists, also require `ResultFileEvidence.PredatesRecoveryBoot=true`. These observations and application-controlled files do not prove the shutdown caller against a hostile guest; attribution assumes exclusive worker ownership and no external administrator intervention. A missing, empty, or false marker is an evaluated application failure (`HarnessSucceeded=true`, `TestEvaluated=true`, `TestPassed=false`) when recovery and cleanup themselves succeeded; an ordering, recovery, or cleanup failure makes `HarnessSucceeded=false`.
 - `broker-result.json` reports `HarnessSucceeded=true`, identifies `PoolWorkerId`, and records `VmFinalState` as `Off` before asynchronous OS recycling begins. Its legacy `Success` field remains the broker/harness-layer result.
 - Guest `result.json` reports `HarnessSucceeded=true`; when `TestEvaluated=true`, require `TestPassed=true` before claiming application success.
 - Guest `ProcessCleanup.Success` is true. Review non-empty broker `EvidenceWarnings`; skipped optional diagnostics are degraded evidence, while missing requested/terminal evidence still fails verification.

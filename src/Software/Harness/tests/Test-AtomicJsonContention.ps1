@@ -1,9 +1,10 @@
 [CmdletBinding()]
-param(
-    [string] $HostBrokerPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'HostBroker.ps1')
-)
+param([string] $HostBrokerPath)
 
 $ErrorActionPreference = 'Stop'
+if ([string]::IsNullOrWhiteSpace($HostBrokerPath)) {
+    $HostBrokerPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'HostBroker.ps1'
+}
 $tokens = $null
 $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($HostBrokerPath, [ref]$tokens, [ref]$errors)

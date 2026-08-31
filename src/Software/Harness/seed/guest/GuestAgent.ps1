@@ -145,6 +145,7 @@ $processingPath = Join-Path $agentRoot 'Processing'
 $completedPath = Join-Path $agentRoot 'Completed'
 $outboxPath = Join-Path $agentRoot 'Outbox'
 $statePath = Join-Path $agentRoot 'agent-state.json'
+$guestBootTimeUtc = $null
 
 foreach ($path in @($inboxPath, $processingPath, $completedPath, $outboxPath)) {
     New-Item -ItemType Directory -Force -Path $path | Out-Null
@@ -208,6 +209,7 @@ function Write-AgentState {
         UserName = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
         UserInteractive = [Environment]::UserInteractive
         MachineName = $env:COMPUTERNAME
+        GuestBootTimeUtc = (Get-CachedGuestBootTimeUtc)
     })
 }
 
@@ -544,6 +546,591 @@ function Test-GuestResultAssertion {
         JsonPointer = $JsonPointer
         ExpectedJson = $ExpectedJson
         ActualJson = $actualJson
+    }
+}
+
+function Test-ExpectedGuestPowerOffJob {
+    param([AllowNull()] $Job)
+
+    if ($null -eq $Job) { return $false }
+    $property = @($Job.PSObject.Properties | Where-Object { $_.Name -ceq 'expectGuestPowerOff' }) | Select-Object -First 1
+    $null -ne $property -and $property.Value -is [bool] -and [bool]$property.Value
+}
+
+function Get-GuestResultFileEvidence {
+    param([Parameter(Mandatory = $true)] [string] $Path)
+
+    $item = Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue
+    $isFile = $null -ne $item -and -not $item.PSIsContainer
+    $length = if ($isFile) { [long]$item.Length } else { 0L }
+    $hasContent = $isFile -and $length -gt 0
+    [pscustomobject][ordered]@{
+        Path = $Path
+        Exists = [bool]$isFile
+        HasContent = [bool]$hasContent
+        Length = $length
+        LastWriteUtc = if ($isFile) { $item.LastWriteTimeUtc.ToString('o') } else { $null }
+        Sha256 = if ($hasContent) { [string](Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash } else { $null }
+        InspectedUtc = [DateTime]::UtcNow.ToString('o')
+    }
+}
+
+function Get-GuestBootTimeUtc {
+    $bootValue = (Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime
+    $bootTime = if ($bootValue -is [DateTime]) {
+        [DateTime]$bootValue
+    }
+    else {
+        [Management.ManagementDateTimeConverter]::ToDateTime([string]$bootValue)
+    }
+    $bootTime.ToUniversalTime()
+}
+
+function Get-CachedGuestBootTimeUtc {
+    if ([string]::IsNullOrWhiteSpace([string]$script:guestBootTimeUtc)) {
+        $script:guestBootTimeUtc = (Get-GuestBootTimeUtc).ToString('o')
+    }
+    [string]$script:guestBootTimeUtc
+}
+
+function ConvertTo-GuestUtcInstant {
+    param([AllowNull()] $Value)
+
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [DateTime]) { return ([DateTime]$Value).ToUniversalTime() }
+    if ($Value -is [DateTimeOffset]) { return ([DateTimeOffset]$Value).UtcDateTime }
+    if ([string]::IsNullOrWhiteSpace([string]$Value)) { return $null }
+    ([DateTimeOffset]::Parse([string]$Value, [Globalization.CultureInfo]::InvariantCulture)).UtcDateTime
+}
+
+function Get-ExpectedGuestPowerOffBootEvidence {
+    param([AllowNull()] $Lease)
+
+    $currentBootUtc = (Get-GuestBootTimeUtc).ToUniversalTime()
+    $source = $null
+    $originalText = $null
+    $originalValue = $null
+    if ($Lease -and $Lease.PSObject.Properties.Name -contains 'GuestBootTimeUtc') {
+        $source = 'Lease'
+        $originalValue = $Lease.GuestBootTimeUtc
+    }
+
+    $originalBootOffset = [DateTimeOffset]::MinValue
+    if ($originalValue -is [DateTime]) {
+        $originalBootUtc = ([DateTime]$originalValue).ToUniversalTime()
+        $originalText = $originalBootUtc.ToString('o')
+        $parsed = $true
+    }
+    elseif ($originalValue -is [DateTimeOffset]) {
+        $originalBootUtc = ([DateTimeOffset]$originalValue).UtcDateTime
+        $originalText = $originalBootUtc.ToString('o')
+        $parsed = $true
+    }
+    else {
+        $originalText = [string]$originalValue
+        $parsed = -not [string]::IsNullOrWhiteSpace($originalText) -and [DateTimeOffset]::TryParse(
+            $originalText,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::AllowWhiteSpaces,
+            [ref]$originalBootOffset
+        )
+        $originalBootUtc = if ($parsed) { $originalBootOffset.UtcDateTime } else { [DateTime]::MinValue }
+    }
+    $laterBoot = $parsed -and $currentBootUtc -gt $originalBootUtc
+
+    [pscustomobject][ordered]@{
+        OriginalBootTimeUtc = if ($parsed) { $originalBootUtc.ToString('o') } else { $originalText }
+        CurrentBootTimeUtc = $currentBootUtc.ToString('o')
+        OriginalBootTimeSource = $source
+        OriginalBootTimeParsed = [bool]$parsed
+        ControlledRebootProven = [bool]$laterBoot
+        SameBoot = [bool]$parsed -and $currentBootUtc -eq $originalBootUtc
+    }
+}
+
+function Get-RedactedGuestActionSummary {
+    param(
+        [AllowEmptyCollection()] [object[]] $Actions,
+        [ValidateRange(1, 100)] [int] $MaximumItems = 32
+    )
+
+    $allActions = @($Actions)
+    $items = New-Object Collections.Generic.List[object]
+    for ($index = 0; $index -lt [Math]::Min($allActions.Count, $MaximumItems); $index++) {
+        $items.Add([pscustomobject][ordered]@{
+            Index = $index + 1
+            Type = [string]$allActions[$index].type
+        })
+    }
+    [pscustomobject][ordered]@{
+        Count = $allActions.Count
+        Items = $items.ToArray()
+        Truncated = $allActions.Count -gt $MaximumItems
+    }
+}
+
+function Complete-ExpectedGuestPowerOffJob {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] $Job,
+        [Parameter(Mandatory = $true)] [string] $JobFile,
+        [Parameter(Mandatory = $true)] [ValidateSet('Processing', 'Completed')] [string] $RecoverySource,
+        [string] $OutboxRoot = $outboxPath
+    )
+
+    if (-not (Test-ExpectedGuestPowerOffJob -Job $Job)) {
+        throw 'Expected guest power-off recovery requires an exact Boolean expectGuestPowerOff=true contract.'
+    }
+
+    $jobId = [string]$Job.id
+    if ($jobId -notmatch '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$') {
+        throw "Invalid job id: $jobId"
+    }
+    $jobOutputPath = Join-Path $OutboxRoot $jobId
+    New-Item -ItemType Directory -Force -Path $jobOutputPath | Out-Null
+    $resultFile = Join-Path $jobOutputPath 'result.json'
+    $leasePath = Join-Path $jobOutputPath 'lease.json'
+    $agentErrorPath = Join-Path $jobOutputPath 'agent-error.json'
+
+    $recoveryStartedUtc = [DateTime]::UtcNow
+    $recoveryCompletedUtc = $null
+    $harnessSucceeded = $true
+    $failureKind = $null
+    $errorMessage = $null
+    $testEvaluated = $false
+    $testPassed = $null
+    $testFailureKind = $null
+    $testFailureMessage = $null
+    $testAssertion = $null
+    $assertionPath = $null
+    $markerEvidence = $null
+    $lease = $null
+    $leaseReadError = $null
+    $existingResult = $null
+    $existingResultReadError = $null
+    $existingTerminalResultValidated = $false
+    $bootEvidence = $null
+    $bootEvidenceError = $null
+
+    if (Test-Path -LiteralPath $leasePath -PathType Leaf) {
+        try { $lease = Get-Content -Raw -LiteralPath $leasePath -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
+        catch { $leaseReadError = $_.Exception.Message }
+    }
+    if (Test-Path -LiteralPath $resultFile -PathType Leaf) {
+        try { $existingResult = Get-Content -Raw -LiteralPath $resultFile -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
+        catch { $existingResultReadError = $_.Exception.Message }
+    }
+    try { $bootEvidence = Get-ExpectedGuestPowerOffBootEvidence -Lease $lease }
+    catch { $bootEvidenceError = $_.Exception.Message }
+
+    if ($bootEvidence -and $bootEvidence.SameBoot) {
+        return [pscustomobject][ordered]@{
+            JobId = $jobId
+            Completed = $false
+            ExistingResult = $null -ne $existingResult
+            Deferred = $true
+            DeferReason = 'SameBoot'
+            ResultFile = $resultFile
+            BootEvidence = $bootEvidence
+        }
+    }
+
+    try {
+        if (-not [string]::IsNullOrWhiteSpace($bootEvidenceError)) {
+            throw "Could not read the guest boot epoch: $bootEvidenceError"
+        }
+        if (-not $bootEvidence -or -not $bootEvidence.OriginalBootTimeParsed) {
+            throw 'Expected guest power-off recovery has no readable application boot epoch.'
+        }
+        if (-not $bootEvidence.ControlledRebootProven) {
+            throw 'Expected guest power-off recovery could not prove a later guest boot epoch.'
+        }
+        if (-not [string]::IsNullOrWhiteSpace($existingResultReadError)) {
+            throw "Could not read the existing guest result envelope: $existingResultReadError"
+        }
+
+        $hasResultFile = $Job.PSObject.Properties.Name -contains 'assertResultFile'
+        if (-not $hasResultFile -or [string]::IsNullOrWhiteSpace([string]$Job.assertResultFile)) {
+            throw 'Expected guest power-off recovery requires assertResultFile.'
+        }
+
+        $hasAssertionPointer = $Job.PSObject.Properties.Name -contains 'assertResultJsonPointer'
+        $hasAssertionExpected = $Job.PSObject.Properties.Name -contains 'assertResultEqualsJson'
+        if ($hasAssertionPointer -ne $hasAssertionExpected) {
+            throw 'assertResultJsonPointer and assertResultEqualsJson must be supplied together.'
+        }
+
+        $assertionPath = Resolve-GuestOutputPath -Value ([string]$Job.assertResultFile) -JobOutputPath $jobOutputPath -Context 'assertResultFile'
+        foreach ($reservedPath in @($resultFile, $leasePath, (Join-Path $jobOutputPath 'agent-error.json'))) {
+            if ([string]::Equals($assertionPath, $reservedPath, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "assertResultFile cannot use the reserved guest protocol file '$([IO.Path]::GetFileName($reservedPath))'."
+            }
+        }
+        $markerEvidence = Get-GuestResultFileEvidence -Path $assertionPath
+        $markerPredatesRecoveryBoot = $false
+        if ($markerEvidence.Exists -and $bootEvidence -and $bootEvidence.ControlledRebootProven) {
+            try {
+                $markerLastWriteUtc = ConvertTo-GuestUtcInstant -Value $markerEvidence.LastWriteUtc
+                $recoveryBootUtc = ConvertTo-GuestUtcInstant -Value $bootEvidence.CurrentBootTimeUtc
+                $markerPredatesRecoveryBoot = $markerLastWriteUtc -and $recoveryBootUtc -and $markerLastWriteUtc -lt $recoveryBootUtc
+            }
+            catch { $markerPredatesRecoveryBoot = $false }
+        }
+        $markerEvidence | Add-Member -NotePropertyName PredatesRecoveryBoot -NotePropertyValue ([bool]$markerPredatesRecoveryBoot) -Force
+        if ($existingResult) {
+            $existingJobIdProperty = $existingResult.PSObject.Properties['JobId']
+            $existingSuccessProperty = $existingResult.PSObject.Properties['Success']
+            $existingHarnessProperty = $existingResult.PSObject.Properties['HarnessSucceeded']
+            $existingTestEvaluatedProperty = $existingResult.PSObject.Properties['TestEvaluated']
+            $existingTestPassedProperty = $existingResult.PSObject.Properties['TestPassed']
+            $existingActionsProperty = $existingResult.PSObject.Properties['Actions']
+            if (-not $existingJobIdProperty -or -not [string]::Equals([string]$existingResult.JobId, $jobId, [StringComparison]::Ordinal) -or
+                -not $existingSuccessProperty -or $existingResult.Success -isnot [bool] -or
+                -not $existingHarnessProperty -or $existingResult.HarnessSucceeded -isnot [bool] -or
+                [bool]$existingResult.Success -ne [bool]$existingResult.HarnessSucceeded -or
+                -not $existingTestEvaluatedProperty -or $existingResult.TestEvaluated -isnot [bool] -or
+                -not $existingTestPassedProperty -or -not $existingActionsProperty) {
+                throw 'The existing result.json is not a valid terminal guest result envelope for this job.'
+            }
+            if (([bool]$existingResult.TestEvaluated -and $existingResult.TestPassed -isnot [bool]) -or
+                (-not [bool]$existingResult.TestEvaluated -and $null -ne $existingResult.TestPassed)) {
+                throw 'The existing terminal guest result has an invalid TestPassed value for its TestEvaluated state.'
+            }
+            $existingTerminalResultValidated = $true
+            $harnessSucceeded = [bool]$existingResult.HarnessSucceeded
+            $failureKind = [string]$existingResult.FailureKind
+            $errorMessage = [string]$existingResult.Error
+            $testEvaluated = [bool]$existingResult.TestEvaluated
+            $testPassed = if ($testEvaluated) { [bool]$existingResult.TestPassed } else { $null }
+            $testFailureKind = [string]$existingResult.TestFailureKind
+            $testFailureMessage = [string]$existingResult.TestFailureMessage
+            $testAssertion = $existingResult.TestAssertion
+            $recoveredMarkerPassed = $true
+            $recoveredMarkerFailureKind = $null
+            $recoveredMarkerFailureMessage = $null
+            $recoveredAssertion = $null
+            if (-not $markerEvidence.Exists) {
+                $recoveredMarkerPassed = $false
+                $recoveredMarkerFailureKind = 'ResultFileMissing'
+                $recoveredMarkerFailureMessage = "Expected application result file was not preserved through guest power-off: $assertionPath"
+            }
+            elseif (-not $markerEvidence.HasContent) {
+                $recoveredMarkerPassed = $false
+                $recoveredMarkerFailureKind = 'ResultFileEmpty'
+                $recoveredMarkerFailureMessage = "Expected application result file was empty after guest power-off: $assertionPath"
+            }
+            elseif (-not $markerPredatesRecoveryBoot) {
+                $recoveredMarkerPassed = $false
+                $recoveredMarkerFailureKind = 'ResultFileNotPrePowerOff'
+                $recoveredMarkerFailureMessage = "Expected application result file was not proven to predate the controlled recovery boot: $assertionPath"
+            }
+            elseif ($hasAssertionPointer) {
+                $recoveredAssertion = Test-GuestResultAssertion -Path $assertionPath -JsonPointer ([string]$Job.assertResultJsonPointer) -ExpectedJson ([string]$Job.assertResultEqualsJson)
+                $recoveredMarkerPassed = [bool]$recoveredAssertion.Passed
+                if (-not $recoveredMarkerPassed) {
+                    $recoveredMarkerFailureKind = [string]$recoveredAssertion.FailureKind
+                    $recoveredMarkerFailureMessage = [string]$recoveredAssertion.Message
+                }
+            }
+            if (-not $recoveredMarkerPassed) {
+                $testEvaluated = $true
+                $testPassed = $false
+                $testFailureKind = $recoveredMarkerFailureKind
+                $testFailureMessage = $recoveredMarkerFailureMessage
+                $testAssertion = $recoveredAssertion
+            }
+            elseif (-not $testEvaluated) {
+                $testEvaluated = $true
+                $testPassed = $true
+                $testFailureKind = $null
+                $testFailureMessage = $null
+                $testAssertion = $recoveredAssertion
+            }
+            elseif ($hasAssertionPointer) {
+                $testAssertion = $recoveredAssertion
+            }
+        }
+        else {
+            $testEvaluated = $true
+            if (-not $markerEvidence.Exists) {
+                $testPassed = $false
+                $testFailureKind = 'ResultFileMissing'
+                $testFailureMessage = "Expected application result file was not created before guest power-off: $assertionPath"
+            }
+            elseif (-not $markerEvidence.HasContent) {
+                $testPassed = $false
+                $testFailureKind = 'ResultFileEmpty'
+                $testFailureMessage = "Expected application result file was empty after guest power-off: $assertionPath"
+            }
+            elseif (-not $markerPredatesRecoveryBoot) {
+                $testPassed = $false
+                $testFailureKind = 'ResultFileNotPrePowerOff'
+                $testFailureMessage = "Expected application result file was not proven to predate the controlled recovery boot: $assertionPath"
+            }
+            elseif ($hasAssertionPointer) {
+                $testAssertion = Test-GuestResultAssertion -Path $assertionPath -JsonPointer ([string]$Job.assertResultJsonPointer) -ExpectedJson ([string]$Job.assertResultEqualsJson)
+                $testPassed = [bool]$testAssertion.Passed
+                if (-not $testPassed) {
+                    $testFailureKind = [string]$testAssertion.FailureKind
+                    $testFailureMessage = [string]$testAssertion.Message
+                }
+            }
+            else {
+                $testPassed = $true
+            }
+        }
+    }
+    catch {
+        $harnessSucceeded = $false
+        $failureKind = 'ExpectedGuestPowerOffRecoveryContract'
+        $errorMessage = $_.Exception.Message
+        $testEvaluated = $false
+        $testPassed = $null
+        $testFailureKind = $null
+        $testFailureMessage = $null
+    }
+
+    $hostInputDefinitions = @()
+    if ($Job.PSObject.Properties.Name -contains 'hostInputs') {
+        $hostInputDefinitions = @($Job.hostInputs)
+    }
+    try {
+        $hostInputCleanup = Dismount-GuestHostInputs -MountedInputs $hostInputDefinitions
+    }
+    catch {
+        $hostInputCleanup = [pscustomobject][ordered]@{
+            Attempted = $hostInputDefinitions.Count -gt 0
+            Success = $false
+            Errors = @($_.Exception.Message)
+            UnmountedCount = 0
+        }
+    }
+    if (-not $hostInputCleanup.Success) {
+        $cleanupError = 'Guest read-only host-input cleanup failed after expected power-off: ' + (@($hostInputCleanup.Errors) -join ' | ')
+        $harnessSucceeded = $false
+        $failureKind = 'HostInputCleanup'
+        $errorMessage = if ([string]::IsNullOrWhiteSpace($errorMessage)) { $cleanupError } else { "$errorMessage $cleanupError" }
+    }
+
+    $existingRecoveryVerified = $false
+    if ($existingTerminalResultValidated -and $hostInputCleanup.Success -and $bootEvidence -and $bootEvidence.ControlledRebootProven) {
+        try {
+            $existingRecovery = $existingResult.ExpectedGuestPowerOffRecovery
+            $existingRecoveryBoot = if ($existingRecovery) { $existingRecovery.BootEvidence } else { $null }
+            $currentBootInstant = ConvertTo-GuestUtcInstant -Value $bootEvidence.CurrentBootTimeUtc
+            $resultRecoveryBootInstant = if ($existingRecoveryBoot) { ConvertTo-GuestUtcInstant -Value $existingRecoveryBoot.CurrentBootTimeUtc } else { $null }
+            $leaseRecoveryBootInstant = ConvertTo-GuestUtcInstant -Value $lease.RecoveryBootTimeUtc
+            $existingResultHash = (Get-FileHash -LiteralPath $resultFile -Algorithm SHA256 -ErrorAction Stop).Hash
+            $markerHashMatches = [string]::Equals([string]$lease.RecoveryMarkerSha256, [string]$markerEvidence.Sha256, [StringComparison]::OrdinalIgnoreCase)
+            $resultMarkerHashMatches = [string]::Equals([string]$existingResult.ResultFileEvidence.Sha256, [string]$markerEvidence.Sha256, [StringComparison]::OrdinalIgnoreCase)
+            $testOutcomeMatches = $existingResult.TestEvaluated -is [bool] -and [bool]$existingResult.TestEvaluated -eq [bool]$testEvaluated -and
+                (-not $testEvaluated -or ($existingResult.TestPassed -is [bool] -and [bool]$existingResult.TestPassed -eq [bool]$testPassed)) -and
+                [string]::Equals([string]$existingResult.TestFailureKind, [string]$testFailureKind, [StringComparison]::Ordinal)
+            $existingRecoveryVerified =
+                $existingResult.ExpectGuestPowerOff -is [bool] -and [bool]$existingResult.ExpectGuestPowerOff -and
+                [string]::Equals([string]$existingResult.GuestPowerOffEvidenceRecoveryMode, 'ControlledReboot', [StringComparison]::Ordinal) -and
+                $existingResult.ApplicationRelaunchedByHarnessAfterGuestPowerOff -is [bool] -and -not [bool]$existingResult.ApplicationRelaunchedByHarnessAfterGuestPowerOff -and
+                $existingResult.HarnessSucceeded -is [bool] -and [bool]$existingResult.HarnessSucceeded -eq [bool]$harnessSucceeded -and
+                $testOutcomeMatches -and
+                $existingRecovery -and [string]::Equals([string]$existingRecovery.Mode, 'ControlledReboot', [StringComparison]::Ordinal) -and
+                $existingRecovery.ApplicationRelaunchedByHarness -is [bool] -and -not [bool]$existingRecovery.ApplicationRelaunchedByHarness -and
+                $existingRecoveryBoot -and $existingRecoveryBoot.ControlledRebootProven -is [bool] -and [bool]$existingRecoveryBoot.ControlledRebootProven -and
+                [string]::Equals([string]$existingRecoveryBoot.OriginalBootTimeSource, 'Lease', [StringComparison]::Ordinal) -and
+                $currentBootInstant -and $resultRecoveryBootInstant -and $leaseRecoveryBootInstant -and
+                $resultRecoveryBootInstant -eq $currentBootInstant -and $leaseRecoveryBootInstant -eq $currentBootInstant -and
+                $existingResult.ProcessCleanup.SatisfiedByGuestPowerCycle -is [bool] -and [bool]$existingResult.ProcessCleanup.SatisfiedByGuestPowerCycle -and
+                $existingResult.HostInputCleanup.Success -is [bool] -and
+                [string]::Equals([string]$lease.JobId, $jobId, [StringComparison]::Ordinal) -and
+                $lease.ApplicationRelaunchedByHarnessAfterGuestPowerOff -is [bool] -and -not [bool]$lease.ApplicationRelaunchedByHarnessAfterGuestPowerOff -and
+                [string]::Equals([string]$lease.RecoveryResultSha256, [string]$existingResultHash, [StringComparison]::OrdinalIgnoreCase) -and
+                [string]::Equals([string]$lease.RecoveryMarkerPath, [string]$assertionPath, [StringComparison]::OrdinalIgnoreCase) -and
+                $lease.RecoveryMarkerExists -is [bool] -and [bool]$lease.RecoveryMarkerExists -eq [bool]$markerEvidence.Exists -and
+                [int64]$lease.RecoveryMarkerLength -eq [int64]$markerEvidence.Length -and $markerHashMatches -and
+                $existingResult.ResultFileEvidence.Exists -is [bool] -and [bool]$existingResult.ResultFileEvidence.Exists -eq [bool]$markerEvidence.Exists -and
+                $existingResult.ResultFileEvidence.PredatesRecoveryBoot -is [bool] -and [bool]$existingResult.ResultFileEvidence.PredatesRecoveryBoot -eq [bool]$markerEvidence.PredatesRecoveryBoot -and
+                [int64]$existingResult.ResultFileEvidence.Length -eq [int64]$markerEvidence.Length -and $resultMarkerHashMatches
+        }
+        catch {
+            $existingRecoveryVerified = $false
+        }
+    }
+    if ($existingRecoveryVerified) {
+        # A transient recovery attempt may have left agent-error.json behind.
+        # Remove it before the already-validated success becomes observable so
+        # the host cannot mistake stale error evidence for the final outcome.
+        Remove-Item -LiteralPath $agentErrorPath -Force -ErrorAction SilentlyContinue
+        return [pscustomobject][ordered]@{
+            JobId = $jobId
+            Completed = $false
+            ExistingResult = $true
+            Deferred = $false
+            AlreadyRecovered = $true
+            ResultFile = $resultFile
+            BootEvidence = $bootEvidence
+            HostInputCleanup = $hostInputCleanup
+        }
+    }
+
+    $recoveryCompletedUtc = [DateTime]::UtcNow
+    $processId = if ($lease -and $lease.PSObject.Properties.Name -contains 'ProcessId' -and [int64]$lease.ProcessId -gt 0) {
+        [int]$lease.ProcessId
+    }
+    else {
+        $null
+    }
+    $startedUtc = if ($lease -and $lease.PSObject.Properties.Name -contains 'StartedUtc' -and -not [string]::IsNullOrWhiteSpace([string]$lease.StartedUtc)) {
+        [string]$lease.StartedUtc
+    }
+    else {
+        $recoveryStartedUtc.ToString('o')
+    }
+    $processCleanup = [pscustomobject][ordered]@{
+        Attempted = $false
+        RootProcessId = $processId
+        Success = $true
+        VerificationSucceeded = $true
+        ObservedProcessIds = @()
+        SurvivorProcessIds = @()
+        Errors = @()
+        ElapsedMilliseconds = 0
+        SatisfiedByGuestPowerCycle = [bool]($bootEvidence -and $bootEvidence.ControlledRebootProven)
+        RecoveryMode = if ($bootEvidence -and $bootEvidence.ControlledRebootProven) { 'ControlledReboot' } else { $null }
+    }
+    $redactedActions = Get-RedactedGuestActionSummary -Actions @($Job.actions)
+    $recovery = [pscustomobject][ordered]@{
+        Mode = if ($bootEvidence -and $bootEvidence.ControlledRebootProven) { 'ControlledReboot' } else { $null }
+        Source = $RecoverySource
+        JobFile = $JobFile
+        StartedUtc = $recoveryStartedUtc.ToString('o')
+        CompletedUtc = $recoveryCompletedUtc.ToString('o')
+        ApplicationRelaunchedByHarness = $false
+        OutputDirectoryPreserved = $true
+        ExistingResultAnnotated = [bool]$existingTerminalResultValidated
+        Marker = $markerEvidence
+        LeaseMetadataAvailable = $null -ne $lease
+        LeaseReadError = $leaseReadError
+        BootEvidence = $bootEvidence
+        HostInputCleanup = $hostInputCleanup
+        RequestedActions = $redactedActions
+    }
+    $recoveryAction = [ordered]@{
+        Type = 'expected_guest_power_off_recovery'
+        Index = 0
+        StartedUtc = $recoveryStartedUtc.ToString('o')
+        CompletedUtc = $recoveryCompletedUtc.ToString('o')
+        Success = [bool]$harnessSucceeded
+        TestPassed = if ($testEvaluated) { [bool]$testPassed } else { $null }
+        Details = $recovery
+        Error = $errorMessage
+    }
+
+    $sanitizedHostInputs = @($hostInputDefinitions | ForEach-Object {
+        [ordered]@{
+            Name = [string]$_.Name
+            DriveLetter = [string]$_.DriveLetter
+            GuestSubPath = [string]$_.GuestSubPath
+        }
+    })
+    if ($existingTerminalResultValidated) {
+        $resultEnvelope = [ordered]@{}
+        foreach ($property in $existingResult.PSObject.Properties) {
+            $resultEnvelope[$property.Name] = $property.Value
+        }
+        $resultEnvelope['TestEvaluated'] = [bool]$testEvaluated
+        $resultEnvelope['TestPassed'] = if ($testEvaluated) { [bool]$testPassed } else { $null }
+        $resultEnvelope['TestFailureKind'] = if ($testEvaluated -and -not $testPassed) { $testFailureKind } else { $null }
+        $resultEnvelope['TestFailureMessage'] = if ($testEvaluated -and -not $testPassed) { $testFailureMessage } else { $null }
+        $resultEnvelope['TestAssertion'] = $testAssertion
+        $resultEnvelope['OverallSucceeded'] = [bool]$harnessSucceeded -and $testEvaluated -and [bool]$testPassed
+        if (-not $harnessSucceeded) {
+            $resultEnvelope['Success'] = $false
+            $resultEnvelope['HarnessSucceeded'] = $false
+            $resultEnvelope['OverallSucceeded'] = $false
+            $resultEnvelope['FailureKind'] = $failureKind
+            $resultEnvelope['Error'] = $errorMessage
+        }
+        $resultEnvelope['RecoveryCompletedUtc'] = $recoveryCompletedUtc.ToString('o')
+        $resultEnvelope['ExpectGuestPowerOff'] = $true
+        $resultEnvelope['GuestPowerOffEvidenceRecoveryMode'] = if ($bootEvidence -and $bootEvidence.ControlledRebootProven) { 'ControlledReboot' } else { $null }
+        $resultEnvelope['ApplicationRelaunchedByHarnessAfterGuestPowerOff'] = $false
+        $resultEnvelope['ResultFileEvidence'] = $markerEvidence
+        if ($resultEnvelope.Contains('GuestBootTimeUtc')) {
+            $resultEnvelope['ApplicationGuestBootTimeUtc'] = $resultEnvelope['GuestBootTimeUtc']
+        }
+        $resultEnvelope['GuestBootTimeUtc'] = if ($bootEvidence) { [string]$bootEvidence.CurrentBootTimeUtc } else { $null }
+        if ($resultEnvelope.Contains('ProcessCleanup')) {
+            $resultEnvelope['PrePowerOffProcessCleanup'] = $resultEnvelope['ProcessCleanup']
+        }
+        $resultEnvelope['ProcessCleanup'] = $processCleanup
+        if ($resultEnvelope.Contains('HostInputCleanup')) {
+            $resultEnvelope['PrePowerOffHostInputCleanup'] = $resultEnvelope['HostInputCleanup']
+        }
+        $resultEnvelope['HostInputCleanup'] = $hostInputCleanup
+        $resultEnvelope['ExpectedGuestPowerOffRecovery'] = $recovery
+    }
+    else {
+        $resultEnvelope = [ordered]@{
+            JobId = $jobId
+            Success = [bool]$harnessSucceeded
+            HarnessSucceeded = [bool]$harnessSucceeded
+            TestEvaluated = [bool]$testEvaluated
+            TestPassed = if ($testEvaluated) { [bool]$testPassed } else { $null }
+            OverallSucceeded = [bool]$harnessSucceeded -and $testEvaluated -and [bool]$testPassed
+            FailureKind = if ($harnessSucceeded) { $null } else { $failureKind }
+            TestFailureKind = if ($testEvaluated -and -not $testPassed) { $testFailureKind } else { $null }
+            TestFailureMessage = if ($testEvaluated -and -not $testPassed) { $testFailureMessage } else { $null }
+            TestAssertion = $testAssertion
+            Error = $errorMessage
+            StartedUtc = $startedUtc
+            CompletedUtc = $recoveryCompletedUtc.ToString('o')
+            RecoveryCompletedUtc = $recoveryCompletedUtc.ToString('o')
+            AgentProcessId = $PID
+            AgentSessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+            UserInteractive = [Environment]::UserInteractive
+            UserName = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+            ExpectGuestPowerOff = $true
+            GuestPowerOffEvidenceRecoveryMode = if ($bootEvidence -and $bootEvidence.ControlledRebootProven) { 'ControlledReboot' } else { $null }
+            ApplicationRelaunchedByHarnessAfterGuestPowerOff = $false
+            ResultFileEvidence = $markerEvidence
+            GuestBootTimeUtc = if ($bootEvidence) { [string]$bootEvidence.CurrentBootTimeUtc } else { $null }
+            ProcessCleanup = $processCleanup
+            HostInputs = $sanitizedHostInputs
+            HostInputCleanup = $hostInputCleanup
+            Actions = @($recoveryAction)
+            ExpectedGuestPowerOffRecovery = $recovery
+        }
+    }
+
+    if ($harnessSucceeded) {
+        Remove-Item -LiteralPath $agentErrorPath -Force -ErrorAction SilentlyContinue
+    }
+    Write-JsonAtomic -Path $resultFile -Value $resultEnvelope
+    if ($lease -and $bootEvidence -and $bootEvidence.ControlledRebootProven) {
+        $recoveryResultHash = (Get-FileHash -LiteralPath $resultFile -Algorithm SHA256 -ErrorAction Stop).Hash
+        $recoveryLease = [ordered]@{}
+        foreach ($property in $lease.PSObject.Properties) {
+            $recoveryLease[$property.Name] = $property.Value
+        }
+        $recoveryLease['RecoveryCompletedUtc'] = $recoveryCompletedUtc.ToString('o')
+        $recoveryLease['RecoveryBootTimeUtc'] = [string]$bootEvidence.CurrentBootTimeUtc
+        $recoveryLease['RecoveryMarkerPath'] = [string]$assertionPath
+        $recoveryLease['RecoveryMarkerExists'] = [bool]$markerEvidence.Exists
+        $recoveryLease['RecoveryMarkerLength'] = [int64]$markerEvidence.Length
+        $recoveryLease['RecoveryMarkerSha256'] = [string]$markerEvidence.Sha256
+        $recoveryLease['RecoveryResultSha256'] = [string]$recoveryResultHash
+        $recoveryLease['ApplicationRelaunchedByHarnessAfterGuestPowerOff'] = $false
+        Write-JsonAtomic -Path $leasePath -Value $recoveryLease
+    }
+
+    [pscustomobject][ordered]@{
+        JobId = $jobId
+        Completed = $true
+        ExistingResult = [bool]$existingTerminalResultValidated
+        Deferred = $false
+        ResultFile = $resultFile
+        HarnessSucceeded = [bool]$harnessSucceeded
+        TestEvaluated = [bool]$testEvaluated
+        TestPassed = if ($testEvaluated) { [bool]$testPassed } else { $null }
     }
 }
 
@@ -950,6 +1537,7 @@ function Invoke-GuestJob {
     if ($jobId -notmatch '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$') {
         throw "Invalid job id: $jobId"
     }
+    $expectGuestPowerOff = Test-ExpectedGuestPowerOffJob -Job $Job
 
     $jobOutputPath = Join-Path $outboxPath $jobId
     $leasePath = Join-Path $jobOutputPath 'lease.json'
@@ -975,6 +1563,7 @@ function Invoke-GuestJob {
     $resultFile = Join-Path $jobOutputPath 'result.json'
     $actionLog = New-Object System.Collections.Generic.List[object]
     $startedUtc = [DateTime]::UtcNow
+    $guestBootTimeUtc = (Get-GuestBootTimeUtc).ToString('o')
     $process = $null
     $windowHandle = [IntPtr]::Zero
     $success = $false
@@ -1028,6 +1617,7 @@ function Invoke-GuestJob {
             ProcessId = $process.Id
             Executable = $executable
             StartedUtc = [DateTime]::UtcNow.ToString('o')
+            GuestBootTimeUtc = $guestBootTimeUtc
         })
         Set-GuestLiveEvidenceContext -RequestId $jobId -OutputPath $jobOutputPath -ApplicationProcessId ([int]$process.Id) -LifecycleStage 'ApplicationRunning'
         Invoke-GuestLiveEvidenceHeartbeat
@@ -1362,7 +1952,7 @@ function Invoke-GuestJob {
     }
     finally {
         Clear-GuestLiveEvidenceContext
-        if ($process) {
+        if ($process -and -not $expectGuestPowerOff) {
             Write-AgentState -Status 'CleaningUpJob' -JobId $jobId
             $processCleanup = Stop-GuestProcessTree -RootProcessId ([int]$process.Id)
             if (-not $processCleanup.Success) {
@@ -1377,16 +1967,42 @@ function Invoke-GuestJob {
                 $errorMessage = if ([string]::IsNullOrWhiteSpace($errorMessage)) { $cleanupError } else { "$errorMessage $cleanupError" }
             }
         }
-        $hostInputCleanup = Dismount-GuestHostInputs -MountedInputs $mountedHostInputs
-        if (-not $hostInputCleanup.Success) {
-            $cleanupError = 'Guest read-only host-input cleanup failed: ' + (@($hostInputCleanup.Errors) -join ' | ')
-            $success = $false
-            $failureKind = 'HostInputCleanup'
-            $errorMessage = if ([string]::IsNullOrWhiteSpace($errorMessage)) { $cleanupError } else { "$errorMessage $cleanupError" }
+        elseif ($process -and $expectGuestPowerOff) {
+            $processCleanup = [pscustomobject][ordered]@{
+                Attempted = $false
+                RootProcessId = [int]$process.Id
+                Success = $true
+                VerificationSucceeded = $false
+                ObservedProcessIds = @()
+                SurvivorProcessIds = @()
+                Errors = @()
+                ElapsedMilliseconds = 0
+                DeferredUntilGuestPowerOffRecovery = $true
+            }
         }
-        Remove-Item -LiteralPath $leasePath -Force -ErrorAction SilentlyContinue
+        if ($expectGuestPowerOff) {
+            $hostInputCleanup = [pscustomobject][ordered]@{
+                Attempted = $false
+                Success = $true
+                Errors = @()
+                UnmountedCount = 0
+                DeferredUntilGuestPowerOffRecovery = $true
+            }
+        }
+        else {
+            $hostInputCleanup = Dismount-GuestHostInputs -MountedInputs $mountedHostInputs
+            if (-not $hostInputCleanup.Success) {
+                $cleanupError = 'Guest read-only host-input cleanup failed: ' + (@($hostInputCleanup.Errors) -join ' | ')
+                $success = $false
+                $failureKind = 'HostInputCleanup'
+                $errorMessage = if ([string]::IsNullOrWhiteSpace($errorMessage)) { $cleanupError } else { "$errorMessage $cleanupError" }
+            }
+        }
+        if (-not $expectGuestPowerOff) {
+            Remove-Item -LiteralPath $leasePath -Force -ErrorAction SilentlyContinue
+        }
 
-        Write-JsonAtomic -Path $resultFile -Value ([ordered]@{
+        $resultEnvelope = [ordered]@{
             JobId = $jobId
             Success = $success
             HarnessSucceeded = $success
@@ -1416,12 +2032,117 @@ function Invoke-GuestJob {
             })
             HostInputCleanup = $hostInputCleanup
             Actions = $actionLog.ToArray()
-        })
+        }
+        if ($expectGuestPowerOff) {
+            # The boot epoch is part of the opt-in recovery protocol only; keep
+            # the legacy result envelope byte-for-schema compatible.
+            $resultEnvelope['GuestBootTimeUtc'] = $guestBootTimeUtc
+        }
+        Write-JsonAtomic -Path $resultFile -Value $resultEnvelope
         Write-AgentState
     }
 
     if (-not $success) {
         throw $errorMessage
+    }
+}
+
+function Repair-InterruptedGuestJobs {
+    [CmdletBinding()]
+    param(
+        [string] $InboxRoot = $inboxPath,
+        [string] $ProcessingRoot = $processingPath,
+        [string] $CompletedRoot = $completedPath,
+        [string] $OutboxRoot = $outboxPath
+    )
+
+    $legacyRequeued = 0
+    $expectedRecovered = 0
+    $expectedAlreadyComplete = 0
+    $expectedDeferred = 0
+    $recoveryErrors = 0
+    $completedJobsAtStartup = @(Get-ChildItem -LiteralPath $CompletedRoot -Filter '*.json' -File -ErrorAction SilentlyContinue)
+
+    foreach ($orphanedJob in @(Get-ChildItem -LiteralPath $ProcessingRoot -Filter '*.json' -File -ErrorAction SilentlyContinue)) {
+        $job = $null
+        try { $job = Get-Content -Raw -LiteralPath $orphanedJob.FullName -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
+        catch { $job = $null }
+
+        if (-not (Test-ExpectedGuestPowerOffJob -Job $job)) {
+            # Preserve the legacy orphan behavior exactly: an interrupted
+            # ordinary job returns to Inbox for clean retry and lease cleanup.
+            Move-Item -LiteralPath $orphanedJob.FullName -Destination (Join-Path $InboxRoot $orphanedJob.Name) -Force
+            $legacyRequeued++
+            continue
+        }
+
+        $deferred = $false
+        try {
+            $completion = Complete-ExpectedGuestPowerOffJob -Job $job -JobFile $orphanedJob.FullName -RecoverySource Processing -OutboxRoot $OutboxRoot
+            if ($completion.Deferred) {
+                $deferred = $true
+                $expectedDeferred++
+            }
+            elseif ($completion.Completed) { $expectedRecovered++ }
+            else { $expectedAlreadyComplete++ }
+        }
+        catch {
+            $recoveryErrors++
+            $fallbackId = [IO.Path]::GetFileNameWithoutExtension($orphanedJob.Name)
+            $fallbackOutput = Join-Path $OutboxRoot $fallbackId
+            New-Item -ItemType Directory -Force -Path $fallbackOutput | Out-Null
+            Write-JsonAtomic -Path (Join-Path $fallbackOutput 'agent-error.json') -Value ([ordered]@{
+                Success = $false
+                Error = $_.Exception.Message
+                ExceptionType = $_.Exception.GetType().FullName
+                ScriptStackTrace = $_.ScriptStackTrace
+                ExpectedGuestPowerOffRecovery = $true
+                ApplicationRelaunchedByHarnessAfterGuestPowerOff = $false
+                TimestampUtc = [DateTime]::UtcNow.ToString('o')
+            })
+        }
+        finally {
+            if (-not $deferred -and (Test-Path -LiteralPath $orphanedJob.FullName -PathType Leaf)) {
+                Move-Item -LiteralPath $orphanedJob.FullName -Destination (Join-Path $CompletedRoot $orphanedJob.Name) -Force
+            }
+        }
+    }
+
+    foreach ($completedJob in $completedJobsAtStartup) {
+        $job = $null
+        try { $job = Get-Content -Raw -LiteralPath $completedJob.FullName -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
+        catch { continue }
+        if (-not (Test-ExpectedGuestPowerOffJob -Job $job)) { continue }
+
+        try {
+            $completion = Complete-ExpectedGuestPowerOffJob -Job $job -JobFile $completedJob.FullName -RecoverySource Completed -OutboxRoot $OutboxRoot
+            if ($completion.Deferred) { $expectedDeferred++ }
+            elseif ($completion.Completed) { $expectedRecovered++ }
+            else { $expectedAlreadyComplete++ }
+        }
+        catch {
+            $recoveryErrors++
+            $fallbackId = [IO.Path]::GetFileNameWithoutExtension($completedJob.Name)
+            $fallbackOutput = Join-Path $OutboxRoot $fallbackId
+            New-Item -ItemType Directory -Force -Path $fallbackOutput | Out-Null
+            Write-JsonAtomic -Path (Join-Path $fallbackOutput 'agent-error.json') -Value ([ordered]@{
+                Success = $false
+                Error = $_.Exception.Message
+                ExceptionType = $_.Exception.GetType().FullName
+                ScriptStackTrace = $_.ScriptStackTrace
+                ExpectedGuestPowerOffRecovery = $true
+                ApplicationRelaunchedByHarnessAfterGuestPowerOff = $false
+                TimestampUtc = [DateTime]::UtcNow.ToString('o')
+            })
+        }
+    }
+
+    [pscustomobject][ordered]@{
+        LegacyJobsRequeued = $legacyRequeued
+        ExpectedJobsRecovered = $expectedRecovered
+        ExpectedJobsAlreadyComplete = $expectedAlreadyComplete
+        ExpectedJobsDeferred = $expectedDeferred
+        RecoveryErrors = $recoveryErrors
     }
 }
 
@@ -1432,13 +2153,12 @@ if (-not $createdNew) {
 }
 
 try {
-    # If the agent process was interrupted mid-job, the request would
-    # otherwise remain stranded in Processing forever. Requeue it; the
-    # request lease lets Invoke-GuestJob terminate any orphaned app process
-    # before starting the clean retry.
-    foreach ($orphanedJob in @(Get-ChildItem -LiteralPath $processingPath -Filter '*.json' -File -ErrorAction SilentlyContinue)) {
-        Move-Item -LiteralPath $orphanedJob.FullName -Destination (Join-Path $inboxPath $orphanedJob.Name) -Force
-    }
+    # Ordinary interrupted work keeps the legacy clean-retry behavior. An
+    # expected self-power-off is different: the power cycle already stopped
+    # the application, so relaunching it would destroy causal evidence and
+    # could shut the recovery boot down again. Finalize only its persisted
+    # result marker and keep the request-specific output directory intact.
+    Repair-InterruptedGuestJobs | Out-Null
 
     while ($true) {
         Write-AgentState

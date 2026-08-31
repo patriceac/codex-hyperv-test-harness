@@ -8,6 +8,7 @@ param(
     [string] $AssertResultFile,
     [string] $AssertResultJsonPointer,
     [string] $AssertResultEqualsJson,
+    [switch] $ExpectGuestPowerOff,
     [Alias('HostInput')] [hashtable[]] $ReadOnlyHostInput = @(),
     [ValidateRange(1048576, 1099511627776)] [long] $HostInputColdShareThresholdBytes = 1073741824,
     [ValidateRange(1048576, 1099511627776)] [long] $HostInputIncrementalShareThresholdBytes = 268435456,
@@ -17,6 +18,7 @@ param(
     [switch] $RequireHostLocked,
     [ValidateRange(5, 86400)] [int] $QueueTimeoutSeconds = 1800,
     [Alias('TimeoutSeconds')] [ValidateRange(10, 7200)] [int] $ExecutionTimeoutSeconds = 900,
+    [ValidateRange(30, 600)] [int] $GuestPowerOffRecoveryTimeoutSeconds = 180,
     [ValidateRange(30, 600)] [int] $CancellationGraceSeconds = 180,
     [string] $BrokerRoot
 )
@@ -27,6 +29,12 @@ $BrokerRoot = Resolve-HyperVBrokerRoot -BrokerRoot $BrokerRoot
 
 if (-not [string]::IsNullOrWhiteSpace($ActionsPath) -and -not [string]::IsNullOrWhiteSpace($ActionsJson)) {
     throw 'Specify ActionsPath or ActionsJson, not both.'
+}
+if (-not $ExpectGuestPowerOff -and $PSBoundParameters.ContainsKey('GuestPowerOffRecoveryTimeoutSeconds')) {
+    throw 'GuestPowerOffRecoveryTimeoutSeconds may be specified only with ExpectGuestPowerOff.'
+}
+if ($ExpectGuestPowerOff -and [string]::IsNullOrWhiteSpace($AssertResultFile)) {
+    throw 'AssertResultFile is required when ExpectGuestPowerOff is specified.'
 }
 
 $networkCohortSpecified = $PSBoundParameters.ContainsKey('NetworkCohort')
@@ -87,6 +95,7 @@ $requestStatePath = Join-Path $resultPath 'request-state.json'
 $clientStatePath = Join-Path $resultPath 'client-state.json'
 $cancelledBeforeStart = $false
 $executionDeadlineUtc = $null
+$powerOffRecoveryDeadlineUtc = $null
 $queueDeadlineUtc = $null
 $lastDisplayState = $null
 $lastAssignedWorkerId = $null
@@ -343,6 +352,9 @@ function Get-RequestLifecycleDisplay {
             "Guest action ${actionText}: $message".Trim()
         }
         'AwaitingGuestCompletion' { "Waiting for guest completion: $message".Trim() }
+        'AwaitingExpectedGuestPowerOff' { "Waiting for expected guest power-off: $message".Trim() }
+        'GuestPowerOffObserved' { "Expected guest power-off observed: $message".Trim() }
+        'RecoveringPowerOffEvidence' { "Recovering post-power-off evidence: $message".Trim() }
         'CollectingEvidence' { "Collecting evidence: $message".Trim() }
         'CleaningNetwork' { "Revoking request network: $message".Trim() }
         'StoppingVm' { "Stopping VM / recycling ${workerText}: $message".Trim() }
@@ -866,6 +878,15 @@ elseif (-not [string]::IsNullOrWhiteSpace($ActionsJson)) {
         $actions += $action
     }
 }
+elseif ($ExpectGuestPowerOff) {
+    $actions = @(
+        [ordered]@{
+            type = 'wait_result_file'
+            path = $AssertResultFile
+            timeoutMs = [int64]$ExecutionTimeoutSeconds * 1000
+        }
+    )
+}
 else {
     $actions = @(
         [ordered]@{ type = 'wait_window'; timeoutMs = 30000 },
@@ -974,6 +995,9 @@ for ($actionIndex = 0; $actionIndex -lt $actions.Count; $actionIndex++) {
 
 if (-not [string]::IsNullOrWhiteSpace($AssertResultFile)) {
     $assertionRelativePath = Get-ValidatedOutdirRelativePath -Value $AssertResultFile -Context 'AssertResultFile'
+    if ($ExpectGuestPowerOff -and $assertionRelativePath -in @('result.json', 'agent-error.json', 'lease.json')) {
+        throw "ExpectGuestPowerOff AssertResultFile must not use reserved guest protocol filename '$assertionRelativePath' at the OUTDIR root."
+    }
     if ($expectedTestEvidence -notcontains $assertionRelativePath) {
         $expectedTestEvidence += $assertionRelativePath
     }
@@ -1186,6 +1210,9 @@ try {
         $job['assertResultJsonPointer'] = $AssertResultJsonPointer
         $job['assertResultEqualsJson'] = $AssertResultEqualsJson
     }
+    if ($ExpectGuestPowerOff) {
+        $job['expectGuestPowerOff'] = $true
+    }
 
     $createdUtc = [DateTime]::UtcNow
     $queueDeadlineUtc = $createdUtc.AddSeconds($QueueTimeoutSeconds)
@@ -1216,6 +1243,10 @@ try {
         HostInputs = $preparedHostInputs
         Network = $networkContract
         Job = $job
+    }
+    if ($ExpectGuestPowerOff) {
+        $request['ExpectGuestPowerOff'] = $true
+        $request['GuestPowerOffRecoveryTimeoutSeconds'] = [int]$GuestPowerOffRecoveryTimeoutSeconds
     }
 
     $temporaryRequest = Join-Path $requestsRoot ($requestId + '.json.tmp')
@@ -1260,14 +1291,51 @@ try {
             if (-not $executionDeadlineUtc) {
                 $executionDeadlineUtc = $now.AddSeconds($ExecutionTimeoutSeconds)
             }
+            if ($ExpectGuestPowerOff -and $requestState) {
+                $publishedRecoveryDeadline = Get-OptionalRequestStateValue -RequestState $requestState -PropertyName 'PowerOffRecoveryDeadlineUtc'
+                if (-not [string]::IsNullOrWhiteSpace([string]$publishedRecoveryDeadline)) {
+                    $publishedShutdownUtc = Get-OptionalRequestStateValue -RequestState $requestState -PropertyName 'GuestPowerOffObservedUtc'
+                    if ([string]::IsNullOrWhiteSpace([string]$publishedShutdownUtc)) {
+                        throw 'Broker request state published PowerOffRecoveryDeadlineUtc without GuestPowerOffObservedUtc.'
+                    }
+                    try {
+                        $parsedRecoveryDeadlineUtc = [DateTimeOffset]::Parse(
+                            [string]$publishedRecoveryDeadline,
+                            [Globalization.CultureInfo]::InvariantCulture,
+                            [Globalization.DateTimeStyles]::RoundtripKind
+                        ).UtcDateTime
+                        $parsedShutdownUtc = [DateTimeOffset]::Parse(
+                            [string]$publishedShutdownUtc,
+                            [Globalization.CultureInfo]::InvariantCulture,
+                            [Globalization.DateTimeStyles]::RoundtripKind
+                        ).UtcDateTime
+                    }
+                    catch {
+                        throw "Broker request state published an invalid expected-power-off recovery timestamp: $($_.Exception.Message)"
+                    }
+                    $configuredRecoveryLimitUtc = $parsedShutdownUtc.AddSeconds($GuestPowerOffRecoveryTimeoutSeconds)
+                    $powerOffRecoveryDeadlineUtc = if ($parsedRecoveryDeadlineUtc -le $configuredRecoveryLimitUtc) {
+                        $parsedRecoveryDeadlineUtc
+                    }
+                    else {
+                        $configuredRecoveryLimitUtc
+                    }
+                }
+            }
             if (-not $requestState) {
                 [void](Show-RequestLifecycleProgress -RequestState $null -ProcessingPresent:$true)
             }
             $clientExecutionStatus = if ($requestState -and -not [string]::IsNullOrWhiteSpace([string]$requestState.Status)) { [string]$requestState.Status } else { 'Assigned' }
             $clientExecutionMessage = if ($requestState -and -not [string]::IsNullOrWhiteSpace([string]$requestState.Message)) { [string]$requestState.Message } else { 'Assigned to an isolated worker; waiting for broker lifecycle details.' }
             Write-ClientState -Status $clientExecutionStatus -Message $clientExecutionMessage
-            if ($now -ge $executionDeadlineUtc) {
-                $clientCancellationReason = "Execution timeout expired after $ExecutionTimeoutSeconds seconds."
+            $activeExecutionDeadlineUtc = if ($powerOffRecoveryDeadlineUtc) { $powerOffRecoveryDeadlineUtc } else { $executionDeadlineUtc }
+            if ($now -ge $activeExecutionDeadlineUtc) {
+                $clientCancellationReason = if ($powerOffRecoveryDeadlineUtc) {
+                    "Expected guest power-off evidence recovery timeout expired after $GuestPowerOffRecoveryTimeoutSeconds seconds."
+                }
+                else {
+                    "Execution timeout expired after $ExecutionTimeoutSeconds seconds."
+                }
                 $cancelState = Request-Cancellation -Reason $clientCancellationReason
                 if ($cancelState -eq 'AlreadyCompleted') {
                     continue
@@ -1366,6 +1434,22 @@ try {
             Error = $clientCancellationReason
             LifecycleSequence = @($observedLifecycle.ToArray())
         }
+        if ($ExpectGuestPowerOff) {
+            $summary['ExpectGuestPowerOff'] = $true
+            $summary['GuestPowerOffRecoveryTimeoutSeconds'] = [int]$GuestPowerOffRecoveryTimeoutSeconds
+            $summary['GuestApplicationEraRunningObservedUtc'] = $null
+            $summary['GuestPowerOffObservedUtc'] = $null
+            $summary['GuestPowerOffBeforeCleanup'] = $null
+            $summary['BrokerCleanupStartedUtc'] = $null
+            $summary['GuestPowerOffEvidenceRecoveryMode'] = $null
+            $summary['GuestPowerOffEvidenceRecoveryBootedUtc'] = $null
+            $summary['GuestPowerOffEvidenceRecoveryCompletedUtc'] = $null
+            $summary['GuestPowerOffEvidenceRecoveryTimedOut'] = $null
+            $summary['ApplicationRelaunchedByHarnessAfterGuestPowerOff'] = $null
+            $summary['ExpectedGuestPowerOffContractSatisfied'] = $null
+            $summary['ExpectedGuestPowerOffContractProven'] = $false
+            $summary['PowerOffRecoveryDeadlineUtc'] = $null
+        }
         $summary | ConvertTo-Json -Depth 8
         $finalExitCode = if ($queueTimedOutBeforeStart) { 124 } else { 130 }
     }
@@ -1401,10 +1485,149 @@ try {
             }
         }
 
-        $harnessSucceeded = [bool]$brokerResult.Success -and
+        $guestApplicationEraRunningObservedUtc = Get-OptionalRequestStateValue -RequestState $brokerResult -PropertyName 'GuestApplicationEraRunningObservedUtc'
+        $guestPowerOffObservedUtc = Get-OptionalRequestStateValue -RequestState $brokerResult -PropertyName 'GuestPowerOffObservedUtc'
+        $brokerCleanupStartedUtc = Get-OptionalRequestStateValue -RequestState $brokerResult -PropertyName 'BrokerCleanupStartedUtc'
+        $publishedPowerOffRecoveryDeadlineUtc = Get-OptionalRequestStateValue -RequestState $brokerResult -PropertyName 'PowerOffRecoveryDeadlineUtc'
+        $guestPowerOffBeforeCleanupProperty = $brokerResult.PSObject.Properties['GuestPowerOffBeforeCleanup']
+        $guestPowerOffRecoveryMode = Get-OptionalRequestStateValue -RequestState $brokerResult -PropertyName 'GuestPowerOffEvidenceRecoveryMode'
+        $guestPowerOffRecoveryBootedUtc = Get-OptionalRequestStateValue -RequestState $brokerResult -PropertyName 'GuestPowerOffEvidenceRecoveryBootedUtc'
+        $guestPowerOffRecoveryCompletedUtc = Get-OptionalRequestStateValue -RequestState $brokerResult -PropertyName 'GuestPowerOffEvidenceRecoveryCompletedUtc'
+        $guestPowerOffRecoveryTimedOut = Get-OptionalRequestStateValue -RequestState $brokerResult -PropertyName 'GuestPowerOffEvidenceRecoveryTimedOut'
+        $guestPowerOffRecoveryTimedOutProperty = $brokerResult.PSObject.Properties['GuestPowerOffEvidenceRecoveryTimedOut']
+        $applicationRelaunchedProperty = $brokerResult.PSObject.Properties['ApplicationRelaunchedByHarnessAfterGuestPowerOff']
+        $powerOffContractSatisfiedProperty = $brokerResult.PSObject.Properties['ExpectedGuestPowerOffContractSatisfied']
+        $guestResultFileEvidenceProperty = if ($guestResult) { $guestResult.PSObject.Properties['ResultFileEvidence'] } else { $null }
+        $guestMarkerExistsProperty = if ($guestResultFileEvidenceProperty) { $guestResultFileEvidenceProperty.Value.PSObject.Properties['Exists'] } else { $null }
+        $guestMarkerPredatesRecoveryProperty = if ($guestResultFileEvidenceProperty) { $guestResultFileEvidenceProperty.Value.PSObject.Properties['PredatesRecoveryBoot'] } else { $null }
+        $brokerExpectGuestPowerOffProperty = @($brokerResult.PSObject.Properties | Where-Object { $_.Name -ceq 'ExpectGuestPowerOff' }) | Select-Object -First 1
+        $brokerRecoveryTimeoutProperty = @($brokerResult.PSObject.Properties | Where-Object { $_.Name -ceq 'GuestPowerOffRecoveryTimeoutSeconds' }) | Select-Object -First 1
+        $powerOffContractEvidenceFailures = @()
+        $expectedGuestPowerOffContractProven = -not [bool]$ExpectGuestPowerOff
+        if ($ExpectGuestPowerOff) {
+            if (-not $brokerExpectGuestPowerOffProperty -or $brokerExpectGuestPowerOffProperty.Value -isnot [bool] -or -not [bool]$brokerExpectGuestPowerOffProperty.Value) {
+                $powerOffContractEvidenceFailures += 'Broker result ExpectGuestPowerOff is not exact Boolean true.'
+            }
+            $brokerTimeoutType = if ($brokerRecoveryTimeoutProperty -and $null -ne $brokerRecoveryTimeoutProperty.Value) { $brokerRecoveryTimeoutProperty.Value.GetType() } else { $null }
+            $integralBrokerTimeoutTypes = @([byte], [sbyte], [int16], [uint16], [int32], [uint32], [int64], [uint64])
+            if (-not $brokerRecoveryTimeoutProperty -or -not $brokerTimeoutType -or $brokerTimeoutType -notin $integralBrokerTimeoutTypes -or
+                [int64]$brokerRecoveryTimeoutProperty.Value -ne [int64]$GuestPowerOffRecoveryTimeoutSeconds) {
+                $powerOffContractEvidenceFailures += 'Broker result GuestPowerOffRecoveryTimeoutSeconds does not exactly match the requested recovery timeout.'
+            }
+            $runningObservedTimestamp = $null
+            $shutdownObservedTimestamp = $null
+            $recoveryDeadlineTimestamp = $null
+            $recoveryBootedTimestamp = $null
+            $recoveryCompletedTimestamp = $null
+            $cleanupStartedTimestamp = $null
+            $originalExecutionDeadlineTimestamp = $null
+            if ([string]::IsNullOrWhiteSpace([string]$guestApplicationEraRunningObservedUtc)) {
+                $powerOffContractEvidenceFailures += 'GuestApplicationEraRunningObservedUtc is missing.'
+            }
+            else {
+                try {
+                    $runningObservedTimestamp = [DateTimeOffset]::Parse(
+                        [string]$guestApplicationEraRunningObservedUtc,
+                        [Globalization.CultureInfo]::InvariantCulture,
+                        [Globalization.DateTimeStyles]::RoundtripKind
+                    )
+                }
+                catch { $powerOffContractEvidenceFailures += 'GuestApplicationEraRunningObservedUtc is invalid.' }
+            }
+            if ([string]::IsNullOrWhiteSpace([string]$guestPowerOffObservedUtc)) {
+                $powerOffContractEvidenceFailures += 'GuestPowerOffObservedUtc is missing.'
+            }
+            else {
+                try {
+                    $shutdownObservedTimestamp = [DateTimeOffset]::Parse(
+                        [string]$guestPowerOffObservedUtc,
+                        [Globalization.CultureInfo]::InvariantCulture,
+                        [Globalization.DateTimeStyles]::RoundtripKind
+                    )
+                }
+                catch { $powerOffContractEvidenceFailures += 'GuestPowerOffObservedUtc is invalid.' }
+            }
+            if ($runningObservedTimestamp -and $shutdownObservedTimestamp -and $shutdownObservedTimestamp -le $runningObservedTimestamp) {
+                $powerOffContractEvidenceFailures += 'GuestPowerOffObservedUtc does not follow GuestApplicationEraRunningObservedUtc.'
+            }
+            try {
+                $originalExecutionDeadlineTimestamp = [DateTimeOffset]::Parse(
+                    [string]$brokerResult.ExecutionDeadlineUtc,
+                    [Globalization.CultureInfo]::InvariantCulture,
+                    [Globalization.DateTimeStyles]::RoundtripKind
+                )
+            }
+            catch { $powerOffContractEvidenceFailures += 'ExecutionDeadlineUtc is invalid.' }
+            if ($shutdownObservedTimestamp -and $originalExecutionDeadlineTimestamp -and $shutdownObservedTimestamp -ge $originalExecutionDeadlineTimestamp) {
+                $powerOffContractEvidenceFailures += 'GuestPowerOffObservedUtc did not precede the original application execution deadline.'
+            }
+            foreach ($timestampContract in @(
+                [pscustomobject]@{ Name = 'PowerOffRecoveryDeadlineUtc'; Value = $publishedPowerOffRecoveryDeadlineUtc; Target = 'recoveryDeadlineTimestamp' },
+                [pscustomobject]@{ Name = 'GuestPowerOffEvidenceRecoveryBootedUtc'; Value = $guestPowerOffRecoveryBootedUtc; Target = 'recoveryBootedTimestamp' },
+                [pscustomobject]@{ Name = 'GuestPowerOffEvidenceRecoveryCompletedUtc'; Value = $guestPowerOffRecoveryCompletedUtc; Target = 'recoveryCompletedTimestamp' },
+                [pscustomobject]@{ Name = 'BrokerCleanupStartedUtc'; Value = $brokerCleanupStartedUtc; Target = 'cleanupStartedTimestamp' }
+            )) {
+                if ([string]::IsNullOrWhiteSpace([string]$timestampContract.Value)) {
+                    $powerOffContractEvidenceFailures += "$($timestampContract.Name) is missing."
+                    continue
+                }
+                try {
+                    $parsedTimestamp = [DateTimeOffset]::Parse(
+                        [string]$timestampContract.Value,
+                        [Globalization.CultureInfo]::InvariantCulture,
+                        [Globalization.DateTimeStyles]::RoundtripKind
+                    )
+                    Set-Variable -Name ([string]$timestampContract.Target) -Value $parsedTimestamp
+                }
+                catch { $powerOffContractEvidenceFailures += "$($timestampContract.Name) is invalid." }
+            }
+            if ($shutdownObservedTimestamp -and $recoveryDeadlineTimestamp) {
+                if ($recoveryDeadlineTimestamp -le $shutdownObservedTimestamp -or
+                    $recoveryDeadlineTimestamp -gt $shutdownObservedTimestamp.AddSeconds($GuestPowerOffRecoveryTimeoutSeconds)) {
+                    $powerOffContractEvidenceFailures += 'PowerOffRecoveryDeadlineUtc is outside the bounded recovery window.'
+                }
+            }
+            if ($shutdownObservedTimestamp -and $recoveryBootedTimestamp -and $recoveryBootedTimestamp -le $shutdownObservedTimestamp) {
+                $powerOffContractEvidenceFailures += 'GuestPowerOffEvidenceRecoveryBootedUtc does not follow GuestPowerOffObservedUtc.'
+            }
+            if ($recoveryBootedTimestamp -and $recoveryCompletedTimestamp -and $recoveryCompletedTimestamp -lt $recoveryBootedTimestamp) {
+                $powerOffContractEvidenceFailures += 'GuestPowerOffEvidenceRecoveryCompletedUtc precedes the recovery boot.'
+            }
+            if ($recoveryCompletedTimestamp -and $recoveryDeadlineTimestamp -and $recoveryCompletedTimestamp -gt $recoveryDeadlineTimestamp) {
+                $powerOffContractEvidenceFailures += 'GuestPowerOffEvidenceRecoveryCompletedUtc exceeds the bounded recovery deadline.'
+            }
+            if ($recoveryCompletedTimestamp -and $cleanupStartedTimestamp -and $cleanupStartedTimestamp -lt $recoveryCompletedTimestamp) {
+                $powerOffContractEvidenceFailures += 'BrokerCleanupStartedUtc precedes completion of expected-power-off evidence recovery.'
+            }
+            if ($null -eq $guestPowerOffBeforeCleanupProperty -or $guestPowerOffBeforeCleanupProperty.Value -isnot [bool] -or -not [bool]$guestPowerOffBeforeCleanupProperty.Value) {
+                $powerOffContractEvidenceFailures += 'GuestPowerOffBeforeCleanup is not exact Boolean true.'
+            }
+            if (-not [String]::Equals([string]$guestPowerOffRecoveryMode, 'ControlledReboot', [StringComparison]::Ordinal)) {
+                $powerOffContractEvidenceFailures += 'GuestPowerOffEvidenceRecoveryMode is not ControlledReboot.'
+            }
+            if ($null -eq $applicationRelaunchedProperty -or $applicationRelaunchedProperty.Value -isnot [bool] -or [bool]$applicationRelaunchedProperty.Value) {
+                $powerOffContractEvidenceFailures += 'ApplicationRelaunchedByHarnessAfterGuestPowerOff is not exact Boolean false.'
+            }
+            if ($null -eq $guestMarkerExistsProperty -or $guestMarkerExistsProperty.Value -isnot [bool] -or
+                $null -eq $guestMarkerPredatesRecoveryProperty -or $guestMarkerPredatesRecoveryProperty.Value -isnot [bool] -or
+                ([bool]$guestMarkerExistsProperty.Value -and -not [bool]$guestMarkerPredatesRecoveryProperty.Value) -or
+                (-not [bool]$guestMarkerExistsProperty.Value -and [bool]$guestMarkerPredatesRecoveryProperty.Value)) {
+                $powerOffContractEvidenceFailures += 'ResultFileEvidence does not prove that a present assertion marker predates the controlled recovery boot.'
+            }
+            if ($null -eq $guestPowerOffRecoveryTimedOutProperty -or $guestPowerOffRecoveryTimedOutProperty.Value -isnot [bool] -or [bool]$guestPowerOffRecoveryTimedOutProperty.Value) {
+                $powerOffContractEvidenceFailures += 'GuestPowerOffEvidenceRecoveryTimedOut is not exact Boolean false.'
+            }
+            if ($null -eq $powerOffContractSatisfiedProperty -or $powerOffContractSatisfiedProperty.Value -isnot [bool] -or -not [bool]$powerOffContractSatisfiedProperty.Value) {
+                $powerOffContractEvidenceFailures += 'ExpectedGuestPowerOffContractSatisfied is not exact Boolean true.'
+            }
+            $expectedGuestPowerOffContractProven = $powerOffContractEvidenceFailures.Count -eq 0
+        }
+
+        $baseHarnessSucceeded = [bool]$brokerResult.Success -and
             [string]$brokerResult.VmFinalState -eq 'Off' -and
             $guestResult -and [bool]$guestResult.Success -and
             $missingHarnessEvidence.Count -eq 0
+        $harnessSucceeded = [bool]$baseHarnessSucceeded -and [bool]$expectedGuestPowerOffContractProven
         $testEvaluated = [bool]($guestResult -and $guestResult.TestEvaluated)
         $testPassed = if ($testEvaluated) { [bool]$guestResult.TestPassed } else { $null }
         if ($missingTestEvidence.Count -gt 0) {
@@ -1435,7 +1658,13 @@ try {
             TestEvaluated = [bool]$testEvaluated
             TestPassed = if ($testEvaluated) { [bool]$testPassed } else { $null }
             FailureKind = if (-not $harnessSucceeded) {
-                if (-not [string]::IsNullOrWhiteSpace([string]$brokerResult.FailureKind)) { [string]$brokerResult.FailureKind } else { 'Harness' }
+                if ($baseHarnessSucceeded -and $ExpectGuestPowerOff -and -not $expectedGuestPowerOffContractProven) {
+                    'ExpectedGuestPowerOffContract'
+                }
+                elseif (-not [string]::IsNullOrWhiteSpace([string]$brokerResult.FailureKind)) {
+                    [string]$brokerResult.FailureKind
+                }
+                else { 'Harness' }
             }
             elseif ($testEvaluated -and -not $testPassed) {
                 if ($guestResult -and -not [string]::IsNullOrWhiteSpace([string]$guestResult.TestFailureKind)) { [string]$guestResult.TestFailureKind } else { 'TestAssertion' }
@@ -1496,6 +1725,9 @@ try {
             elseif ($missingHarnessEvidence.Count -gt 0) {
                 'Required harness evidence is missing or empty: ' + ($missingHarnessEvidence -join ', ')
             }
+            elseif ($ExpectGuestPowerOff -and -not $expectedGuestPowerOffContractProven) {
+                'Expected guest power-off contract evidence was incomplete or invalid: ' + ($powerOffContractEvidenceFailures -join ' ')
+            }
             elseif ($testEvaluated -and -not $testPassed) {
                 if ($missingTestEvidence.Count -gt 0) {
                     'Required test evidence is missing or empty: ' + ($missingTestEvidence -join ', ')
@@ -1511,6 +1743,23 @@ try {
                 $null
             }
             LifecycleSequence = @($observedLifecycle.ToArray())
+        }
+        if ($ExpectGuestPowerOff) {
+            $summary['ExpectGuestPowerOff'] = $true
+            $summary['GuestPowerOffRecoveryTimeoutSeconds'] = [int]$GuestPowerOffRecoveryTimeoutSeconds
+            $summary['GuestApplicationEraRunningObservedUtc'] = $guestApplicationEraRunningObservedUtc
+            $summary['GuestPowerOffObservedUtc'] = $guestPowerOffObservedUtc
+            $summary['GuestPowerOffBeforeCleanup'] = if ($null -ne $guestPowerOffBeforeCleanupProperty) { $guestPowerOffBeforeCleanupProperty.Value } else { $null }
+            $summary['BrokerCleanupStartedUtc'] = $brokerCleanupStartedUtc
+            $summary['GuestPowerOffEvidenceRecoveryMode'] = $guestPowerOffRecoveryMode
+            $summary['GuestPowerOffEvidenceRecoveryBootedUtc'] = $guestPowerOffRecoveryBootedUtc
+            $summary['GuestPowerOffEvidenceRecoveryCompletedUtc'] = $guestPowerOffRecoveryCompletedUtc
+            $summary['GuestPowerOffEvidenceRecoveryTimedOut'] = $guestPowerOffRecoveryTimedOut
+            $summary['ApplicationRelaunchedByHarnessAfterGuestPowerOff'] = if ($null -ne $applicationRelaunchedProperty) { $applicationRelaunchedProperty.Value } else { $null }
+            $summary['ExpectedGuestPowerOffContractSatisfied'] = if ($null -ne $powerOffContractSatisfiedProperty) { $powerOffContractSatisfiedProperty.Value } else { $null }
+            $summary['ExpectedGuestPowerOffContractProven'] = [bool]$expectedGuestPowerOffContractProven
+            $summary['ExpectedGuestPowerOffContractEvidenceFailures'] = @($powerOffContractEvidenceFailures)
+            $summary['PowerOffRecoveryDeadlineUtc'] = $publishedPowerOffRecoveryDeadlineUtc
         }
         $summary | ConvertTo-Json -Depth 8
         if (-not $overallSucceeded) {

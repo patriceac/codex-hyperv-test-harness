@@ -82,6 +82,8 @@ function Update-PoolWorkerState {
         [Parameter(Mandatory = $true)] [Collections.IDictionary] $Patch,
         [string] $ExpectedOperationId,
         [string] $ExpectedRequestId,
+        [AllowNull()] [Nullable[int]] $ExpectedProcessId,
+        [switch] $RequireProcessExpectation,
         [switch] $RequireExpectation
     )
 
@@ -111,6 +113,13 @@ function Update-PoolWorkerState {
             if (-not [string]::IsNullOrWhiteSpace($ExpectedRequestId) -and
                 -not [string]::Equals([string]$current.RequestId, $ExpectedRequestId, [StringComparison]::Ordinal)) {
                 return $null
+            }
+            if ($RequireProcessExpectation) {
+                $currentProcessId = if ($null -ne $current.ProcessId) { [Nullable[int]]([int]$current.ProcessId) } else { $null }
+                if (($null -eq $ExpectedProcessId) -ne ($null -eq $currentProcessId) -or
+                    ($null -ne $ExpectedProcessId -and [int]$ExpectedProcessId -ne [int]$currentProcessId)) {
+                    return $null
+                }
             }
         }
 

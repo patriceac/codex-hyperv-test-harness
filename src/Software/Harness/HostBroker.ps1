@@ -78,6 +78,109 @@ function Write-JsonAtomic {
     }
 }
 
+function Write-TerminalJsonAtomic {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [string] $Path,
+        [Parameter(Mandatory = $true)] $Value
+    )
+
+    $parent = Split-Path -Parent $Path
+    New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    $temporaryPath = $Path + '.' + [Guid]::NewGuid().ToString('N') + '.terminal.tmp'
+    try {
+        $Value | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $temporaryPath -Encoding UTF8
+        for ($attempt = 1; $attempt -le 20; $attempt++) {
+            try {
+                # File.Move without overwrite is the first-writer-wins terminal
+                # publication primitive on Windows/.NET Framework. A competing
+                # terminal result can never be replaced after it becomes visible.
+                [IO.File]::Move($temporaryPath, $Path)
+                return $true
+            }
+            catch [IO.IOException] {
+                if ([IO.File]::Exists($Path)) { return $false }
+                if ($attempt -ge 20) { throw }
+            }
+            catch [UnauthorizedAccessException] {
+                if ([IO.File]::Exists($Path)) { return $false }
+                if ($attempt -ge 20) { throw }
+            }
+            Start-Sleep -Milliseconds ([Math]::Min(250, 5 * $attempt))
+        }
+    }
+    finally {
+        [IO.File]::Delete($temporaryPath)
+    }
+}
+
+function Invoke-WithTerminalResultPublicationMutex {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$')] [string] $RequestId,
+        [Parameter(Mandatory = $true)] [string] $ScopeRoot,
+        [Parameter(Mandatory = $true)] [scriptblock] $Operation
+    )
+
+    $scopeText = ([IO.Path]::GetFullPath($ScopeRoot).TrimEnd('\') + '|' + $RequestId).ToUpperInvariant()
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try { $scopeHash = ([BitConverter]::ToString($sha256.ComputeHash([Text.Encoding]::UTF8.GetBytes($scopeText)))).Replace('-', '').Substring(0, 32) }
+    finally { $sha256.Dispose() }
+    $mutex = New-Object Threading.Mutex($false, ('Global\CodexHyperVTerminalPublish-' + $scopeHash))
+    $lockTaken = $false
+    try {
+        try { $lockTaken = $mutex.WaitOne([TimeSpan]::FromSeconds(30)) }
+        catch [Threading.AbandonedMutexException] { $lockTaken = $true }
+        if (-not $lockTaken) { throw "Timed out acquiring terminal publication lock for request $RequestId." }
+        & $Operation
+    }
+    finally {
+        if ($lockTaken) { try { $mutex.ReleaseMutex() } catch { } }
+        $mutex.Dispose()
+    }
+}
+
+function Read-BrokerJsonWithRetry {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [string] $Path,
+        [ValidateRange(1, 20)] [int] $Attempts = 6,
+        [ValidateRange(10, 1000)] [int] $DelayMilliseconds = 50
+    )
+
+    $lastError = $null
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        try {
+            if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+                throw [IO.FileNotFoundException]::new("JSON file not found: $Path")
+            }
+            return Get-Content -Raw -LiteralPath $Path -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        }
+        catch {
+            $lastError = $_
+            if ($attempt -lt $Attempts) { Start-Sleep -Milliseconds $DelayMilliseconds }
+        }
+    }
+    throw [IO.InvalidDataException]::new("Could not read a stable JSON document after $Attempts attempts: $Path", $lastError.Exception)
+}
+
+function Test-ExactExpectedGuestPowerOffRequest {
+    param([AllowNull()] $Request)
+
+    if (-not $Request) { return $false }
+    $expectation = @($Request.PSObject.Properties | Where-Object { $_.Name -ceq 'ExpectGuestPowerOff' }) | Select-Object -First 1
+    $expectation -and $expectation.Value -is [bool] -and [bool]$expectation.Value
+}
+
+function ConvertTo-BrokerTimestampText {
+    param([AllowNull()] $Value)
+
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [DateTime]) { return ([DateTime]$Value).ToUniversalTime().ToString('o') }
+    if ($Value -is [DateTimeOffset]) { return ([DateTimeOffset]$Value).UtcDateTime.ToString('o') }
+    [string]$Value
+}
+
 $payloadCacheModulePath = Join-Path $PSScriptRoot 'PayloadCache.ps1'
 if (-not (Test-Path -LiteralPath $payloadCacheModulePath -PathType Leaf)) {
     throw "Payload cache module not found: $payloadCacheModulePath"
@@ -142,18 +245,67 @@ function Write-RequestState {
         [Nullable[int]] $ApplicationProcessId = $null,
         [string] $ApplicationStartedUtc = $null,
         [Nullable[int]] $GuestActionIndex = $null,
-        [string] $GuestActionType = $null
+        [string] $GuestActionType = $null,
+        [Nullable[bool]] $ExpectGuestPowerOff = $null,
+        [string] $ExpectedGuestPowerOffSubmissionStartedUtc = $null,
+        [Nullable[bool]] $GuestJobMayHaveLaunched = $null,
+        [string] $GuestApplicationEraRunningObservedUtc = $null,
+        [string] $GuestPowerOffObservedUtc = $null,
+        [Nullable[bool]] $GuestPowerOffBeforeCleanup = $null,
+        [string] $PowerOffRecoveryDeadlineUtc = $null,
+        [string] $BrokerCleanupStartedUtc = $null
     )
 
+    $requestStateBoundParameters = @{} + $PSBoundParameters
+    Invoke-WithTerminalResultPublicationMutex -RequestId $RequestId -ScopeRoot $ResultRoot -Operation {
     $requestStatePath = Join-Path $ResultRoot 'request-state.json'
+    if (Test-Path -LiteralPath (Join-Path $ResultRoot 'broker-result.json') -PathType Leaf) {
+        # A terminal marker closes the request-state transaction. Refuse all
+        # later mutations so recovery and a surviving worker cannot publish
+        # contradictory terminal state/evidence combinations.
+        return
+    }
     $previousState = $null
     if (Test-Path -LiteralPath $requestStatePath -PathType Leaf) {
-        try { $previousState = Get-Content -Raw -LiteralPath $requestStatePath | ConvertFrom-Json }
-        catch { $previousState = $null }
+        # Never overwrite a durable at-most-once marker merely because a
+        # concurrent reader caught a transient replace/ACL race.
+        $previousState = Read-BrokerJsonWithRetry -Path $requestStatePath
+    }
+    $previousPowerOffProperties = @{}
+    foreach ($propertyName in @(
+        'ExpectGuestPowerOff',
+        'ExpectedGuestPowerOffSubmissionStartedUtc',
+        'GuestJobMayHaveLaunched',
+        'GuestApplicationEraRunningObservedUtc',
+        'GuestPowerOffObservedUtc',
+        'GuestPowerOffBeforeCleanup',
+        'PowerOffRecoveryDeadlineUtc',
+        'BrokerCleanupStartedUtc'
+    )) {
+        $previousPowerOffProperties[$propertyName] = if ($previousState) {
+            @($previousState.PSObject.Properties | Where-Object { $_.Name -ceq $propertyName }) | Select-Object -First 1
+        }
+        else { $null }
+    }
+    foreach ($booleanPropertyName in @('ExpectGuestPowerOff', 'GuestJobMayHaveLaunched', 'GuestPowerOffBeforeCleanup')) {
+        $booleanProperty = $previousPowerOffProperties[$booleanPropertyName]
+        if ($booleanProperty -and $null -ne $booleanProperty.Value -and $booleanProperty.Value -isnot [bool]) {
+            throw "Persisted request state property $booleanPropertyName must be an exact JSON Boolean or null."
+        }
+    }
+    $previousPowerOffContract = [ordered]@{
+        ExpectGuestPowerOff = if ($previousPowerOffProperties.ExpectGuestPowerOff) { $previousPowerOffProperties.ExpectGuestPowerOff.Value } else { $null }
+        ExpectedGuestPowerOffSubmissionStartedUtc = if ($previousPowerOffProperties.ExpectedGuestPowerOffSubmissionStartedUtc) { ConvertTo-BrokerTimestampText $previousPowerOffProperties.ExpectedGuestPowerOffSubmissionStartedUtc.Value } else { $null }
+        GuestJobMayHaveLaunched = if ($previousPowerOffProperties.GuestJobMayHaveLaunched) { $previousPowerOffProperties.GuestJobMayHaveLaunched.Value } else { $null }
+        GuestApplicationEraRunningObservedUtc = if ($previousPowerOffProperties.GuestApplicationEraRunningObservedUtc) { ConvertTo-BrokerTimestampText $previousPowerOffProperties.GuestApplicationEraRunningObservedUtc.Value } else { $null }
+        GuestPowerOffObservedUtc = if ($previousPowerOffProperties.GuestPowerOffObservedUtc) { ConvertTo-BrokerTimestampText $previousPowerOffProperties.GuestPowerOffObservedUtc.Value } else { $null }
+        GuestPowerOffBeforeCleanup = if ($previousPowerOffProperties.GuestPowerOffBeforeCleanup) { $previousPowerOffProperties.GuestPowerOffBeforeCleanup.Value } else { $null }
+        PowerOffRecoveryDeadlineUtc = if ($previousPowerOffProperties.PowerOffRecoveryDeadlineUtc) { ConvertTo-BrokerTimestampText $previousPowerOffProperties.PowerOffRecoveryDeadlineUtc.Value } else { $null }
+        BrokerCleanupStartedUtc = if ($previousPowerOffProperties.BrokerCleanupStartedUtc) { ConvertTo-BrokerTimestampText $previousPowerOffProperties.BrokerCleanupStartedUtc.Value } else { $null }
     }
 
     $resetWorker = $Status -in @('Submitted', 'Queued', 'RetryQueued')
-    $effectiveWorkerId = if ($PSBoundParameters.ContainsKey('WorkerId')) {
+    $effectiveWorkerId = if ($requestStateBoundParameters.ContainsKey('WorkerId')) {
         if ($null -ne $WorkerId) { [int]$WorkerId } else { $null }
     }
     elseif (-not $resetWorker -and $previousState -and $null -ne $previousState.WorkerId) {
@@ -162,20 +314,98 @@ function Write-RequestState {
     else { $null }
 
     $resetApplication = $Status -in @('Submitted', 'Queued', 'RetryQueued', 'Claimed', 'RetryPendingRecycle')
-    $effectiveApplicationProcessId = if ($PSBoundParameters.ContainsKey('ApplicationProcessId')) {
+    $effectiveApplicationProcessId = if ($requestStateBoundParameters.ContainsKey('ApplicationProcessId')) {
         if ($null -ne $ApplicationProcessId) { [int]$ApplicationProcessId } else { $null }
     }
     elseif (-not $resetApplication -and $previousState -and $null -ne $previousState.ApplicationProcessId) {
         [int]$previousState.ApplicationProcessId
     }
     else { $null }
-    $effectiveApplicationStartedUtc = if ($PSBoundParameters.ContainsKey('ApplicationStartedUtc')) {
+    $effectiveApplicationStartedUtc = if ($requestStateBoundParameters.ContainsKey('ApplicationStartedUtc')) {
         if ([string]::IsNullOrWhiteSpace($ApplicationStartedUtc)) { $null } else { $ApplicationStartedUtc }
     }
     elseif (-not $resetApplication -and $previousState) {
         if ([string]::IsNullOrWhiteSpace([string]$previousState.ApplicationStartedUtc)) { $null } else { [string]$previousState.ApplicationStartedUtc }
     }
     else { $null }
+
+    # Exact-power-off at-most-once evidence is monotonic for the lifetime of a
+    # RequestId. Queue duplicates, retry bookkeeping, or stale writers may add
+    # evidence, but they may never clear or downgrade an existing marker.
+    $effectiveExpectGuestPowerOff = if ($previousPowerOffContract.ExpectGuestPowerOff -is [bool] -and [bool]$previousPowerOffContract.ExpectGuestPowerOff) {
+        [Nullable[bool]]$true
+    }
+    elseif ($requestStateBoundParameters.ContainsKey('ExpectGuestPowerOff')) {
+        if ($null -ne $ExpectGuestPowerOff) { [Nullable[bool]]([bool]$ExpectGuestPowerOff) } else { $null }
+    }
+    elseif ($null -ne $previousPowerOffContract.ExpectGuestPowerOff) {
+        [Nullable[bool]]([bool]$previousPowerOffContract.ExpectGuestPowerOff)
+    }
+    else { $null }
+    $effectiveExpectedPowerOffSubmissionStartedUtc = if (-not [string]::IsNullOrWhiteSpace([string]$previousPowerOffContract.ExpectedGuestPowerOffSubmissionStartedUtc)) {
+        [string]$previousPowerOffContract.ExpectedGuestPowerOffSubmissionStartedUtc
+    }
+    elseif ($requestStateBoundParameters.ContainsKey('ExpectedGuestPowerOffSubmissionStartedUtc')) {
+        if ([string]::IsNullOrWhiteSpace($ExpectedGuestPowerOffSubmissionStartedUtc)) { $null } else { $ExpectedGuestPowerOffSubmissionStartedUtc }
+    }
+    else { $null }
+    $effectiveGuestJobMayHaveLaunched = if ($previousPowerOffContract.GuestJobMayHaveLaunched -is [bool] -and [bool]$previousPowerOffContract.GuestJobMayHaveLaunched) {
+        [Nullable[bool]]$true
+    }
+    elseif ($requestStateBoundParameters.ContainsKey('GuestJobMayHaveLaunched')) {
+        if ($null -ne $GuestJobMayHaveLaunched) { [Nullable[bool]]([bool]$GuestJobMayHaveLaunched) } else { $null }
+    }
+    elseif ($null -ne $previousPowerOffContract.GuestJobMayHaveLaunched) {
+        [Nullable[bool]]([bool]$previousPowerOffContract.GuestJobMayHaveLaunched)
+    }
+    else { $null }
+    $effectiveApplicationEraRunningObservedUtc = if (-not [string]::IsNullOrWhiteSpace([string]$previousPowerOffContract.GuestApplicationEraRunningObservedUtc)) {
+        [string]$previousPowerOffContract.GuestApplicationEraRunningObservedUtc
+    }
+    elseif ($requestStateBoundParameters.ContainsKey('GuestApplicationEraRunningObservedUtc')) {
+        if ([string]::IsNullOrWhiteSpace($GuestApplicationEraRunningObservedUtc)) { $null } else { $GuestApplicationEraRunningObservedUtc }
+    }
+    else { $null }
+    $effectiveGuestPowerOffObservedUtc = if (-not [string]::IsNullOrWhiteSpace([string]$previousPowerOffContract.GuestPowerOffObservedUtc)) {
+        [string]$previousPowerOffContract.GuestPowerOffObservedUtc
+    }
+    elseif ($requestStateBoundParameters.ContainsKey('GuestPowerOffObservedUtc')) {
+        if ([string]::IsNullOrWhiteSpace($GuestPowerOffObservedUtc)) { $null } else { $GuestPowerOffObservedUtc }
+    }
+    else { $null }
+    $effectiveGuestPowerOffBeforeCleanup = if ($previousPowerOffContract.GuestPowerOffBeforeCleanup -is [bool] -and [bool]$previousPowerOffContract.GuestPowerOffBeforeCleanup) {
+        [Nullable[bool]]$true
+    }
+    elseif ($requestStateBoundParameters.ContainsKey('GuestPowerOffBeforeCleanup')) {
+        if ($null -ne $GuestPowerOffBeforeCleanup) { [Nullable[bool]]([bool]$GuestPowerOffBeforeCleanup) } else { $null }
+    }
+    elseif ($null -ne $previousPowerOffContract.GuestPowerOffBeforeCleanup) {
+        [Nullable[bool]]([bool]$previousPowerOffContract.GuestPowerOffBeforeCleanup)
+    }
+    else { $null }
+    $effectivePowerOffRecoveryDeadlineUtc = if (-not [string]::IsNullOrWhiteSpace([string]$previousPowerOffContract.PowerOffRecoveryDeadlineUtc)) {
+        [string]$previousPowerOffContract.PowerOffRecoveryDeadlineUtc
+    }
+    elseif ($requestStateBoundParameters.ContainsKey('PowerOffRecoveryDeadlineUtc')) {
+        if ([string]::IsNullOrWhiteSpace($PowerOffRecoveryDeadlineUtc)) { $null } else { $PowerOffRecoveryDeadlineUtc }
+    }
+    else { $null }
+    $effectiveBrokerCleanupStartedUtc = if (-not [string]::IsNullOrWhiteSpace([string]$previousPowerOffContract.BrokerCleanupStartedUtc)) {
+        [string]$previousPowerOffContract.BrokerCleanupStartedUtc
+    }
+    elseif ($requestStateBoundParameters.ContainsKey('BrokerCleanupStartedUtc')) {
+        if ([string]::IsNullOrWhiteSpace($BrokerCleanupStartedUtc)) { $null } else { $BrokerCleanupStartedUtc }
+    }
+    else { $null }
+
+    $hasPowerOffContract = $null -ne $effectiveExpectGuestPowerOff -or
+        -not [string]::IsNullOrWhiteSpace($effectiveExpectedPowerOffSubmissionStartedUtc) -or
+        $null -ne $effectiveGuestJobMayHaveLaunched -or
+        -not [string]::IsNullOrWhiteSpace($effectiveApplicationEraRunningObservedUtc) -or
+        -not [string]::IsNullOrWhiteSpace($effectiveGuestPowerOffObservedUtc) -or
+        $null -ne $effectiveGuestPowerOffBeforeCleanup -or
+        -not [string]::IsNullOrWhiteSpace($effectivePowerOffRecoveryDeadlineUtc) -or
+        -not [string]::IsNullOrWhiteSpace($effectiveBrokerCleanupStartedUtc)
 
     $effectiveGuestActionIndex = if ($Status -eq 'GuestAction' -and $null -ne $GuestActionIndex) { [Nullable[int]]([int]$GuestActionIndex) } else { $null }
     $effectiveGuestActionType = if ($Status -eq 'GuestAction' -and -not [string]::IsNullOrWhiteSpace($GuestActionType)) { $GuestActionType } else { $null }
@@ -190,6 +420,14 @@ function Write-RequestState {
         ApplicationStartedUtc = $effectiveApplicationStartedUtc
         GuestActionIndex = if ($null -ne $effectiveGuestActionIndex) { [int]$effectiveGuestActionIndex } else { $null }
         GuestActionType = $effectiveGuestActionType
+        ExpectGuestPowerOff = if ($null -ne $effectiveExpectGuestPowerOff) { [bool]$effectiveExpectGuestPowerOff } else { $null }
+        ExpectedGuestPowerOffSubmissionStartedUtc = $effectiveExpectedPowerOffSubmissionStartedUtc
+        GuestJobMayHaveLaunched = if ($null -ne $effectiveGuestJobMayHaveLaunched) { [bool]$effectiveGuestJobMayHaveLaunched } else { $null }
+        GuestApplicationEraRunningObservedUtc = $effectiveApplicationEraRunningObservedUtc
+        GuestPowerOffObservedUtc = $effectiveGuestPowerOffObservedUtc
+        GuestPowerOffBeforeCleanup = if ($null -ne $effectiveGuestPowerOffBeforeCleanup) { [bool]$effectiveGuestPowerOffBeforeCleanup } else { $null }
+        PowerOffRecoveryDeadlineUtc = $effectivePowerOffRecoveryDeadlineUtc
+        BrokerCleanupStartedUtc = $effectiveBrokerCleanupStartedUtc
     }
     $previousComparable = if ($previousState) {
         [ordered]@{
@@ -202,6 +440,14 @@ function Write-RequestState {
             ApplicationStartedUtc = if ([string]::IsNullOrWhiteSpace([string]$previousState.ApplicationStartedUtc)) { $null } else { [string]$previousState.ApplicationStartedUtc }
             GuestActionIndex = if ($null -ne $previousState.GuestActionIndex) { [int]$previousState.GuestActionIndex } else { $null }
             GuestActionType = if ([string]::IsNullOrWhiteSpace([string]$previousState.GuestActionType)) { $null } else { [string]$previousState.GuestActionType }
+            ExpectGuestPowerOff = if ($null -ne $previousPowerOffContract.ExpectGuestPowerOff) { [bool]$previousPowerOffContract.ExpectGuestPowerOff } else { $null }
+            ExpectedGuestPowerOffSubmissionStartedUtc = if ([string]::IsNullOrWhiteSpace([string]$previousPowerOffContract.ExpectedGuestPowerOffSubmissionStartedUtc)) { $null } else { [string]$previousPowerOffContract.ExpectedGuestPowerOffSubmissionStartedUtc }
+            GuestJobMayHaveLaunched = if ($null -ne $previousPowerOffContract.GuestJobMayHaveLaunched) { [bool]$previousPowerOffContract.GuestJobMayHaveLaunched } else { $null }
+            GuestApplicationEraRunningObservedUtc = if ([string]::IsNullOrWhiteSpace([string]$previousPowerOffContract.GuestApplicationEraRunningObservedUtc)) { $null } else { [string]$previousPowerOffContract.GuestApplicationEraRunningObservedUtc }
+            GuestPowerOffObservedUtc = if ([string]::IsNullOrWhiteSpace([string]$previousPowerOffContract.GuestPowerOffObservedUtc)) { $null } else { [string]$previousPowerOffContract.GuestPowerOffObservedUtc }
+            GuestPowerOffBeforeCleanup = if ($null -ne $previousPowerOffContract.GuestPowerOffBeforeCleanup) { [bool]$previousPowerOffContract.GuestPowerOffBeforeCleanup } else { $null }
+            PowerOffRecoveryDeadlineUtc = if ([string]::IsNullOrWhiteSpace([string]$previousPowerOffContract.PowerOffRecoveryDeadlineUtc)) { $null } else { [string]$previousPowerOffContract.PowerOffRecoveryDeadlineUtc }
+            BrokerCleanupStartedUtc = if ([string]::IsNullOrWhiteSpace([string]$previousPowerOffContract.BrokerCleanupStartedUtc)) { $null } else { [string]$previousPowerOffContract.BrokerCleanupStartedUtc }
         }
     }
     else { $null }
@@ -211,7 +457,7 @@ function Write-RequestState {
     $history = @(if ($previousState -and $previousState.History) { $previousState.History | Where-Object { $null -ne $_ } })
     if ($stateChanged) {
         $revision++
-        $history += [pscustomobject][ordered]@{
+        $historyEntry = [ordered]@{
             Revision = $revision
             Status = $Status
             Message = $Message
@@ -224,12 +470,23 @@ function Write-RequestState {
             GuestActionType = $effectiveGuestActionType
             UpdatedUtc = $updatedUtc
         }
+        if ($hasPowerOffContract) {
+            $historyEntry['ExpectGuestPowerOff'] = $currentComparable.ExpectGuestPowerOff
+            $historyEntry['ExpectedGuestPowerOffSubmissionStartedUtc'] = $effectiveExpectedPowerOffSubmissionStartedUtc
+            $historyEntry['GuestJobMayHaveLaunched'] = $currentComparable.GuestJobMayHaveLaunched
+            $historyEntry['GuestApplicationEraRunningObservedUtc'] = $effectiveApplicationEraRunningObservedUtc
+            $historyEntry['GuestPowerOffObservedUtc'] = $effectiveGuestPowerOffObservedUtc
+            $historyEntry['GuestPowerOffBeforeCleanup'] = $currentComparable.GuestPowerOffBeforeCleanup
+            $historyEntry['PowerOffRecoveryDeadlineUtc'] = $effectivePowerOffRecoveryDeadlineUtc
+            $historyEntry['BrokerCleanupStartedUtc'] = $effectiveBrokerCleanupStartedUtc
+        }
+        $history += [pscustomobject]$historyEntry
         if ($history.Count -gt 128) {
             $history = @($history[($history.Count - 128)..($history.Count - 1)])
         }
     }
 
-    Write-JsonAtomic -Path $requestStatePath -Value ([ordered]@{
+    $stateEnvelope = [ordered]@{
         RequestId = $RequestId
         Status = $Status
         Message = $Message
@@ -248,7 +505,19 @@ function Write-RequestState {
         UpdatedUtc = $updatedUtc
         BrokerProcessId = $PID
         BrokerSessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
-    })
+    }
+    if ($hasPowerOffContract) {
+        $stateEnvelope['ExpectGuestPowerOff'] = if ($null -ne $effectiveExpectGuestPowerOff) { [bool]$effectiveExpectGuestPowerOff } else { $null }
+        $stateEnvelope['ExpectedGuestPowerOffSubmissionStartedUtc'] = $effectiveExpectedPowerOffSubmissionStartedUtc
+        $stateEnvelope['GuestJobMayHaveLaunched'] = if ($null -ne $effectiveGuestJobMayHaveLaunched) { [bool]$effectiveGuestJobMayHaveLaunched } else { $null }
+        $stateEnvelope['GuestApplicationEraRunningObservedUtc'] = $effectiveApplicationEraRunningObservedUtc
+        $stateEnvelope['GuestPowerOffObservedUtc'] = $effectiveGuestPowerOffObservedUtc
+        $stateEnvelope['GuestPowerOffBeforeCleanup'] = if ($null -ne $effectiveGuestPowerOffBeforeCleanup) { [bool]$effectiveGuestPowerOffBeforeCleanup } else { $null }
+        $stateEnvelope['PowerOffRecoveryDeadlineUtc'] = $effectivePowerOffRecoveryDeadlineUtc
+        $stateEnvelope['BrokerCleanupStartedUtc'] = $effectiveBrokerCleanupStartedUtc
+    }
+    Write-JsonAtomic -Path $requestStatePath -Value $stateEnvelope
+    }
 }
 
 function Get-BoundedTimeout {
@@ -266,6 +535,56 @@ function Get-BoundedTimeout {
     [Math]::Max($Minimum, [Math]::Min($Maximum, $timeout))
 }
 
+function Get-ExpectedGuestPowerOffObservation {
+    param(
+        [Parameter(Mandatory = $true)] [bool] $Enabled,
+        [Parameter(Mandatory = $true)] [string] $VmState,
+        [Parameter(Mandatory = $true)] [bool] $ApplicationConfirmed,
+        [AllowNull()] [string] $ApplicationEraRunningObservedUtc,
+        [AllowNull()] [string] $BrokerCleanupStartedUtc
+    )
+
+    $observation = [ordered]@{
+        Action = 'None'
+        FailureKind = $null
+        Message = $null
+    }
+    if (-not $Enabled) {
+        return [pscustomobject]$observation
+    }
+
+    if ([string]::Equals($VmState, 'Running', [StringComparison]::OrdinalIgnoreCase)) {
+        if ($ApplicationConfirmed -and [string]::IsNullOrWhiteSpace($ApplicationEraRunningObservedUtc)) {
+            $observation.Action = 'RecordApplicationEraRunning'
+        }
+        return [pscustomobject]$observation
+    }
+
+    if (-not [string]::Equals($VmState, 'Off', [StringComparison]::OrdinalIgnoreCase)) {
+        return [pscustomobject]$observation
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($BrokerCleanupStartedUtc)) {
+        $observation.Action = 'Fail'
+        $observation.FailureKind = 'ExpectedGuestPowerOffAfterCleanup'
+        $observation.Message = 'The VM reached Off only after broker cleanup began, so guest shutdown causality was not proven.'
+    }
+    elseif (-not $ApplicationConfirmed) {
+        $observation.Action = 'Fail'
+        $observation.FailureKind = 'ExpectedGuestPowerOffPremature'
+        $observation.Message = 'The VM powered off before the broker confirmed that the application started.'
+    }
+    elseif ([string]::IsNullOrWhiteSpace($ApplicationEraRunningObservedUtc)) {
+        $observation.Action = 'Fail'
+        $observation.FailureKind = 'ExpectedGuestPowerOffUnproven'
+        $observation.Message = 'The VM powered off without a broker-observed application-era Running state.'
+    }
+    else {
+        $observation.Action = 'RecordGuestPowerOff'
+    }
+    [pscustomobject]$observation
+}
+
 function Assert-RequestActive {
     param(
         [Parameter(Mandatory = $true)] [string] $RequestId,
@@ -276,7 +595,9 @@ function Assert-RequestActive {
     # cancellation at the same boundary, retain the more specific timeout
     # terminal state instead of reporting an ordinary cancellation.
     if ([DateTime]::UtcNow -ge $ExecutionDeadlineUtc) {
-        throw [TimeoutException]::new("Execution timeout expired for request $RequestId.")
+        $deadlineException = [TimeoutException]::new("Execution timeout expired for request $RequestId.")
+        $deadlineException.Data['CodexBrokerDeadlineExpired'] = $true
+        throw $deadlineException
     }
 
     $cancelFile = Join-Path $cancellationPath ($RequestId + '.json')
@@ -365,6 +686,185 @@ function Remove-StaleQueueArtifacts {
     }
 }
 
+function Get-InterruptedExpectedGuestPowerOffRecoveryClassification {
+    [CmdletBinding()]
+    param(
+        [AllowNull()] $Request,
+        [AllowNull()] $RequestState
+    )
+
+    $classification = [ordered]@{
+        Disposition = 'NotApplicable'
+        State = $RequestState
+        Reason = $null
+    }
+    if (-not $Request) { return [pscustomobject]$classification }
+    $requestExpectation = @($Request.PSObject.Properties | Where-Object { $_.Name -ceq 'ExpectGuestPowerOff' }) | Select-Object -First 1
+    if (-not $requestExpectation -or $requestExpectation.Value -isnot [bool] -or -not [bool]$requestExpectation.Value) {
+        return [pscustomobject]$classification
+    }
+    if (-not $RequestState) {
+        $classification.Disposition = 'Invalid'
+        $classification.Reason = 'The exact expected-power-off request has no readable durable request state.'
+        return [pscustomobject]$classification
+    }
+
+    $contractPropertyNames = @(
+        'ExpectGuestPowerOff',
+        'ExpectedGuestPowerOffSubmissionStartedUtc',
+        'GuestJobMayHaveLaunched',
+        'GuestApplicationEraRunningObservedUtc',
+        'GuestPowerOffObservedUtc',
+        'GuestPowerOffBeforeCleanup',
+        'PowerOffRecoveryDeadlineUtc',
+        'BrokerCleanupStartedUtc'
+    )
+    foreach ($contractPropertyName in $contractPropertyNames) {
+        $caseInsensitiveMatches = @($RequestState.PSObject.Properties | Where-Object { [string]::Equals($_.Name, $contractPropertyName, [StringComparison]::OrdinalIgnoreCase) })
+        if ($caseInsensitiveMatches.Count -gt 1 -or ($caseInsensitiveMatches.Count -eq 1 -and $caseInsensitiveMatches[0].Name -cne $contractPropertyName)) {
+            $classification.Disposition = 'Invalid'
+            $classification.Reason = "Persisted expected-power-off property $contractPropertyName is duplicated or has incorrect casing."
+            return [pscustomobject]$classification
+        }
+    }
+
+    $stateExpectation = @($RequestState.PSObject.Properties | Where-Object { $_.Name -ceq 'ExpectGuestPowerOff' }) | Select-Object -First 1
+    $timestampNames = @(
+        'ExpectedGuestPowerOffSubmissionStartedUtc',
+        'GuestApplicationEraRunningObservedUtc',
+        'GuestPowerOffObservedUtc',
+        'PowerOffRecoveryDeadlineUtc',
+        'BrokerCleanupStartedUtc'
+    )
+    $timestampValues = @{}
+    foreach ($timestampName in $timestampNames) {
+        $property = @($RequestState.PSObject.Properties | Where-Object { $_.Name -ceq $timestampName }) | Select-Object -First 1
+        if (-not $property -or $null -eq $property.Value) {
+            $timestampValues[$timestampName] = $null
+            continue
+        }
+        if ($property.Value -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+            $classification.Disposition = 'Invalid'
+            $classification.Reason = "Persisted expected-power-off property $timestampName must be a non-empty timestamp string or null."
+            return [pscustomobject]$classification
+        }
+        try { $null = [DateTimeOffset]::Parse([string]$property.Value, [Globalization.CultureInfo]::InvariantCulture) }
+        catch {
+            $classification.Disposition = 'Invalid'
+            $classification.Reason = "Persisted expected-power-off property $timestampName is not a valid timestamp."
+            return [pscustomobject]$classification
+        }
+        $timestampValues[$timestampName] = [string]$property.Value
+    }
+
+    $booleanValues = @{}
+    foreach ($booleanName in @('GuestJobMayHaveLaunched', 'GuestPowerOffBeforeCleanup')) {
+        $property = @($RequestState.PSObject.Properties | Where-Object { $_.Name -ceq $booleanName }) | Select-Object -First 1
+        if (-not $property -or $null -eq $property.Value) {
+            $booleanValues[$booleanName] = $null
+            continue
+        }
+        if ($property.Value -isnot [bool]) {
+            $classification.Disposition = 'Invalid'
+            $classification.Reason = "Persisted expected-power-off property $booleanName must be an exact JSON Boolean or null."
+            return [pscustomobject]$classification
+        }
+        $booleanValues[$booleanName] = [bool]$property.Value
+    }
+
+    $hasAnyContractMarker = @($timestampValues.Values | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }).Count -gt 0 -or
+        @($booleanValues.Values | Where-Object { $null -ne $_ }).Count -gt 0
+    if ($stateExpectation) {
+        if ($null -eq $stateExpectation.Value -or $stateExpectation.Value -isnot [bool] -or -not [bool]$stateExpectation.Value) {
+            $classification.Disposition = 'Invalid'
+            $classification.Reason = 'Persisted exact expected-power-off state must attest exact Boolean ExpectGuestPowerOff=true.'
+            return [pscustomobject]$classification
+        }
+    }
+    elseif ($hasAnyContractMarker) {
+        $classification.Disposition = 'Invalid'
+        $classification.Reason = 'Persisted expected-power-off lifecycle markers exist without exact Boolean ExpectGuestPowerOff=true.'
+        return [pscustomobject]$classification
+    }
+
+    $submissionStarted = -not [string]::IsNullOrWhiteSpace([string]$timestampValues.ExpectedGuestPowerOffSubmissionStartedUtc)
+    $mayHaveLaunched = $booleanValues.GuestJobMayHaveLaunched -is [bool] -and [bool]$booleanValues.GuestJobMayHaveLaunched
+    $mayHaveLaunchedProperty = @($RequestState.PSObject.Properties | Where-Object { $_.Name -ceq 'GuestJobMayHaveLaunched' }) | Select-Object -First 1
+    if ($mayHaveLaunchedProperty -and $mayHaveLaunchedProperty.Value -is [bool] -and -not [bool]$mayHaveLaunchedProperty.Value) {
+        $classification.Disposition = 'Invalid'
+        $classification.Reason = 'Persisted exact expected-power-off state cannot contain GuestJobMayHaveLaunched=false.'
+        return [pscustomobject]$classification
+    }
+    if ($submissionStarted -ne $mayHaveLaunched) {
+        $classification.Disposition = 'Invalid'
+        $classification.Reason = 'Persisted expected-power-off submission ambiguity markers are incomplete or contradictory.'
+        return [pscustomobject]$classification
+    }
+
+    $applicationRunning = -not [string]::IsNullOrWhiteSpace([string]$timestampValues.GuestApplicationEraRunningObservedUtc)
+    $powerOffObserved = -not [string]::IsNullOrWhiteSpace([string]$timestampValues.GuestPowerOffObservedUtc)
+    $powerOffBeforeCleanup = $booleanValues.GuestPowerOffBeforeCleanup -is [bool] -and [bool]$booleanValues.GuestPowerOffBeforeCleanup
+    $powerOffBeforeCleanupProperty = @($RequestState.PSObject.Properties | Where-Object { $_.Name -ceq 'GuestPowerOffBeforeCleanup' }) | Select-Object -First 1
+    if ($powerOffBeforeCleanupProperty -and $powerOffBeforeCleanupProperty.Value -is [bool] -and -not [bool]$powerOffBeforeCleanupProperty.Value) {
+        $classification.Disposition = 'Invalid'
+        $classification.Reason = 'Persisted exact expected-power-off state cannot contain GuestPowerOffBeforeCleanup=false.'
+        return [pscustomobject]$classification
+    }
+    $recoveryDeadline = -not [string]::IsNullOrWhiteSpace([string]$timestampValues.PowerOffRecoveryDeadlineUtc)
+    $cleanupStarted = -not [string]::IsNullOrWhiteSpace([string]$timestampValues.BrokerCleanupStartedUtc)
+    if (($applicationRunning -and -not $submissionStarted) -or
+        ($powerOffObserved -and (-not $applicationRunning -or -not $powerOffBeforeCleanup)) -or
+        ($powerOffBeforeCleanup -and -not $powerOffObserved) -or
+        ($recoveryDeadline -and -not $powerOffObserved) -or
+        ($cleanupStarted -and -not $submissionStarted)) {
+        $classification.Disposition = 'Invalid'
+        $classification.Reason = 'Persisted expected-power-off lifecycle markers are out of order or incomplete.'
+        return [pscustomobject]$classification
+    }
+
+    if ($stateExpectation -and -not $submissionStarted) {
+        $classification.Disposition = 'Invalid'
+        $classification.Reason = 'Persisted ExpectGuestPowerOff=true is incomplete without the paired durable delivery ambiguity markers.'
+        return [pscustomobject]$classification
+    }
+
+    $classification.Disposition = if ($submissionStarted -or $applicationRunning -or $powerOffObserved -or $cleanupStarted) { 'ProtectedNoReplay' } else { 'SafePreDelivery' }
+    [pscustomobject]$classification
+}
+
+function Get-InterruptedExpectedGuestPowerOffNoReplayState {
+    [CmdletBinding()]
+    param(
+        [AllowNull()] $Request,
+        [AllowNull()] $RequestState
+    )
+
+    $classification = Get-InterruptedExpectedGuestPowerOffRecoveryClassification -Request $Request -RequestState $RequestState
+    if ([string]$classification.Disposition -eq 'ProtectedNoReplay') { return $RequestState }
+    $null
+}
+
+function Move-QueuedRequestWithTerminalResult {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [IO.FileInfo] $QueuedFile,
+        [Parameter(Mandatory = $true)] [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$')] [string] $RequestId,
+        [string] $Reason = 'terminal-duplicate'
+    )
+
+    $terminalResultPath = Join-Path (Join-Path $resultsPath $RequestId) 'broker-result.json'
+    if (-not (Test-Path -LiteralPath $terminalResultPath -PathType Leaf)) {
+        return $false
+    }
+
+    if (Test-Path -LiteralPath $QueuedFile.FullName -PathType Leaf) {
+        $safeReason = if ($Reason -match '^[A-Za-z0-9_-]{1,64}$') { $Reason } else { 'terminal-duplicate' }
+        $destination = Join-Path $archivePath ($RequestId + '-' + $safeReason + '-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ') + '.json')
+        Move-Item -LiteralPath $QueuedFile.FullName -Destination $destination -Force -ErrorAction Stop
+    }
+    $true
+}
+
 function Recover-InterruptedRequests {
     param([Parameter(Mandatory = $true)] $Config)
 
@@ -378,6 +878,87 @@ function Recover-InterruptedRequests {
         $id = [IO.Path]::GetFileNameWithoutExtension($_.Name)
         -not (Test-Path -LiteralPath (Join-Path (Join-Path $resultsPath $id) 'broker-result.json') -PathType Leaf)
     })
+    $interruptedTerminal = @{}
+    foreach ($unfinishedFile in $unfinishedFiles) {
+        $unfinishedRequestId = [IO.Path]::GetFileNameWithoutExtension($unfinishedFile.Name)
+        if ($unfinishedRequestId -notmatch '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$') { continue }
+        $unfinishedResultRoot = Join-Path $resultsPath $unfinishedRequestId
+        $unfinishedStatePath = Join-Path $unfinishedResultRoot 'request-state.json'
+        $unfinishedRequest = $null
+        $unfinishedState = $null
+        try {
+            $unfinishedRequest = Read-BrokerJsonWithRetry -Path $unfinishedFile.FullName
+        }
+        catch {
+            $interruptedTerminal[$unfinishedRequestId] = [pscustomobject]@{
+                Request = $null
+                State = $null
+                FailureKind = 'InterruptedRequestUnreadable'
+                Message = 'The interrupted processing request could not be read reliably. It was failed terminally and quarantined rather than risk replaying an unknown application job.'
+            }
+            continue
+        }
+        if (Test-Path -LiteralPath $unfinishedStatePath -PathType Leaf) {
+            try {
+                $unfinishedState = Read-BrokerJsonWithRetry -Path $unfinishedStatePath
+            }
+            catch {
+                $interruptedTerminal[$unfinishedRequestId] = [pscustomobject]@{
+                    Request = $unfinishedRequest
+                    State = $null
+                    FailureKind = 'InterruptedRequestStateUnreadable'
+                    Message = 'The interrupted request state remained unreadable after bounded retries. It was failed terminally because replay safety could not be established.'
+                }
+                continue
+            }
+        }
+        elseif (Test-ExactExpectedGuestPowerOffRequest -Request $unfinishedRequest) {
+            $interruptedTerminal[$unfinishedRequestId] = [pscustomobject]@{
+                Request = $unfinishedRequest
+                State = $null
+                FailureKind = 'ExpectedGuestPowerOffStateMissing'
+                Message = 'The exact expected-power-off request had no durable state after broker interruption. It was failed terminally because a prior launch could not be excluded.'
+            }
+            continue
+        }
+        $powerOffRecoveryClassification = Get-InterruptedExpectedGuestPowerOffRecoveryClassification -Request $unfinishedRequest -RequestState $unfinishedState
+        if ([string]$powerOffRecoveryClassification.Disposition -eq 'Invalid') {
+            $interruptedTerminal[$unfinishedRequestId] = [pscustomobject]@{
+                Request = $unfinishedRequest
+                State = $unfinishedState
+                FailureKind = 'ExpectedGuestPowerOffStateInvalid'
+                Message = ([string]$powerOffRecoveryClassification.Reason + ' The request was failed terminally because a prior application launch cannot be excluded safely.')
+            }
+            continue
+        }
+        $protectedState = if ([string]$powerOffRecoveryClassification.Disposition -eq 'ProtectedNoReplay') { $unfinishedState } else { $null }
+        if ($protectedState) {
+            $applicationRunningPersisted = -not [string]::IsNullOrWhiteSpace([string]$protectedState.GuestApplicationEraRunningObservedUtc)
+            $submissionAmbiguous = -not [string]::IsNullOrWhiteSpace([string]$protectedState.ExpectedGuestPowerOffSubmissionStartedUtc) -and
+                $protectedState.PSObject.Properties['GuestJobMayHaveLaunched'] -and
+                $protectedState.GuestJobMayHaveLaunched -is [bool] -and [bool]$protectedState.GuestJobMayHaveLaunched
+            $shutdownBeforeCleanupProperty = $protectedState.PSObject.Properties['GuestPowerOffBeforeCleanup']
+            $causalPowerOffPersisted = -not [string]::IsNullOrWhiteSpace([string]$protectedState.GuestPowerOffObservedUtc) -and
+                $shutdownBeforeCleanupProperty -and $shutdownBeforeCleanupProperty.Value -is [bool] -and [bool]$shutdownBeforeCleanupProperty.Value
+            $interruptedTerminal[$unfinishedRequestId] = [pscustomobject]@{
+                Request = $unfinishedRequest
+                State = $protectedState
+                FailureKind = if ($causalPowerOffPersisted) { 'GuestPowerOffEvidenceRecoveryInterrupted' } elseif ($applicationRunningPersisted) { 'ExpectedGuestPowerOffBrokerInterrupted' } else { 'ExpectedGuestPowerOffSubmissionInterrupted' }
+                Message = if ($causalPowerOffPersisted) {
+                    'The broker restarted after host-observed application-era Running-to-Off causality but before evidence recovery completed. The request was failed terminally and will not be replayed.'
+                }
+                elseif ($applicationRunningPersisted) {
+                    'The broker restarted after the expected-power-off application was confirmed running. A later shutdown may already have been scheduled, so the request was failed terminally and will not be replayed.'
+                }
+                elseif ($submissionAmbiguous) {
+                    'The broker restarted after expected-power-off job delivery began but before launch outcome was known. The request was failed terminally and will not be replayed.'
+                }
+                else {
+                    'The broker restarted with ambiguous expected-power-off delivery state. The request was failed terminally and will not be replayed.'
+                }
+            }
+        }
+    }
     if ($unfinishedFiles.Count -gt 0) {
         # The previous broker may have died after launching the disposable VM.
         # Power it off before requeueing so no old application can overlap the
@@ -406,6 +987,21 @@ function Recover-InterruptedRequests {
         }
 
         New-Item -ItemType Directory -Force -Path $resultRoot | Out-Null
+        if ($interruptedTerminal.ContainsKey($requestId)) {
+            $protected = $interruptedTerminal[$requestId]
+            $protectedState = $protected.State
+            $protectedRequest = $protected.Request
+            $interruptedCleanup = Invoke-InterruptedRequestCleanup -BrokerRoot $BrokerRoot -VmName ([string]$Config.VmName) -RequestId $requestId
+            Publish-InterruptedRequestTerminalResult -ResultRoot $resultRoot -RequestId $requestId -Request $protectedRequest -RequestState $protectedState -FailureKind ([string]$protected.FailureKind) -FailureStage 'BrokerRestartRecovery' -Message ([string]$protected.Message) -VmName ([string]$Config.VmName) -Cleanup $interruptedCleanup | Out-Null
+            $archiveFile = Join-Path $archivePath ($requestId + '-recovered-expected-poweroff-interrupted-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ') + '.json')
+            Move-Item -LiteralPath $processingFile.FullName -Destination $archiveFile -Force
+            $queuedFile = Join-Path $requestPath $processingFile.Name
+            if (Test-Path -LiteralPath $queuedFile -PathType Leaf) {
+                Move-Item -LiteralPath $queuedFile -Destination (Join-Path $archivePath ($requestId + '-recovered-expected-poweroff-queued-duplicate-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ') + '.json')) -Force
+            }
+            try { Remove-StagedPayloadSafe -RequestId $requestId } catch { }
+            continue
+        }
         Write-RequestState -ResultRoot $resultRoot -RequestId $requestId -Status 'RecoveredAfterBrokerRestart' -Message 'The previous broker stopped mid-run; the VM was powered off and the request was safely requeued.'
         $queuedFile = Join-Path $requestPath $processingFile.Name
         if (Test-Path -LiteralPath $queuedFile -PathType Leaf) {
@@ -602,7 +1198,11 @@ function Recover-OrphanedGuestProbes {
 function Start-GuestSessionProbe {
     param(
         [Parameter(Mandatory = $true)] [string] $VmName,
-        [Parameter(Mandatory = $true)] [string] $OutputPath
+        [Parameter(Mandatory = $true)] [string] $OutputPath,
+        [string] $InboxFile,
+        [string] $ProcessingFile,
+        [string] $CompletedFile,
+        [string] $Outbox
     )
 
     $probeTemplate = @'
@@ -613,14 +1213,74 @@ try {
     $credentialData = Get-Content -Raw -LiteralPath __CREDENTIAL_PATH__ | ConvertFrom-Json
     $securePassword = ConvertTo-SecureString ([string]$credentialData.Password) -AsPlainText -Force
     $credential = New-Object Management.Automation.PSCredential([string]$credentialData.UserName, $securePassword)
-    $state = Invoke-Command -VMName __VM_NAME__ -Credential $credential -ErrorAction Stop -ScriptBlock {
+    $probeData = Invoke-Command -VMName __VM_NAME__ -Credential $credential -ErrorAction Stop -ScriptBlock {
+        param($InboxFile, $ProcessingFile, $CompletedFile, $Outbox)
         $statePath = 'C:\CodexGuest\agent-state.json'
-        if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
-            return $null
+        $state = if (Test-Path -LiteralPath $statePath -PathType Leaf) {
+            Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json
         }
-        Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json
-    } | Select-Object -Last 1
-    $result = [ordered]@{ Success = $true; State = $state; Error = $null }
+        else { $null }
+        $currentGuestUtc = [DateTime]::UtcNow
+        $agentAlive = $false
+        $agentHeartbeatAgeSeconds = $null
+        if ($state -and $state.ProcessId) {
+            $agentAlive = $null -ne (Get-Process -Id ([int]$state.ProcessId) -ErrorAction SilentlyContinue)
+            try {
+                $agentHeartbeatUtc = [DateTimeOffset]::Parse([string]$state.HeartbeatUtc, [Globalization.CultureInfo]::InvariantCulture).UtcDateTime
+                $agentHeartbeatAgeSeconds = [Math]::Max(0, ($currentGuestUtc - $agentHeartbeatUtc).TotalSeconds)
+                if ($agentHeartbeatAgeSeconds -le 5) { $agentAlive = $true }
+            }
+            catch { }
+        }
+        $applicationLease = $null
+        if (-not [string]::IsNullOrWhiteSpace($Outbox)) {
+            try {
+                $leasePath = Join-Path $Outbox 'lease.json'
+                if (Test-Path -LiteralPath $leasePath -PathType Leaf) {
+                    $applicationLease = Get-Content -Raw -LiteralPath $leasePath | ConvertFrom-Json
+                }
+            }
+            catch { $applicationLease = $null }
+        }
+        $bootValue = (Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime
+        $bootTime = if ($bootValue -is [DateTime]) {
+            [DateTime]$bootValue
+        }
+        else {
+            [Management.ManagementDateTimeConverter]::ToDateTime([string]$bootValue)
+        }
+        [ordered]@{
+            State = $state
+            CurrentGuestBootTimeUtc = $bootTime.ToUniversalTime().ToString('o')
+            CurrentGuestUtc = $currentGuestUtc.ToString('o')
+            AgentAlive = [bool]$agentAlive
+            AgentHeartbeatAgeSeconds = $agentHeartbeatAgeSeconds
+            ApplicationLease = $applicationLease
+            Presence = if ([string]::IsNullOrWhiteSpace($Outbox)) {
+                $null
+            }
+            else {
+                [ordered]@{
+                    Inbox = Test-Path -LiteralPath $InboxFile -PathType Leaf
+                    Processing = Test-Path -LiteralPath $ProcessingFile -PathType Leaf
+                    Completed = Test-Path -LiteralPath $CompletedFile -PathType Leaf
+                    Result = Test-Path -LiteralPath (Join-Path $Outbox 'result.json') -PathType Leaf
+                    AgentError = Test-Path -LiteralPath (Join-Path $Outbox 'agent-error.json') -PathType Leaf
+                }
+            }
+        }
+    } -ArgumentList __INBOX_FILE__, __PROCESSING_FILE__, __COMPLETED_FILE__, __OUTBOX__ | Select-Object -Last 1
+    $result = [ordered]@{
+        Success = $true
+        State = $probeData.State
+        CurrentGuestBootTimeUtc = [string]$probeData.CurrentGuestBootTimeUtc
+        CurrentGuestUtc = [string]$probeData.CurrentGuestUtc
+        AgentAlive = [bool]$probeData.AgentAlive
+        AgentHeartbeatAgeSeconds = $probeData.AgentHeartbeatAgeSeconds
+        ApplicationLease = $probeData.ApplicationLease
+        Presence = $probeData.Presence
+        Error = $null
+    }
 }
 catch {
     $exitCode = 1
@@ -640,7 +1300,11 @@ exit $exitCode
     $probeCommand = $probeTemplate.
         Replace('__OUTPUT_PATH__', (ConvertTo-PowerShellSingleQuotedLiteral -Value $OutputPath)).
         Replace('__CREDENTIAL_PATH__', (ConvertTo-PowerShellSingleQuotedLiteral -Value $credentialPath)).
-        Replace('__VM_NAME__', (ConvertTo-PowerShellSingleQuotedLiteral -Value $VmName))
+        Replace('__VM_NAME__', (ConvertTo-PowerShellSingleQuotedLiteral -Value $VmName)).
+        Replace('__INBOX_FILE__', (ConvertTo-PowerShellSingleQuotedLiteral -Value ([string]$InboxFile))).
+        Replace('__PROCESSING_FILE__', (ConvertTo-PowerShellSingleQuotedLiteral -Value ([string]$ProcessingFile))).
+        Replace('__COMPLETED_FILE__', (ConvertTo-PowerShellSingleQuotedLiteral -Value ([string]$CompletedFile))).
+        Replace('__OUTBOX__', (ConvertTo-PowerShellSingleQuotedLiteral -Value ([string]$Outbox)))
     $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probeCommand))
     $process = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList @(
         '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encodedCommand
@@ -657,13 +1321,236 @@ exit $exitCode
     }
 }
 
+function Invoke-InterruptedRequestCleanup {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [string] $BrokerRoot,
+        [Parameter(Mandatory = $true)] [string] $VmName,
+        [string] $RequestId
+    )
+
+    $cleanupStartedUtc = [DateTime]::UtcNow
+    $errors = New-Object Collections.Generic.List[string]
+    $hostInputRecovery = @()
+    $requestNetworkRecovery = @()
+    try {
+        Stop-TestVm -VmName $VmName -Immediate
+    }
+    catch {
+        $errors.Add("VM power-off cleanup failed: $($_.Exception.Message)")
+    }
+
+    try {
+        $hostInputRecovery = @(Recover-OrphanedHostInputResources -BrokerRoot $BrokerRoot)
+        foreach ($failure in @($hostInputRecovery | Where-Object { -not [bool]$_.Success })) {
+            $errors.Add('Host-input orphan cleanup failed: ' + (@($failure.Errors) -join ' | '))
+        }
+    }
+    catch {
+        $errors.Add("Host-input orphan cleanup could not be verified: $($_.Exception.Message)")
+    }
+
+    try {
+        $requestNetworkRecovery = @(Invoke-WithRequestNetworkLifecycleMutex -BrokerRoot $BrokerRoot -Operation {
+            Recover-OrphanedRequestNetworkResources -BrokerRoot $BrokerRoot
+        })
+        foreach ($failure in @($requestNetworkRecovery | Where-Object { -not [bool]$_.Success })) {
+            $errors.Add('Request-network orphan cleanup failed: ' + (@($failure.Errors) -join ' | '))
+        }
+    }
+    catch {
+        $errors.Add("Request-network orphan cleanup could not be verified: $($_.Exception.Message)")
+    }
+
+    $vmFinalState = 'Unknown'
+    $finalNetworkInventorySucceeded = $false
+    $finalConnectedAdapters = @()
+    try {
+        $vmFinalState = [string](Get-VM -Name $VmName -ErrorAction Stop).State
+        if (-not [string]::Equals($vmFinalState, 'Off', [StringComparison]::OrdinalIgnoreCase)) {
+            $errors.Add("Interrupted-request cleanup left VM '$VmName' in state '$vmFinalState'.")
+        }
+    }
+    catch {
+        $errors.Add("Interrupted-request cleanup could not verify VM state: $($_.Exception.Message)")
+    }
+    try {
+        $finalConnectedAdapters = @(Get-VMNetworkAdapter -VMName $VmName -ErrorAction Stop | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.SwitchName) })
+        $finalNetworkInventorySucceeded = $true
+        if ($finalConnectedAdapters.Count -ne 0) {
+            $errors.Add("Interrupted-request cleanup left $($finalConnectedAdapters.Count) connected VM network adapter(s).")
+        }
+    }
+    catch {
+        $errors.Add("Interrupted-request cleanup could not verify final network inventory: $($_.Exception.Message)")
+    }
+
+    [pscustomobject][ordered]@{
+        Attempted = $true
+        Success = $errors.Count -eq 0
+        StartedUtc = $cleanupStartedUtc.ToString('o')
+        CompletedUtc = [DateTime]::UtcNow.ToString('o')
+        RequestId = $RequestId
+        VmName = $VmName
+        VmFinalState = $vmFinalState
+        HostInputRecovery = @($hostInputRecovery)
+        RequestNetworkRecovery = @($requestNetworkRecovery)
+        FinalNetworkInventorySucceeded = [bool]$finalNetworkInventorySucceeded
+        FinalConnectedAdapterCount = @($finalConnectedAdapters).Count
+        Errors = $errors.ToArray()
+    }
+}
+
+function Publish-InterruptedRequestTerminalResult {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [string] $ResultRoot,
+        [Parameter(Mandatory = $true)] [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$')] [string] $RequestId,
+        [AllowNull()] $Request,
+        [AllowNull()] $RequestState,
+        [Parameter(Mandatory = $true)] [string] $FailureKind,
+        [Parameter(Mandatory = $true)] [string] $FailureStage,
+        [Parameter(Mandatory = $true)] [string] $Message,
+        [Parameter(Mandatory = $true)] [AllowEmptyString()] [string] $VmName,
+        [AllowNull()] [Nullable[int]] $WorkerId,
+        [Parameter(Mandatory = $true)] $Cleanup,
+        [bool] $PoolWorkerRecyclePending = $false
+    )
+
+    return Invoke-WithTerminalResultPublicationMutex -RequestId $RequestId -ScopeRoot $ResultRoot -Operation {
+    New-Item -ItemType Directory -Force -Path $ResultRoot | Out-Null
+    $brokerResultPath = Join-Path $ResultRoot 'broker-result.json'
+    if (Test-Path -LiteralPath $brokerResultPath -PathType Leaf) {
+        return Read-BrokerJsonWithRetry -Path $brokerResultPath
+    }
+
+    $completedUtc = [DateTime]::UtcNow
+    $createdUtc = $null
+    $createdUtcText = if ($Request -and -not [string]::IsNullOrWhiteSpace([string]$Request.CreatedUtc)) { [string]$Request.CreatedUtc } else { $null }
+    try { if ($createdUtcText) { $createdUtc = [DateTime]::Parse($createdUtcText).ToUniversalTime() } } catch { $createdUtc = $null }
+    $claimedUtc = $null
+    $claimedUtcText = if ($RequestState -and -not [string]::IsNullOrWhiteSpace([string]$RequestState.ClaimedUtc)) { [string]$RequestState.ClaimedUtc } else { $null }
+    try { if ($claimedUtcText) { $claimedUtc = [DateTime]::Parse($claimedUtcText).ToUniversalTime() } } catch { $claimedUtc = $null }
+    if (-not $claimedUtc) { $claimedUtc = if ($createdUtc) { $createdUtc } else { $completedUtc } }
+
+    $expectGuestPowerOff = Test-ExactExpectedGuestPowerOffRequest -Request $Request
+    $submissionStartedUtc = if ($RequestState -and -not [string]::IsNullOrWhiteSpace([string]$RequestState.ExpectedGuestPowerOffSubmissionStartedUtc)) { [string]$RequestState.ExpectedGuestPowerOffSubmissionStartedUtc } else { $null }
+    $guestJobMayHaveLaunchedProperty = if ($RequestState) { $RequestState.PSObject.Properties['GuestJobMayHaveLaunched'] } else { $null }
+    $guestJobMayHaveLaunched = $guestJobMayHaveLaunchedProperty -and $guestJobMayHaveLaunchedProperty.Value -is [bool] -and [bool]$guestJobMayHaveLaunchedProperty.Value
+    $applicationRunningObservedUtc = if ($RequestState -and -not [string]::IsNullOrWhiteSpace([string]$RequestState.GuestApplicationEraRunningObservedUtc)) { [string]$RequestState.GuestApplicationEraRunningObservedUtc } else { $null }
+    $powerOffObservedUtc = if ($RequestState -and -not [string]::IsNullOrWhiteSpace([string]$RequestState.GuestPowerOffObservedUtc)) { [string]$RequestState.GuestPowerOffObservedUtc } else { $null }
+    $powerOffBeforeCleanupProperty = if ($RequestState) { $RequestState.PSObject.Properties['GuestPowerOffBeforeCleanup'] } else { $null }
+    $powerOffBeforeCleanup = $powerOffBeforeCleanupProperty -and $powerOffBeforeCleanupProperty.Value -is [bool] -and [bool]$powerOffBeforeCleanupProperty.Value
+    $powerOffRecoveryDeadlineUtc = if ($RequestState -and -not [string]::IsNullOrWhiteSpace([string]$RequestState.PowerOffRecoveryDeadlineUtc)) { [string]$RequestState.PowerOffRecoveryDeadlineUtc } else { $null }
+    $requestStatePublicationError = $null
+    try {
+        $stateParameters = @{
+            ResultRoot = $ResultRoot
+            RequestId = $RequestId
+            Status = 'Failed'
+            Message = $Message
+            CreatedUtc = $createdUtc
+            ClaimedUtc = $claimedUtc
+            WorkerId = $WorkerId
+        }
+        if ($expectGuestPowerOff) {
+            $stateParameters['ExpectGuestPowerOff'] = [Nullable[bool]]$true
+            # No-replay evidence is monotonic. A stale/unreadable caller must
+            # never erase a newer durable marker that Write-RequestState can
+            # now read while terminal publication is in progress.
+            if (-not [string]::IsNullOrWhiteSpace($submissionStartedUtc)) { $stateParameters['ExpectedGuestPowerOffSubmissionStartedUtc'] = $submissionStartedUtc }
+            if ($guestJobMayHaveLaunchedProperty -and $guestJobMayHaveLaunchedProperty.Value -is [bool] -and [bool]$guestJobMayHaveLaunchedProperty.Value) { $stateParameters['GuestJobMayHaveLaunched'] = [Nullable[bool]]$true }
+            if (-not [string]::IsNullOrWhiteSpace($applicationRunningObservedUtc)) { $stateParameters['GuestApplicationEraRunningObservedUtc'] = $applicationRunningObservedUtc }
+            if (-not [string]::IsNullOrWhiteSpace($powerOffObservedUtc)) { $stateParameters['GuestPowerOffObservedUtc'] = $powerOffObservedUtc }
+            if ($powerOffBeforeCleanupProperty -and $powerOffBeforeCleanupProperty.Value -is [bool] -and [bool]$powerOffBeforeCleanupProperty.Value) { $stateParameters['GuestPowerOffBeforeCleanup'] = [Nullable[bool]]$true }
+            if (-not [string]::IsNullOrWhiteSpace($powerOffRecoveryDeadlineUtc)) { $stateParameters['PowerOffRecoveryDeadlineUtc'] = $powerOffRecoveryDeadlineUtc }
+            $stateParameters['BrokerCleanupStartedUtc'] = [string]$Cleanup.StartedUtc
+        }
+        Write-RequestState @stateParameters
+    }
+    catch {
+        $requestStatePublicationError = $_.Exception.Message
+    }
+
+    $result = [ordered]@{
+        RequestId = $RequestId
+        Success = $false
+        HarnessSucceeded = $false
+        TestEvaluated = $false
+        TestPassed = $null
+        OverallSucceeded = $false
+        FailureKind = $FailureKind
+        CleanupFailure = -not [bool]$Cleanup.Success
+        Cleanup = $Cleanup
+        Error = $Message
+        FailureStage = $FailureStage
+        RequestStatePublicationError = $requestStatePublicationError
+        CreatedUtc = $createdUtcText
+        ClaimedUtc = $claimedUtc.ToString('o')
+        ExecutionDeadlineUtc = if ($RequestState) { [string]$RequestState.ExecutionDeadlineUtc } else { $null }
+        Cancelled = $false
+        QueueTimedOut = $false
+        ExecutionTimedOut = $false
+        CompletedUtc = $completedUtc.ToString('o')
+        VmName = if ([string]::IsNullOrWhiteSpace($VmName)) { $null } else { $VmName }
+        VmFinalState = [string]$Cleanup.VmFinalState
+        PoolWorkerId = if ($null -ne $WorkerId) { [int]$WorkerId } else { $null }
+        PoolWorkerRecyclePending = [bool]$PoolWorkerRecyclePending
+    }
+    if ($expectGuestPowerOff) {
+        $result['ExpectGuestPowerOff'] = $true
+        $result['GuestPowerOffRecoveryTimeoutSeconds'] = if ($null -ne $Request.GuestPowerOffRecoveryTimeoutSeconds) { [int]$Request.GuestPowerOffRecoveryTimeoutSeconds } else { $null }
+        $result['ExpectedGuestPowerOffSubmissionStartedUtc'] = $submissionStartedUtc
+        $result['GuestJobMayHaveLaunched'] = if ($guestJobMayHaveLaunchedProperty) { [bool]$guestJobMayHaveLaunched } else { $null }
+        $result['GuestApplicationEraRunningObservedUtc'] = $applicationRunningObservedUtc
+        $result['GuestPowerOffObservedUtc'] = $powerOffObservedUtc
+        $result['GuestPowerOffBeforeCleanup'] = if ($powerOffBeforeCleanupProperty) { [bool]$powerOffBeforeCleanup } else { $null }
+        $result['BrokerCleanupStartedUtc'] = [string]$Cleanup.StartedUtc
+        $result['PowerOffRecoveryDeadlineUtc'] = $powerOffRecoveryDeadlineUtc
+        $result['GuestPowerOffEvidenceRecoveryMode'] = $null
+        $result['GuestPowerOffEvidenceRecoveryBootedUtc'] = $null
+        $result['GuestPowerOffEvidenceRecoveryGuestBootTimeUtc'] = $null
+        $result['GuestPowerOffEvidenceRecoveryCompletedUtc'] = $null
+        $result['GuestPowerOffEvidenceRecoveryTimedOut'] = $false
+        $result['ApplicationRelaunchedByHarnessAfterGuestPowerOff'] = $null
+        $result['ExpectedGuestPowerOffContractSatisfied'] = $false
+    }
+    if (Write-TerminalJsonAtomic -Path $brokerResultPath -Value $result) {
+        return [pscustomobject]$result
+    }
+    Read-BrokerJsonWithRetry -Path $brokerResultPath
+    }
+}
+
+function Test-GuestSessionBootIdentity {
+    param(
+        [AllowNull()] $GuestState,
+        [AllowNull()] $CurrentGuestBootTimeUtc,
+        [bool] $Required = $false
+    )
+
+    if (-not $Required) { return $true }
+    if (-not $GuestState -or [string]::IsNullOrWhiteSpace([string]$CurrentGuestBootTimeUtc)) { return $false }
+    $stateBootProperty = @($GuestState.PSObject.Properties | Where-Object { $_.Name -ceq 'GuestBootTimeUtc' }) | Select-Object -First 1
+    if (-not $stateBootProperty -or [string]::IsNullOrWhiteSpace([string]$stateBootProperty.Value)) { return $false }
+    try {
+        $stateBootUtc = [DateTimeOffset]::Parse([string]$stateBootProperty.Value, [Globalization.CultureInfo]::InvariantCulture).UtcDateTime
+        $currentBootUtc = [DateTimeOffset]::Parse([string]$CurrentGuestBootTimeUtc, [Globalization.CultureInfo]::InvariantCulture).UtcDateTime
+        $stateBootUtc -eq $currentBootUtc
+    }
+    catch {
+        $false
+    }
+}
+
 function Wait-GuestSession {
     param(
         [Parameter(Mandatory = $true)] [string] $VmName,
         [Parameter(Mandatory = $true)] [Management.Automation.PSCredential] $Credential,
         [Parameter(Mandatory = $true)] [DateTime] $NotBeforeUtc,
         [Parameter(Mandatory = $true)] [string] $RequestId,
-        [Parameter(Mandatory = $true)] [DateTime] $ExecutionDeadlineUtc
+        [Parameter(Mandatory = $true)] [DateTime] $ExecutionDeadlineUtc,
+        [switch] $RequireCurrentGuestBootTime
     )
 
     # Credential is retained in the signature so callers cannot accidentally
@@ -699,7 +1586,17 @@ function Wait-GuestSession {
                 $guestState = $probeResult.State
                 if ($probeResult.Success -and $guestState -and $guestState.Ready -and $guestState.UserInteractive) {
                     $heartbeat = [DateTime]::Parse([string]$guestState.HeartbeatUtc).ToUniversalTime()
-                    if ($heartbeat -ge $NotBeforeUtc.AddSeconds(-5)) {
+                    $guestBootIsFresh = Test-GuestSessionBootIdentity -GuestState $guestState -CurrentGuestBootTimeUtc $probeResult.CurrentGuestBootTimeUtc -Required ([bool]$RequireCurrentGuestBootTime)
+                    $heartbeatIsFresh = if ($RequireCurrentGuestBootTime) {
+                        try {
+                            $currentGuestUtc = [DateTimeOffset]::Parse([string]$probeResult.CurrentGuestUtc, [Globalization.CultureInfo]::InvariantCulture).UtcDateTime
+                            $heartbeatAgeSeconds = ($currentGuestUtc - $heartbeat).TotalSeconds
+                            $heartbeatAgeSeconds -ge -5 -and $heartbeatAgeSeconds -le 10
+                        }
+                        catch { $false }
+                    }
+                    else { $heartbeat -ge $NotBeforeUtc.AddSeconds(-5) }
+                    if ($heartbeatIsFresh -and $guestBootIsFresh) {
                         return $guestState
                     }
                 }
@@ -726,6 +1623,606 @@ function Wait-GuestSession {
     }
 }
 
+function Get-ExpectedPowerOffRecoveryPresence {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [string] $VmName,
+        [Parameter(Mandatory = $true)] [string] $RequestId,
+        [Parameter(Mandatory = $true)] [DateTime] $ExecutionDeadlineUtc,
+        [Parameter(Mandatory = $true)] [string] $InboxFile,
+        [Parameter(Mandatory = $true)] [string] $ProcessingFile,
+        [Parameter(Mandatory = $true)] [string] $CompletedFile,
+        [Parameter(Mandatory = $true)] [string] $Outbox,
+        [ValidateRange(5, 60)] [int] $ObservationTimeoutSeconds = 15
+    )
+
+    Assert-RequestActive -RequestId $RequestId -ExecutionDeadlineUtc $ExecutionDeadlineUtc
+    $probeId = $RequestId + '-recovery-' + [Guid]::NewGuid().ToString('N')
+    $probeOutputPath = Join-Path $probePath ($probeId + '.json')
+    $probe = $null
+    $candidateProbeDeadlineUtc = [DateTime]::UtcNow.AddSeconds($ObservationTimeoutSeconds)
+    $probeDeadlineUtc = if ($candidateProbeDeadlineUtc -lt $ExecutionDeadlineUtc) { $candidateProbeDeadlineUtc } else { $ExecutionDeadlineUtc }
+    try {
+        $probe = Start-GuestSessionProbe -VmName $VmName -OutputPath $probeOutputPath -InboxFile $InboxFile -ProcessingFile $ProcessingFile -CompletedFile $CompletedFile -Outbox $Outbox
+        while ($true) {
+            Assert-RequestActive -RequestId $RequestId -ExecutionDeadlineUtc $ExecutionDeadlineUtc
+            if ([DateTime]::UtcNow -ge $probeDeadlineUtc) {
+                throw [InvalidOperationException]::new("The bounded expected-power-off recovery probe exceeded $ObservationTimeoutSeconds seconds.")
+            }
+            $probe.Process.Refresh()
+            if ($probe.Process.HasExited) { break }
+            Start-Sleep -Milliseconds 200
+        }
+        if (-not (Test-Path -LiteralPath $probeOutputPath -PathType Leaf)) {
+            throw 'The bounded expected-power-off recovery probe exited without a result.'
+        }
+        $probeResult = Read-BrokerJsonWithRetry -Path $probeOutputPath
+        if (-not [bool]$probeResult.Success) {
+            throw "Expected-power-off recovery probe failed: $([string]$probeResult.Error)"
+        }
+        if (-not (Test-GuestSessionBootIdentity -GuestState $probeResult.State -CurrentGuestBootTimeUtc $probeResult.CurrentGuestBootTimeUtc -Required $true)) {
+            throw 'Expected-power-off recovery probe did not belong to the current guest OS boot.'
+        }
+        $heartbeatUtc = [DateTimeOffset]::Parse([string]$probeResult.State.HeartbeatUtc, [Globalization.CultureInfo]::InvariantCulture).UtcDateTime
+        $currentGuestUtc = [DateTimeOffset]::Parse([string]$probeResult.CurrentGuestUtc, [Globalization.CultureInfo]::InvariantCulture).UtcDateTime
+        $heartbeatAgeSeconds = ($currentGuestUtc - $heartbeatUtc).TotalSeconds
+        if ($heartbeatAgeSeconds -lt -5 -or $heartbeatAgeSeconds -gt 10) {
+            throw 'Expected-power-off recovery probe returned a stale guest-agent heartbeat.'
+        }
+        if (-not $probeResult.Presence) {
+            throw 'Expected-power-off recovery probe returned no job-presence evidence.'
+        }
+        $probeResult.Presence
+    }
+    finally {
+        if ($probe) { Stop-GuestProbeProcess -Process $probe.Process -LeasePath $probe.LeasePath }
+        Remove-Item -LiteralPath $probeOutputPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath ($probeOutputPath + '.tmp') -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-ExpectedPowerOffJobObservation {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [string] $VmName,
+        [Parameter(Mandatory = $true)] [string] $RequestId,
+        [Parameter(Mandatory = $true)] [DateTime] $ExecutionDeadlineUtc,
+        [Parameter(Mandatory = $true)] [string] $InboxFile,
+        [Parameter(Mandatory = $true)] [string] $ProcessingFile,
+        [Parameter(Mandatory = $true)] [string] $CompletedFile,
+        [Parameter(Mandatory = $true)] [string] $Outbox,
+        [ValidateRange(5, 60)] [int] $ObservationTimeoutSeconds = 15
+    )
+
+    Assert-RequestActive -RequestId $RequestId -ExecutionDeadlineUtc $ExecutionDeadlineUtc
+    $probeId = $RequestId + '-job-observation-' + [Guid]::NewGuid().ToString('N')
+    $probeOutputPath = Join-Path $probePath ($probeId + '.json')
+    $probe = $null
+    $candidateProbeDeadlineUtc = [DateTime]::UtcNow.AddSeconds($ObservationTimeoutSeconds)
+    $probeDeadlineUtc = if ($candidateProbeDeadlineUtc -lt $ExecutionDeadlineUtc) { $candidateProbeDeadlineUtc } else { $ExecutionDeadlineUtc }
+    try {
+        $probe = Start-GuestSessionProbe -VmName $VmName -OutputPath $probeOutputPath -InboxFile $InboxFile -ProcessingFile $ProcessingFile -CompletedFile $CompletedFile -Outbox $Outbox
+        while ($true) {
+            Assert-RequestActive -RequestId $RequestId -ExecutionDeadlineUtc $ExecutionDeadlineUtc
+            if ([DateTime]::UtcNow -ge $probeDeadlineUtc) {
+                throw [InvalidOperationException]::new("The bounded expected-power-off job observation exceeded $ObservationTimeoutSeconds seconds.")
+            }
+            $probe.Process.Refresh()
+            if ($probe.Process.HasExited) { break }
+            Start-Sleep -Milliseconds 200
+        }
+        if (-not (Test-Path -LiteralPath $probeOutputPath -PathType Leaf)) {
+            throw 'The bounded expected-power-off job observation exited without a result.'
+        }
+        $probeResult = Read-BrokerJsonWithRetry -Path $probeOutputPath
+        if (-not [bool]$probeResult.Success) {
+            throw "Expected-power-off job observation failed: $([string]$probeResult.Error)"
+        }
+        if (-not (Test-GuestSessionBootIdentity -GuestState $probeResult.State -CurrentGuestBootTimeUtc $probeResult.CurrentGuestBootTimeUtc -Required $true)) {
+            throw 'Expected-power-off job observation did not belong to the current guest OS boot.'
+        }
+        $heartbeatUtc = [DateTimeOffset]::Parse([string]$probeResult.State.HeartbeatUtc, [Globalization.CultureInfo]::InvariantCulture).UtcDateTime
+        $currentGuestUtc = [DateTimeOffset]::Parse([string]$probeResult.CurrentGuestUtc, [Globalization.CultureInfo]::InvariantCulture).UtcDateTime
+        $heartbeatAgeSeconds = ($currentGuestUtc - $heartbeatUtc).TotalSeconds
+        if ($heartbeatAgeSeconds -lt -5 -or $heartbeatAgeSeconds -gt 10) {
+            throw 'Expected-power-off job observation returned a stale guest-agent heartbeat.'
+        }
+        if (-not $probeResult.Presence) {
+            throw 'Expected-power-off job observation returned no lifecycle presence evidence.'
+        }
+        [pscustomobject][ordered]@{
+            Result = [bool]$probeResult.Presence.Result
+            AgentError = [bool]$probeResult.Presence.AgentError
+            Inbox = [bool]$probeResult.Presence.Inbox
+            Processing = [bool]$probeResult.Presence.Processing
+            Completed = [bool]$probeResult.Presence.Completed
+            AgentAlive = [bool]$probeResult.AgentAlive
+            AgentHeartbeatAgeSeconds = $probeResult.AgentHeartbeatAgeSeconds
+            AgentState = $probeResult.State
+            ApplicationLease = $probeResult.ApplicationLease
+        }
+    }
+    finally {
+        if ($probe) { Stop-GuestProbeProcess -Process $probe.Process -LeasePath $probe.LeasePath }
+        Remove-Item -LiteralPath $probeOutputPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath ($probeOutputPath + '.tmp') -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Start-ExpectedPowerOffJobSubmission {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [string] $VmName,
+        [Parameter(Mandatory = $true)] [string] $RequestId,
+        [Parameter(Mandatory = $true)] [string] $JobPath,
+        [Parameter(Mandatory = $true)] [string] $GuestTransferRoot,
+        [Parameter(Mandatory = $true)] [string] $GuestTransferFile,
+        [Parameter(Mandatory = $true)] [string] $GuestInboxFile,
+        [Parameter(Mandatory = $true)] [string] $GuestProcessingFile,
+        [Parameter(Mandatory = $true)] [string] $GuestCompletedFile,
+        [Parameter(Mandatory = $true)] [string] $GuestOutbox,
+        [Parameter(Mandatory = $true)] [string] $OutputPath
+    )
+
+    $childTemplate = @'
+$ErrorActionPreference = 'Stop'
+$outputPath = __OUTPUT_PATH__
+$exitCode = 0
+$session = $null
+$deliveryAttempted = $false
+$deliveryMadeVisible = $false
+try {
+    $credentialData = Get-Content -Raw -LiteralPath __CREDENTIAL_PATH__ | ConvertFrom-Json
+    $securePassword = ConvertTo-SecureString ([string]$credentialData.Password) -AsPlainText -Force
+    $credential = New-Object Management.Automation.PSCredential([string]$credentialData.UserName, $securePassword)
+    $sessionOption = New-PSSessionOption -OpenTimeout 15000 -OperationTimeout 15000 -CancelTimeout 1000
+    $session = New-PSSession -VMName __VM_NAME__ -Credential $credential -SessionOption $sessionOption -ErrorAction Stop
+    $presenceScript = {
+        param($InboxFile, $ProcessingFile, $CompletedFile, $Outbox)
+        [ordered]@{
+            Inbox = Test-Path -LiteralPath $InboxFile -PathType Leaf
+            Processing = Test-Path -LiteralPath $ProcessingFile -PathType Leaf
+            Completed = Test-Path -LiteralPath $CompletedFile -PathType Leaf
+            Result = Test-Path -LiteralPath (Join-Path $Outbox 'result.json') -PathType Leaf
+            AgentError = Test-Path -LiteralPath (Join-Path $Outbox 'agent-error.json') -PathType Leaf
+        }
+    }
+    $presence = Invoke-Command -Session $session -ScriptBlock $presenceScript -ArgumentList __GUEST_INBOX_FILE__, __GUEST_PROCESSING_FILE__, __GUEST_COMPLETED_FILE__, __GUEST_OUTBOX__ -ErrorAction Stop | Select-Object -Last 1
+    if (-not ($presence.Inbox -or $presence.Processing -or $presence.Completed -or $presence.Result -or $presence.AgentError)) {
+        Invoke-Command -Session $session -ErrorAction Stop -ScriptBlock {
+            param($TransferRoot, $TransferFile)
+            New-Item -ItemType Directory -Force -Path $TransferRoot | Out-Null
+            Remove-Item -LiteralPath $TransferFile -Force -ErrorAction SilentlyContinue
+        } -ArgumentList __GUEST_TRANSFER_ROOT__, __GUEST_TRANSFER_FILE__
+        $deliveryAttempted = $true
+        Copy-Item -LiteralPath __JOB_PATH__ -Destination __GUEST_TRANSFER_ROOT__ -ToSession $session -Force -ErrorAction Stop
+        Invoke-Command -Session $session -ErrorAction Stop -ScriptBlock {
+            param($TransferFile, $InboxFile)
+            Move-Item -LiteralPath $TransferFile -Destination $InboxFile -Force -ErrorAction Stop
+        } -ArgumentList __GUEST_TRANSFER_FILE__, __GUEST_INBOX_FILE__
+        $deliveryMadeVisible = $true
+    }
+    $presence = Invoke-Command -Session $session -ScriptBlock $presenceScript -ArgumentList __GUEST_INBOX_FILE__, __GUEST_PROCESSING_FILE__, __GUEST_COMPLETED_FILE__, __GUEST_OUTBOX__ -ErrorAction Stop | Select-Object -Last 1
+    if (-not ($presence.Inbox -or $presence.Processing -or $presence.Completed -or $presence.Result -or $presence.AgentError)) {
+        throw 'Expected-power-off submission returned without durable guest lifecycle presence.'
+    }
+    $result = [ordered]@{
+        Success = $true
+        Presence = $presence
+        DeliveryAttempted = [bool]$deliveryAttempted
+        DeliveryMadeVisible = [bool]$deliveryMadeVisible
+        Error = $null
+        CompletedUtc = [DateTime]::UtcNow.ToString('o')
+    }
+}
+catch {
+    $exitCode = 1
+    $result = [ordered]@{
+        Success = $false
+        Presence = $null
+        DeliveryAttempted = [bool]$deliveryAttempted
+        DeliveryMadeVisible = [bool]$deliveryMadeVisible
+        Error = $_.Exception.Message
+        ErrorType = $_.Exception.GetType().FullName
+        ErrorFullyQualifiedId = $_.FullyQualifiedErrorId
+        CompletedUtc = [DateTime]::UtcNow.ToString('o')
+    }
+}
+finally {
+    if ($session) { Remove-PSSession -Session $session -ErrorAction SilentlyContinue }
+}
+$temporaryPath = $outputPath + '.tmp'
+$result | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $temporaryPath -Encoding UTF8
+Move-Item -LiteralPath $temporaryPath -Destination $outputPath -Force
+exit $exitCode
+'@
+    $childCommand = $childTemplate.
+        Replace('__OUTPUT_PATH__', (ConvertTo-PowerShellSingleQuotedLiteral -Value $OutputPath)).
+        Replace('__CREDENTIAL_PATH__', (ConvertTo-PowerShellSingleQuotedLiteral -Value $credentialPath)).
+        Replace('__VM_NAME__', (ConvertTo-PowerShellSingleQuotedLiteral -Value $VmName)).
+        Replace('__JOB_PATH__', (ConvertTo-PowerShellSingleQuotedLiteral -Value $JobPath)).
+        Replace('__GUEST_TRANSFER_ROOT__', (ConvertTo-PowerShellSingleQuotedLiteral -Value $GuestTransferRoot)).
+        Replace('__GUEST_TRANSFER_FILE__', (ConvertTo-PowerShellSingleQuotedLiteral -Value $GuestTransferFile)).
+        Replace('__GUEST_INBOX_FILE__', (ConvertTo-PowerShellSingleQuotedLiteral -Value $GuestInboxFile)).
+        Replace('__GUEST_PROCESSING_FILE__', (ConvertTo-PowerShellSingleQuotedLiteral -Value $GuestProcessingFile)).
+        Replace('__GUEST_COMPLETED_FILE__', (ConvertTo-PowerShellSingleQuotedLiteral -Value $GuestCompletedFile)).
+        Replace('__GUEST_OUTBOX__', (ConvertTo-PowerShellSingleQuotedLiteral -Value $GuestOutbox))
+    $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childCommand))
+    $process = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList @(
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encodedCommand
+    ) -WindowStyle Hidden -PassThru
+    $leasePath = [IO.Path]::ChangeExtension($OutputPath, 'process.json')
+    Write-JsonAtomic -Path $leasePath -Value ([ordered]@{
+        ProcessId = $process.Id
+        ProcessStartUtc = $process.StartTime.ToUniversalTime().ToString('o')
+        CreatedUtc = [DateTime]::UtcNow.ToString('o')
+        RequestId = $RequestId
+        Purpose = 'ExpectedGuestPowerOffSubmission'
+    })
+    [pscustomobject]@{ Process = $process; LeasePath = $leasePath }
+}
+
+function Invoke-ExpectedPowerOffJobSubmissionBounded {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [string] $VmName,
+        [Parameter(Mandatory = $true)] [string] $RequestId,
+        [Parameter(Mandatory = $true)] [DateTime] $ExecutionDeadlineUtc,
+        [Parameter(Mandatory = $true)] [string] $JobPath,
+        [Parameter(Mandatory = $true)] [string] $GuestTransferRoot,
+        [Parameter(Mandatory = $true)] [string] $GuestTransferFile,
+        [Parameter(Mandatory = $true)] [string] $GuestInboxFile,
+        [Parameter(Mandatory = $true)] [string] $GuestProcessingFile,
+        [Parameter(Mandatory = $true)] [string] $GuestCompletedFile,
+        [Parameter(Mandatory = $true)] [string] $GuestOutbox,
+        [ValidateRange(5, 60)] [int] $AttemptTimeoutSeconds = 30
+    )
+
+    Assert-RequestActive -RequestId $RequestId -ExecutionDeadlineUtc $ExecutionDeadlineUtc
+    $operationId = $RequestId + '-submission-' + [Guid]::NewGuid().ToString('N')
+    $outputPath = Join-Path $probePath ($operationId + '.json')
+    $operation = $null
+    $candidateAttemptDeadlineUtc = [DateTime]::UtcNow.AddSeconds($AttemptTimeoutSeconds)
+    $attemptDeadlineUtc = if ($candidateAttemptDeadlineUtc -lt $ExecutionDeadlineUtc) { $candidateAttemptDeadlineUtc } else { $ExecutionDeadlineUtc }
+    try {
+        $operation = Start-ExpectedPowerOffJobSubmission -VmName $VmName -RequestId $RequestId -JobPath $JobPath -GuestTransferRoot $GuestTransferRoot -GuestTransferFile $GuestTransferFile -GuestInboxFile $GuestInboxFile -GuestProcessingFile $GuestProcessingFile -GuestCompletedFile $GuestCompletedFile -GuestOutbox $GuestOutbox -OutputPath $outputPath
+        while ($true) {
+            Assert-RequestActive -RequestId $RequestId -ExecutionDeadlineUtc $ExecutionDeadlineUtc
+            if ([DateTime]::UtcNow -ge $attemptDeadlineUtc) {
+                throw [InvalidOperationException]::new("The bounded expected-power-off submission exceeded $AttemptTimeoutSeconds seconds; automatic replay remains prohibited.")
+            }
+            $operation.Process.Refresh()
+            if ($operation.Process.HasExited) { break }
+            Start-Sleep -Milliseconds 200
+        }
+        if (-not (Test-Path -LiteralPath $outputPath -PathType Leaf)) {
+            throw 'The bounded expected-power-off submission exited without a result; automatic replay remains prohibited.'
+        }
+        $operationResult = Read-BrokerJsonWithRetry -Path $outputPath
+        if (-not [bool]$operationResult.Success) {
+            throw "Expected-power-off submission failed without replay: $([string]$operationResult.Error)"
+        }
+        Assert-RequestActive -RequestId $RequestId -ExecutionDeadlineUtc $ExecutionDeadlineUtc
+        $operationResult
+    }
+    finally {
+        if ($operation) { Stop-GuestProbeProcess -Process $operation.Process -LeasePath $operation.LeasePath }
+        Remove-Item -LiteralPath $outputPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath ($outputPath + '.tmp') -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Assert-ExpectedPowerOffEvidenceStageMatchesManifest {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [string] $HostStageRoot,
+        [Parameter(Mandatory = $true)] $Manifest,
+        [Parameter(Mandatory = $true)] [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$')] [string] $RequestId,
+        [Parameter(Mandatory = $true)] [ValidatePattern('^[a-f0-9]{32}$')] [string] $SnapshotId
+    )
+
+    $integralTypes = @([byte], [sbyte], [int16], [uint16], [int32], [uint32], [int64], [uint64])
+    $getExactProperty = {
+        param($InputObject, [string] $Name)
+        if (-not $InputObject) { return $null }
+        @($InputObject.PSObject.Properties | Where-Object { $_.Name -ceq $Name }) | Select-Object -First 1
+    }
+    $assertManifestIdentity = {
+        param($Candidate, [string] $SourceDescription)
+        $formatProperty = & $getExactProperty $Candidate 'FormatVersion'
+        $requestProperty = & $getExactProperty $Candidate 'RequestId'
+        $snapshotProperty = & $getExactProperty $Candidate 'SnapshotId'
+        $stageProperty = & $getExactProperty $Candidate 'StageRoot'
+        if (-not $formatProperty -or $null -eq $formatProperty.Value -or $formatProperty.Value.GetType() -notin $integralTypes -or [int64]$formatProperty.Value -ne 2) {
+            throw "$SourceDescription did not attest exact evidence manifest FormatVersion 2."
+        }
+        if (-not $requestProperty -or $requestProperty.Value -isnot [string] -or -not [string]::Equals([string]$requestProperty.Value, $RequestId, [StringComparison]::Ordinal)) {
+            throw "$SourceDescription was not bound to the exact request id."
+        }
+        if (-not $snapshotProperty -or $snapshotProperty.Value -isnot [string] -or -not [string]::Equals([string]$snapshotProperty.Value, $SnapshotId, [StringComparison]::Ordinal)) {
+            throw "$SourceDescription was not bound to the exact snapshot id."
+        }
+        $expectedGuestStageRoot = [IO.Path]::GetFullPath((Join-Path 'C:\CodexGuest\EvidenceStage' $SnapshotId)).TrimEnd('\')
+        if (-not $stageProperty -or $stageProperty.Value -isnot [string] -or
+            -not [string]::Equals([IO.Path]::GetFullPath([string]$stageProperty.Value).TrimEnd('\'), $expectedGuestStageRoot, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "$SourceDescription did not identify the exact private guest evidence stage."
+        }
+    }
+
+    $resolvedStageRoot = [IO.Path]::GetFullPath($HostStageRoot).TrimEnd('\')
+    if (-not (Test-Path -LiteralPath $resolvedStageRoot -PathType Container)) {
+        throw "The copied host evidence stage is missing: $resolvedStageRoot"
+    }
+    $stageRootItem = Get-Item -LiteralPath $resolvedStageRoot -Force -ErrorAction Stop
+    if (($stageRootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'The copied host evidence stage must not be a reparse point.'
+    }
+    $stagePrefix = $resolvedStageRoot + '\'
+    $manifestPath = Join-Path $resolvedStageRoot 'evidence-copy-manifest.json'
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        throw 'The copied host evidence stage is missing evidence-copy-manifest.json.'
+    }
+
+    & $assertManifestIdentity $Manifest 'The returned guest evidence manifest'
+    try { $hostManifest = Get-Content -Raw -LiteralPath $manifestPath -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
+    catch { throw "The copied host evidence manifest is unreadable: $($_.Exception.Message)" }
+    & $assertManifestIdentity $hostManifest 'The copied host evidence manifest'
+    $returnedManifestJson = $Manifest | ConvertTo-Json -Depth 20 -Compress
+    $copiedManifestJson = $hostManifest | ConvertTo-Json -Depth 20 -Compress
+    if (-not [string]::Equals($returnedManifestJson, $copiedManifestJson, [StringComparison]::Ordinal)) {
+        throw 'The copied host evidence manifest does not match the manifest returned over the control channel.'
+    }
+
+    $copiedFilesProperty = & $getExactProperty $Manifest 'CopiedFiles'
+    $skippedFilesProperty = & $getExactProperty $Manifest 'SkippedFiles'
+    $enumeratedCountProperty = & $getExactProperty $Manifest 'EnumeratedFileCount'
+    if (-not $copiedFilesProperty -or -not $skippedFilesProperty -or -not $enumeratedCountProperty -or
+        $null -eq $enumeratedCountProperty.Value -or $enumeratedCountProperty.Value.GetType() -notin $integralTypes) {
+        throw 'The returned guest evidence manifest is missing exact file inventory fields.'
+    }
+    $copiedFiles = @($copiedFilesProperty.Value)
+    $skippedFiles = @($skippedFilesProperty.Value)
+    if ([int64]$enumeratedCountProperty.Value -ne ($copiedFiles.Count + $skippedFiles.Count)) {
+        throw 'The returned guest evidence manifest file count is inconsistent.'
+    }
+
+    $manifestPaths = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $expectedHostFiles = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $null = $expectedHostFiles.Add('evidence-copy-manifest.json')
+    $resolveRelativePath = {
+        param([string] $RelativePath)
+        if ([string]::IsNullOrWhiteSpace($RelativePath) -or [IO.Path]::IsPathRooted($RelativePath)) {
+            throw 'The evidence manifest contains an empty or rooted relative path.'
+        }
+        $normalizedRelativePath = $RelativePath.Replace('/', '\')
+        $segments = @($normalizedRelativePath.Split([char]92))
+        if ($segments.Count -eq 0 -or @($segments | Where-Object { [string]::IsNullOrWhiteSpace($_) -or $_ -in @('.', '..') }).Count -gt 0) {
+            throw "The evidence manifest contains an unsafe relative path: $RelativePath"
+        }
+        $resolvedPath = [IO.Path]::GetFullPath((Join-Path $resolvedStageRoot $normalizedRelativePath))
+        if (-not $resolvedPath.StartsWith($stagePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "The evidence manifest path escaped the private host stage: $RelativePath"
+        }
+        $canonicalRelativePath = $resolvedPath.Substring($stagePrefix.Length)
+        if (-not [string]::Equals($canonicalRelativePath, $normalizedRelativePath, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "The evidence manifest path is not canonical: $RelativePath"
+        }
+        [pscustomobject]@{ RelativePath = $canonicalRelativePath; FullPath = $resolvedPath }
+    }
+
+    foreach ($copiedFile in $copiedFiles) {
+        $relativeProperty = & $getExactProperty $copiedFile 'RelativePath'
+        $lengthProperty = & $getExactProperty $copiedFile 'Length'
+        $hashProperty = & $getExactProperty $copiedFile 'Sha256'
+        $sourceWriteProperty = & $getExactProperty $copiedFile 'SourceLastWriteUtc'
+        if (-not $relativeProperty -or $relativeProperty.Value -isnot [string] -or
+            -not $lengthProperty -or $null -eq $lengthProperty.Value -or $lengthProperty.Value.GetType() -notin $integralTypes -or [int64]$lengthProperty.Value -lt 0 -or
+            -not $hashProperty -or $hashProperty.Value -isnot [string] -or [string]$hashProperty.Value -notmatch '^[A-Fa-f0-9]{64}$' -or
+            -not $sourceWriteProperty -or $sourceWriteProperty.Value -isnot [string]) {
+            throw 'The evidence manifest contains an incomplete copied-file record.'
+        }
+        try { $null = [DateTimeOffset]::Parse([string]$sourceWriteProperty.Value, [Globalization.CultureInfo]::InvariantCulture) }
+        catch { throw 'The evidence manifest contains an invalid source last-write timestamp.' }
+        $resolvedEntry = & $resolveRelativePath ([string]$relativeProperty.Value)
+        if ([string]::Equals([string]$resolvedEntry.RelativePath, 'evidence-copy-manifest.json', [StringComparison]::OrdinalIgnoreCase) -or
+            -not $manifestPaths.Add([string]$resolvedEntry.RelativePath)) {
+            throw "The evidence manifest contains a duplicate or reserved copied-file path: $([string]$relativeProperty.Value)"
+        }
+        $null = $expectedHostFiles.Add([string]$resolvedEntry.RelativePath)
+        if (-not (Test-Path -LiteralPath $resolvedEntry.FullPath -PathType Leaf)) {
+            throw "A copied evidence file is missing from the private host stage: $([string]$resolvedEntry.RelativePath)"
+        }
+        $hostItem = Get-Item -LiteralPath $resolvedEntry.FullPath -Force -ErrorAction Stop
+        if (($hostItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            [int64]$hostItem.Length -ne [int64]$lengthProperty.Value -or
+            -not [string]::Equals((Get-FileHash -LiteralPath $resolvedEntry.FullPath -Algorithm SHA256 -ErrorAction Stop).Hash, [string]$hashProperty.Value, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "A copied evidence file failed host-side length/SHA-256 verification: $([string]$resolvedEntry.RelativePath)"
+        }
+    }
+
+    foreach ($skippedFile in $skippedFiles) {
+        $relativeProperty = & $getExactProperty $skippedFile 'RelativePath'
+        if (-not $relativeProperty -or $relativeProperty.Value -isnot [string]) {
+            throw 'The evidence manifest contains an incomplete skipped-file record.'
+        }
+        $resolvedEntry = & $resolveRelativePath ([string]$relativeProperty.Value)
+        if (-not $manifestPaths.Add([string]$resolvedEntry.RelativePath)) {
+            throw "The evidence manifest contains a duplicate skipped-file path: $([string]$relativeProperty.Value)"
+        }
+        if (Test-Path -LiteralPath $resolvedEntry.FullPath) {
+            throw "A file recorded as skipped was present in the copied host stage: $([string]$resolvedEntry.RelativePath)"
+        }
+    }
+
+    $expectedHostDirectories = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($manifestPathEntry in $manifestPaths) {
+        $parentRelativePath = Split-Path -Parent $manifestPathEntry
+        while (-not [string]::IsNullOrWhiteSpace($parentRelativePath)) {
+            $null = $expectedHostDirectories.Add($parentRelativePath)
+            $parentRelativePath = Split-Path -Parent $parentRelativePath
+        }
+    }
+
+    $actualHostDirectories = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $pendingDirectories = New-Object 'Collections.Generic.Stack[IO.DirectoryInfo]'
+    $pendingDirectories.Push([IO.DirectoryInfo]$stageRootItem)
+    $actualHostFileCount = 0
+    while ($pendingDirectories.Count -gt 0) {
+        $directory = $pendingDirectories.Pop()
+        foreach ($hostItem in @(Get-ChildItem -LiteralPath $directory.FullName -Force -ErrorAction Stop)) {
+            $hostRelativePath = $hostItem.FullName.Substring($stagePrefix.Length)
+            if ($hostItem.PSIsContainer) {
+                if (($hostItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                    -not $expectedHostDirectories.Contains($hostRelativePath) -or
+                    -not $actualHostDirectories.Add($hostRelativePath)) {
+                    throw "The copied host evidence stage contains an unmanifested or unsafe directory: $hostRelativePath"
+                }
+                $pendingDirectories.Push([IO.DirectoryInfo]$hostItem)
+            }
+            else {
+                $actualHostFileCount++
+                if (($hostItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or -not $expectedHostFiles.Contains($hostRelativePath)) {
+                    throw "The copied host evidence stage contains an unmanifested or unsafe file: $hostRelativePath"
+                }
+            }
+        }
+    }
+    if ($actualHostFileCount -ne $expectedHostFiles.Count -or $actualHostDirectories.Count -ne $expectedHostDirectories.Count) {
+        throw 'The copied host evidence stage file inventory does not match its manifest.'
+    }
+    $true
+}
+
+function Start-ExpectedPowerOffEvidenceTransfer {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [string] $VmName,
+        [Parameter(Mandatory = $true)] [string] $RequestId,
+        [Parameter(Mandatory = $true)] [ValidatePattern('^[a-f0-9]{32}$')] [string] $SnapshotId,
+        [Parameter(Mandatory = $true)] [string] $GuestOutbox,
+        [Parameter(Mandatory = $true)] [string] $HostResultRoot,
+        [Parameter(Mandatory = $true)] [string] $OutputPath
+    )
+
+    $childTemplate = @'
+$ErrorActionPreference = 'Stop'
+$outputPath = __OUTPUT_PATH__
+$exitCode = 0
+$session = $null
+try {
+    . __HOST_BROKER_PATH__ -BrokerRoot __BROKER_ROOT__ -LibraryOnly
+    $credential = Get-GuestCredential
+    $session = New-PSSession -VMName __VM_NAME__ -Credential $credential -ErrorAction Stop
+    $manifest = New-GuestEvidenceSnapshot -Session $session -GuestOutbox __GUEST_OUTBOX__ -RequestId __REQUEST_ID__ -SnapshotId __SNAPSHOT_ID__
+    Copy-Item -Path (([string]$manifest.StageRoot).TrimEnd('\') + '\*') -Destination __HOST_RESULT_ROOT__ -FromSession $session -Recurse -Force -ErrorAction Stop
+    Remove-GuestEvidenceSnapshot -Session $session -StageRoot ([string]$manifest.StageRoot)
+    $result = [ordered]@{
+        Success = $true
+        Manifest = $manifest
+        Error = $null
+        CompletedUtc = [DateTime]::UtcNow.ToString('o')
+    }
+}
+catch {
+    $exitCode = 1
+    $result = [ordered]@{
+        Success = $false
+        Manifest = $null
+        Error = $_.Exception.Message
+        ErrorType = $_.Exception.GetType().FullName
+        ErrorFullyQualifiedId = $_.FullyQualifiedErrorId
+        CompletedUtc = [DateTime]::UtcNow.ToString('o')
+    }
+}
+finally {
+    if ($session) { Remove-PSSession -Session $session -ErrorAction SilentlyContinue }
+}
+$temporaryPath = $outputPath + '.tmp'
+$result | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $temporaryPath -Encoding UTF8
+Move-Item -LiteralPath $temporaryPath -Destination $outputPath -Force
+exit $exitCode
+'@
+    $childCommand = $childTemplate.
+        Replace('__OUTPUT_PATH__', (ConvertTo-PowerShellSingleQuotedLiteral -Value $OutputPath)).
+        Replace('__HOST_BROKER_PATH__', (ConvertTo-PowerShellSingleQuotedLiteral -Value $PSCommandPath)).
+        Replace('__BROKER_ROOT__', (ConvertTo-PowerShellSingleQuotedLiteral -Value $BrokerRoot)).
+        Replace('__VM_NAME__', (ConvertTo-PowerShellSingleQuotedLiteral -Value $VmName)).
+        Replace('__GUEST_OUTBOX__', (ConvertTo-PowerShellSingleQuotedLiteral -Value $GuestOutbox)).
+        Replace('__REQUEST_ID__', (ConvertTo-PowerShellSingleQuotedLiteral -Value $RequestId)).
+        Replace('__SNAPSHOT_ID__', (ConvertTo-PowerShellSingleQuotedLiteral -Value $SnapshotId)).
+        Replace('__HOST_RESULT_ROOT__', (ConvertTo-PowerShellSingleQuotedLiteral -Value $HostResultRoot))
+    $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childCommand))
+    $process = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList @(
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encodedCommand
+    ) -WindowStyle Hidden -PassThru
+    $leasePath = [IO.Path]::ChangeExtension($OutputPath, 'process.json')
+    Write-JsonAtomic -Path $leasePath -Value ([ordered]@{
+        ProcessId = $process.Id
+        ProcessStartUtc = $process.StartTime.ToUniversalTime().ToString('o')
+        CreatedUtc = [DateTime]::UtcNow.ToString('o')
+        Purpose = 'ExpectedGuestPowerOffEvidenceTransfer'
+    })
+    [pscustomobject]@{ Process = $process; LeasePath = $leasePath }
+}
+
+function Invoke-ExpectedPowerOffEvidenceTransferBounded {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [string] $VmName,
+        [Parameter(Mandatory = $true)] [string] $RequestId,
+        [Parameter(Mandatory = $true)] [DateTime] $ExecutionDeadlineUtc,
+        [Parameter(Mandatory = $true)] [string] $GuestOutbox,
+        [Parameter(Mandatory = $true)] [string] $HostResultRoot,
+        [ValidateRange(5, 60)] [int] $AttemptTimeoutSeconds = 30
+    )
+
+    Assert-RequestActive -RequestId $RequestId -ExecutionDeadlineUtc $ExecutionDeadlineUtc
+    $operationId = $RequestId + '-evidence-' + [Guid]::NewGuid().ToString('N')
+    $snapshotId = [Guid]::NewGuid().ToString('N')
+    $outputPath = Join-Path $probePath ($operationId + '.json')
+    $hostStageRoot = Join-Path (Join-Path $probePath 'EvidenceTransfers') $operationId
+    New-Item -ItemType Directory -Force -Path $hostStageRoot | Out-Null
+    $operation = $null
+    $preserveHostStage = $false
+    $candidateAttemptDeadlineUtc = [DateTime]::UtcNow.AddSeconds($AttemptTimeoutSeconds)
+    $attemptDeadlineUtc = if ($candidateAttemptDeadlineUtc -lt $ExecutionDeadlineUtc) { $candidateAttemptDeadlineUtc } else { $ExecutionDeadlineUtc }
+    try {
+        $operation = Start-ExpectedPowerOffEvidenceTransfer -VmName $VmName -RequestId $RequestId -SnapshotId $snapshotId -GuestOutbox $GuestOutbox -HostResultRoot $hostStageRoot -OutputPath $outputPath
+        while ($true) {
+            Assert-RequestActive -RequestId $RequestId -ExecutionDeadlineUtc $ExecutionDeadlineUtc
+            if ([DateTime]::UtcNow -ge $attemptDeadlineUtc) {
+                throw [InvalidOperationException]::new("The bounded evidence-transfer attempt exceeded $AttemptTimeoutSeconds seconds.")
+            }
+            $operation.Process.Refresh()
+            if ($operation.Process.HasExited) { break }
+            Start-Sleep -Milliseconds 200
+        }
+        if (-not (Test-Path -LiteralPath $outputPath -PathType Leaf)) {
+            throw 'The bounded evidence-transfer child exited without a result.'
+        }
+        $operationResult = Read-BrokerJsonWithRetry -Path $outputPath
+        if (-not [bool]$operationResult.Success) {
+            throw "Expected-power-off evidence transfer failed: $([string]$operationResult.Error)"
+        }
+        Assert-ExpectedPowerOffEvidenceStageMatchesManifest -HostStageRoot $hostStageRoot -Manifest $operationResult.Manifest -RequestId $RequestId -SnapshotId $snapshotId | Out-Null
+        Assert-RequestActive -RequestId $RequestId -ExecutionDeadlineUtc $ExecutionDeadlineUtc
+        $preserveHostStage = $true
+        [pscustomobject][ordered]@{
+            Manifest = $operationResult.Manifest
+            HostStageRoot = $hostStageRoot
+            SnapshotId = $snapshotId
+        }
+    }
+    finally {
+        if ($operation) { Stop-GuestProbeProcess -Process $operation.Process -LeasePath $operation.LeasePath }
+        Remove-Item -LiteralPath $outputPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath ($outputPath + '.tmp') -Force -ErrorAction SilentlyContinue
+        if (-not $preserveHostStage) {
+            Remove-Item -LiteralPath $hostStageRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Open-GuestSessionReliable {
     param(
         [Parameter(Mandatory = $true)] [string] $VmName,
@@ -739,7 +2236,10 @@ function Open-GuestSessionReliable {
     for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
         Assert-RequestActive -RequestId $RequestId -ExecutionDeadlineUtc $ExecutionDeadlineUtc
         try {
-            return New-PSSession -VMName $VmName -Credential $Credential -ErrorAction Stop
+            $remainingMilliseconds = [Math]::Max(1000, [Math]::Floor(($ExecutionDeadlineUtc - [DateTime]::UtcNow).TotalMilliseconds))
+            $remoteOperationTimeout = [int][Math]::Min(15000, $remainingMilliseconds)
+            $sessionOption = New-PSSessionOption -OpenTimeout $remoteOperationTimeout -OperationTimeout $remoteOperationTimeout -CancelTimeout 1000
+            return New-PSSession -VMName $VmName -Credential $Credential -SessionOption $sessionOption -ErrorAction Stop
         }
         catch {
             $lastError = $_
@@ -916,25 +2416,29 @@ function New-GuestEvidenceSnapshot {
     param(
         [Parameter(Mandatory = $true)] [System.Management.Automation.Runspaces.PSSession] $Session,
         [Parameter(Mandatory = $true)] [string] $GuestOutbox,
-        [Parameter(Mandatory = $true)] [string] $RequestId
+        [Parameter(Mandatory = $true)] [string] $RequestId,
+        [Parameter(Mandatory = $true)] [ValidatePattern('^[a-f0-9]{32}$')] [string] $SnapshotId
     )
 
     Invoke-Command -Session $Session -ErrorAction Stop -ScriptBlock {
-        param($SourceRoot, $JobId, $StageBaseRoot = 'C:\CodexGuest\EvidenceStage')
+        param($SourceRoot, $JobId, $StageId, $StageBaseRoot = 'C:\CodexGuest\EvidenceStage')
 
         if ($JobId -notmatch '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$') {
             throw "Invalid evidence snapshot request id: $JobId"
+        }
+        if ($StageId -notmatch '^[a-f0-9]{32}$') {
+            throw "Invalid evidence snapshot operation id: $StageId"
         }
         $sourceRootFull = [IO.Path]::GetFullPath($SourceRoot).TrimEnd('\')
         if (-not (Test-Path -LiteralPath $sourceRootFull -PathType Container)) {
             throw "Guest evidence source is missing: $sourceRootFull"
         }
 
-        $stageRoot = Join-Path $StageBaseRoot $JobId
-        if (Test-Path -LiteralPath $stageRoot -PathType Container) {
-            Remove-Item -LiteralPath $stageRoot -Recurse -Force
-        }
-        New-Item -ItemType Directory -Force -Path $stageRoot | Out-Null
+        # Every attempt owns an immutable stage. A killed PowerShell Direct
+        # child may still unwind remotely; retries must never delete or reuse
+        # the directory that an earlier pipeline could still be writing.
+        $stageRoot = Join-Path $StageBaseRoot $StageId
+        New-Item -ItemType Directory -Path $stageRoot -ErrorAction Stop | Out-Null
 
         $copiedFiles = New-Object Collections.Generic.List[object]
         $skippedFiles = New-Object Collections.Generic.List[object]
@@ -953,11 +2457,31 @@ function New-GuestEvidenceSnapshot {
                 $sourceStream = $null
                 $destinationStream = $null
                 try {
+                    $sourceBefore = Get-Item -LiteralPath $file.FullName -Force -ErrorAction Stop
+                    $sourceBeforeLength = [int64]$sourceBefore.Length
+                    $sourceBeforeWriteTicks = $sourceBefore.LastWriteTimeUtc.Ticks
                     $shareMode = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
                     $sourceStream = [IO.File]::Open($file.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, $shareMode)
                     $destinationStream = [IO.File]::Open($destinationPath, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
                     $sourceStream.CopyTo($destinationStream)
                     $destinationStream.Flush()
+                    $destinationStream.Dispose()
+                    $destinationStream = $null
+                    $sourceStream.Dispose()
+                    $sourceStream = $null
+                    $sourceAfterCopy = Get-Item -LiteralPath $file.FullName -Force -ErrorAction Stop
+                    $destinationAfterCopy = Get-Item -LiteralPath $destinationPath -Force -ErrorAction Stop
+                    $sourceHash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
+                    $destinationHash = (Get-FileHash -LiteralPath $destinationPath -Algorithm SHA256 -ErrorAction Stop).Hash
+                    $sourceAfterHash = Get-Item -LiteralPath $file.FullName -Force -ErrorAction Stop
+                    if ($sourceBeforeLength -ne [int64]$sourceAfterCopy.Length -or
+                        $sourceBeforeLength -ne [int64]$sourceAfterHash.Length -or
+                        $sourceBeforeWriteTicks -ne $sourceAfterCopy.LastWriteTimeUtc.Ticks -or
+                        $sourceBeforeWriteTicks -ne $sourceAfterHash.LastWriteTimeUtc.Ticks -or
+                        [int64]$destinationAfterCopy.Length -ne [int64]$sourceAfterHash.Length -or
+                        -not [string]::Equals($sourceHash, $destinationHash, [StringComparison]::OrdinalIgnoreCase)) {
+                        throw 'The evidence file changed while its snapshot was being copied.'
+                    }
                     $copied = $true
                     break
                 }
@@ -978,6 +2502,8 @@ function New-GuestEvidenceSnapshot {
                 $copiedFiles.Add([ordered]@{
                     RelativePath = $relativePath
                     Length = [long](Get-Item -LiteralPath $destinationPath).Length
+                    Sha256 = [string](Get-FileHash -LiteralPath $destinationPath -Algorithm SHA256).Hash
+                    SourceLastWriteUtc = $sourceAfterHash.LastWriteTimeUtc.ToString('o')
                     Attempts = $attemptUsed
                 })
             }
@@ -992,8 +2518,9 @@ function New-GuestEvidenceSnapshot {
         }
 
         $manifest = [ordered]@{
-            FormatVersion = 1
+            FormatVersion = 2
             RequestId = $JobId
+            SnapshotId = $StageId
             SourceRoot = $sourceRootFull
             StageRoot = $stageRoot
             CreatedUtc = [DateTime]::UtcNow.ToString('o')
@@ -1007,7 +2534,7 @@ function New-GuestEvidenceSnapshot {
         $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $temporaryManifestPath -Encoding UTF8
         Move-Item -LiteralPath $temporaryManifestPath -Destination $manifestPath -Force
         [pscustomobject]$manifest
-    } -ArgumentList $GuestOutbox, $RequestId
+    } -ArgumentList $GuestOutbox, $RequestId, $SnapshotId
 }
 
 function Remove-GuestEvidenceSnapshot {
@@ -1696,6 +3223,7 @@ function Invoke-GuestRequest {
     $hostInputGuestRoots = New-Object 'Collections.Generic.Dictionary[string,string]' ([StringComparer]::OrdinalIgnoreCase)
     $hostInputGuestJobMappings = @()
     $hostInputCleanup = [pscustomobject][ordered]@{ Attempted = $false; Success = $true; Errors = @(); StateDeleted = $true }
+    $hostInputShareCleanupPerformed = $false
     $hostInputSetupWatch = New-Object Diagnostics.Stopwatch
     $requestNetworkDefinition = $null
     $requestNetworkRuntime = $null
@@ -1716,6 +3244,20 @@ function Invoke-GuestRequest {
         StateDeleted = $false
     }
     $requestNetworkCleanupPerformed = $false
+    $expectGuestPowerOff = $false
+    $guestPowerOffRecoveryTimeoutSeconds = 180
+    $expectedGuestPowerOffSubmissionStartedUtc = $null
+    $guestApplicationEraRunningObservedUtc = $null
+    $guestPowerOffObservedUtc = $null
+    $guestPowerOffBeforeCleanup = $null
+    $powerOffRecoveryDeadlineUtc = $null
+    $guestPowerOffEvidenceRecoveryBootedUtc = $null
+    $guestPowerOffEvidenceRecoveryGuestBootTimeUtc = $null
+    $guestPowerOffEvidenceRecoveryCompletedUtc = $null
+    $guestPowerOffEvidenceRecoveryTimedOut = $false
+    $applicationRelaunchedByHarnessAfterGuestPowerOff = $null
+    $expectedGuestPowerOffContractSatisfied = $null
+    $brokerCleanupStartedUtc = $null
     $poolMode = [bool]$Config.PoolEnabled
     $workerId = if ($poolMode) { [Nullable[int]]([int]$Config.PoolWorkerId) } else { $null }
     $guestSessionReconnects = 0
@@ -1748,11 +3290,12 @@ function Invoke-GuestRequest {
     $liveEvidenceContext = $null
     $executionTimeoutSeconds = Get-BoundedTimeout -Value $Request.ExecutionTimeoutSeconds -Default 900 -Minimum 10 -Maximum 7200
     $executionDeadlineUtc = $ClaimedUtc.AddSeconds($executionTimeoutSeconds)
+    $originalExecutionDeadlineUtc = $executionDeadlineUtc
     $createdUtc = [DateTime]::Parse([string]$Request.CreatedUtc).ToUniversalTime()
 
     [CodexHostSession]::PreventSleep()
     try {
-        $null = Recover-OrphanedHostInputResources -BrokerRoot $BrokerRoot -ExcludeRequestId $requestId
+        $null = Recover-OrphanedHostInputResources -BrokerRoot $BrokerRoot
         # Recovery is owner/identity-aware. Do not exclude the current
         # RequestId: a crashed attempt can leave a stale lease with the same
         # RequestId, and retries must reclaim it before reserving a new one.
@@ -1761,6 +3304,63 @@ function Invoke-GuestRequest {
         }
         $failureStage = 'ValidatingRequest'
         Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
+        $expectPropertyLookup = $Request.PSObject.Properties['ExpectGuestPowerOff']
+        $expectProperty = @($Request.PSObject.Properties | Where-Object { $_.Name -ceq 'ExpectGuestPowerOff' }) | Select-Object -First 1
+        if ($expectPropertyLookup -and -not $expectProperty) {
+            throw 'The top-level expected-power-off property name must use exact case: ExpectGuestPowerOff.'
+        }
+        if ($expectProperty) {
+            if ($Request.ExpectGuestPowerOff -isnot [bool]) {
+                throw 'ExpectGuestPowerOff must be an exact JSON Boolean.'
+            }
+            $expectGuestPowerOff = [bool]$Request.ExpectGuestPowerOff
+            if (-not $expectGuestPowerOff) {
+                throw 'ExpectGuestPowerOff must be omitted for legacy requests or set to exact Boolean true.'
+            }
+        }
+        $jobExpectPropertyLookup = if ($Request.Job) { $Request.Job.PSObject.Properties['expectGuestPowerOff'] } else { $null }
+        $jobExpectProperty = if ($Request.Job) { @($Request.Job.PSObject.Properties | Where-Object { $_.Name -ceq 'expectGuestPowerOff' }) | Select-Object -First 1 } else { $null }
+        if ($jobExpectPropertyLookup -and -not $jobExpectProperty) {
+            throw 'The guest expected-power-off property name must use exact case: expectGuestPowerOff.'
+        }
+        if ($jobExpectProperty -and
+            ($Request.Job.expectGuestPowerOff -isnot [bool] -or -not [bool]$Request.Job.expectGuestPowerOff -or -not $expectGuestPowerOff)) {
+            throw 'The guest job expectGuestPowerOff property is accepted only as exact Boolean true with top-level ExpectGuestPowerOff=true.'
+        }
+        $recoveryTimeoutPropertyLookup = $Request.PSObject.Properties['GuestPowerOffRecoveryTimeoutSeconds']
+        $recoveryTimeoutProperty = @($Request.PSObject.Properties | Where-Object { $_.Name -ceq 'GuestPowerOffRecoveryTimeoutSeconds' }) | Select-Object -First 1
+        if ($recoveryTimeoutPropertyLookup -and -not $recoveryTimeoutProperty) {
+            throw 'The recovery-timeout property name must use exact case: GuestPowerOffRecoveryTimeoutSeconds.'
+        }
+        if ($recoveryTimeoutProperty -and -not $expectGuestPowerOff) {
+            throw 'GuestPowerOffRecoveryTimeoutSeconds is accepted only when ExpectGuestPowerOff is true.'
+        }
+        if ($expectGuestPowerOff) {
+            if ($Request.ResetToBaseline -isnot [bool] -or -not [bool]$Request.ResetToBaseline -or
+                $Request.StopAfter -isnot [bool] -or -not [bool]$Request.StopAfter) {
+                throw 'ExpectGuestPowerOff requires exact Boolean ResetToBaseline=true and StopAfter=true.'
+            }
+            if (-not $recoveryTimeoutProperty) {
+                throw 'ExpectGuestPowerOff requires GuestPowerOffRecoveryTimeoutSeconds.'
+            }
+            $recoveryTimeoutValue = $Request.GuestPowerOffRecoveryTimeoutSeconds
+            $recoveryTimeoutType = if ($null -ne $recoveryTimeoutValue) { $recoveryTimeoutValue.GetType() } else { $null }
+            $integralTimeoutTypes = @([byte], [sbyte], [int16], [uint16], [int32], [uint32], [int64], [uint64])
+            if (-not $recoveryTimeoutType -or $recoveryTimeoutType -notin $integralTimeoutTypes) {
+                throw 'GuestPowerOffRecoveryTimeoutSeconds must be an integer between 30 and 600.'
+            }
+            try { $guestPowerOffRecoveryTimeoutSeconds = [int]$recoveryTimeoutValue }
+            catch { throw 'GuestPowerOffRecoveryTimeoutSeconds must be an integer between 30 and 600.' }
+            if ($guestPowerOffRecoveryTimeoutSeconds -lt 30 -or $guestPowerOffRecoveryTimeoutSeconds -gt 600) {
+                throw 'GuestPowerOffRecoveryTimeoutSeconds must be between 30 and 600.'
+            }
+            if (-not $jobExpectProperty -or $Request.Job.expectGuestPowerOff -isnot [bool] -or -not [bool]$Request.Job.expectGuestPowerOff) {
+                throw 'ExpectGuestPowerOff requires the guest job expectGuestPowerOff property to be exact Boolean true.'
+            }
+            if (-not ($Request.Job.PSObject.Properties.Name -contains 'assertResultFile') -or [string]::IsNullOrWhiteSpace([string]$Request.Job.assertResultFile)) {
+                throw 'ExpectGuestPowerOff requires a guest job assertResultFile marker.'
+            }
+        }
         $requestNetworkDefinition = Resolve-RequestNetworkProfile -Request $Request -Config $Config
         if ([string]$requestNetworkDefinition.EffectiveProfile -eq 'None') {
             $requestNetworkCleanup = [pscustomobject][ordered]@{
@@ -2074,6 +3674,14 @@ function Invoke-GuestRequest {
         }
         if ($job.PSObject.Properties.Name -contains 'assertResultFile' -and -not [string]::IsNullOrWhiteSpace([string]$job.assertResultFile)) {
             $job.assertResultFile = Expand-GuestJobTokens -Value ([string]$job.assertResultFile) -GuestPayloadRoot $guestPayloadRoot -GuestOutputRoot $guestOutbox -Context 'AssertResultFile' -AllowedTokens @('OUTDIR')
+            if ($expectGuestPowerOff) {
+                $assertResultPath = [IO.Path]::GetFullPath([string]$job.assertResultFile)
+                foreach ($reservedGuestProtocolFile in @('result.json', 'agent-error.json', 'lease.json')) {
+                    if ([string]::Equals($assertResultPath, [IO.Path]::GetFullPath((Join-Path $guestOutbox $reservedGuestProtocolFile)), [StringComparison]::OrdinalIgnoreCase)) {
+                        throw "ExpectGuestPowerOff assertResultFile must not collide with reserved guest protocol file '$reservedGuestProtocolFile'."
+                    }
+                }
+            }
         }
         $hasAssertionPointer = $job.PSObject.Properties.Name -contains 'assertResultJsonPointer'
         $hasAssertionExpected = $job.PSObject.Properties.Name -contains 'assertResultEqualsJson'
@@ -2102,8 +3710,6 @@ function Invoke-GuestRequest {
         $failureStage = 'SubmittingGuestJob'
         $guestJobPath = Join-Path $ResultRoot ($requestId + '.json')
         Write-JsonAtomic -Path $guestJobPath -Value $job
-        Write-BrokerState -Status 'LaunchingApplication' -RequestId $requestId -Message 'Submitting the guest job and waiting for Start-Process confirmation.'
-        Write-RequestState -ResultRoot $RequestStateRoot -RequestId $requestId -Status 'LaunchingApplication' -Message 'Submitting the guest job; the application has not yet been confirmed started.' -CreatedUtc $createdUtc -ClaimedUtc $ClaimedUtc -ExecutionDeadlineUtc $executionDeadlineUtc -WorkerId $workerId
         # PowerShell Direct exposes the destination filename before Copy-Item
         # has necessarily finished writing it. Copy into an unwatched directory
         # first, then rename on the guest so the inbox only sees complete JSON.
@@ -2112,7 +3718,47 @@ function Invoke-GuestRequest {
         $guestInboxFile = Join-Path 'C:\CodexGuest\Inbox' ($requestId + '.json')
         $guestProcessingFile = Join-Path 'C:\CodexGuest\Processing' ($requestId + '.json')
         $guestCompletedFile = Join-Path 'C:\CodexGuest\Completed' ($requestId + '.json')
+        if ($expectGuestPowerOff) {
+            # After the no-replay marker, the broker must never block inside an
+            # in-process PowerShell Direct call. Close the setup session first;
+            # delivery and monitoring use disposable watchdog children below.
+            if ($session) {
+                Remove-PSSession -Session $session -ErrorAction SilentlyContinue
+                $session = $null
+            }
+            # From this atomic publication onward, delivery is ambiguous after
+            # a host crash. Recovery must fail terminally rather than risk a
+            # second launch, even if no guest lease was observed yet.
+            $existingSubmissionState = $null
+            $existingSubmissionStatePath = Join-Path $RequestStateRoot 'request-state.json'
+            if (Test-Path -LiteralPath $existingSubmissionStatePath -PathType Leaf) {
+                $existingSubmissionState = Read-BrokerJsonWithRetry -Path $existingSubmissionStatePath
+            }
+            $existingSubmissionProperty = if ($existingSubmissionState) { $existingSubmissionState.PSObject.Properties['ExpectedGuestPowerOffSubmissionStartedUtc'] } else { $null }
+            $existingMayLaunchProperty = if ($existingSubmissionState) { $existingSubmissionState.PSObject.Properties['GuestJobMayHaveLaunched'] } else { $null }
+            $existingSubmissionIsAmbiguous = $existingSubmissionProperty -and -not [string]::IsNullOrWhiteSpace([string]$existingSubmissionProperty.Value) -and
+                $existingMayLaunchProperty -and $existingMayLaunchProperty.Value -is [bool] -and [bool]$existingMayLaunchProperty.Value
+            $expectedGuestPowerOffSubmissionStartedUtc = if ($existingSubmissionIsAmbiguous) { [string]$existingSubmissionProperty.Value } else { [DateTime]::UtcNow.ToString('o') }
+            Write-RequestState -ResultRoot $RequestStateRoot -RequestId $requestId -Status 'LaunchingApplication' -Message 'Expected-power-off job delivery is starting; automatic replay is now prohibited.' -CreatedUtc $createdUtc -ClaimedUtc $ClaimedUtc -ExecutionDeadlineUtc $originalExecutionDeadlineUtc -WorkerId $workerId -ExpectGuestPowerOff $true -ExpectedGuestPowerOffSubmissionStartedUtc $expectedGuestPowerOffSubmissionStartedUtc -GuestJobMayHaveLaunched $true
+        }
+        else {
+            Write-RequestState -ResultRoot $RequestStateRoot -RequestId $requestId -Status 'LaunchingApplication' -Message 'Submitting the guest job; the application has not yet been confirmed started.' -CreatedUtc $createdUtc -ClaimedUtc $ClaimedUtc -ExecutionDeadlineUtc $executionDeadlineUtc -WorkerId $workerId
+        }
+        Write-BrokerState -Status 'LaunchingApplication' -RequestId $requestId -Message 'Submitting the guest job and waiting for Start-Process confirmation.'
         $jobSubmitted = $false
+        if ($expectGuestPowerOff) {
+            $jobSubmissionAttempts = 1
+            try {
+                $null = Invoke-ExpectedPowerOffJobSubmissionBounded -VmName $vmName -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc -JobPath $guestJobPath -GuestTransferRoot $guestTransferRoot -GuestTransferFile $guestTransferFile -GuestInboxFile $guestInboxFile -GuestProcessingFile $guestProcessingFile -GuestCompletedFile $guestCompletedFile -GuestOutbox $guestOutbox
+            }
+            catch {
+                $failureKind = 'ExpectedGuestPowerOffSubmissionInterrupted'
+                throw
+            }
+            $jobSubmitted = $true
+            $jobSubmittedUtc = [DateTime]::UtcNow
+        }
+        else {
         for ($submissionAttempt = 1; $submissionAttempt -le 3; $submissionAttempt++) {
             $jobSubmissionAttempts = $submissionAttempt
             Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
@@ -2171,6 +3817,7 @@ function Invoke-GuestRequest {
                 Start-Sleep -Seconds 2
             }
         }
+        }
         if (-not $jobSubmitted) {
             throw 'The guest job could not be submitted.'
         }
@@ -2185,6 +3832,52 @@ function Invoke-GuestRequest {
         $lifecycleMissingSinceUtc = $null
         $nextNetworkHostPolicyCheckUtc = [DateTime]::UtcNow
         while ($true) {
+            if ($expectGuestPowerOff) {
+                $observedVmState = [string](Get-VM -Name $vmName -ErrorAction Stop).State
+                $powerObservation = Get-ExpectedGuestPowerOffObservation `
+                    -Enabled $true `
+                    -VmState $observedVmState `
+                    -ApplicationConfirmed $applicationRunningPublished `
+                    -ApplicationEraRunningObservedUtc $guestApplicationEraRunningObservedUtc `
+                    -BrokerCleanupStartedUtc $brokerCleanupStartedUtc
+                if ([string]$powerObservation.Action -eq 'Fail') {
+                    $failureKind = [string]$powerObservation.FailureKind
+                    throw [InvalidOperationException]::new([string]$powerObservation.Message)
+                }
+                if ([string]$powerObservation.Action -eq 'RecordApplicationEraRunning') {
+                    $guestApplicationEraRunningObservedUtc = [DateTime]::UtcNow.ToString('o')
+                }
+                elseif ([string]$powerObservation.Action -eq 'RecordGuestPowerOff') {
+                    $powerOffObservedTimestamp = [DateTime]::UtcNow
+                    if ($powerOffObservedTimestamp -ge $originalExecutionDeadlineUtc) {
+                        $failureKind = 'ExpectedGuestPowerOffNotObserved'
+                        throw [TimeoutException]::new('The VM did not reach the expected Off state before the original application execution deadline.')
+                    }
+                    $guestPowerOffObservedUtc = $powerOffObservedTimestamp.ToString('o')
+                    $guestPowerOffBeforeCleanup = $true
+                    $powerOffRecoveryDeadlineUtc = $powerOffObservedTimestamp.AddSeconds($guestPowerOffRecoveryTimeoutSeconds)
+                    $executionDeadlineUtc = $powerOffRecoveryDeadlineUtc
+                    # Persist the causal observation before any advisory live-
+                    # evidence/session work. Pool recovery uses this atomic
+                    # state to fail closed instead of replaying the AUT if the
+                    # request worker exits in the following recovery window.
+                    Write-RequestState -ResultRoot $RequestStateRoot -RequestId $requestId -Status 'GuestPowerOffObserved' -Message 'Confirmed guest power-off observed; preparing isolated evidence recovery.' -CreatedUtc $createdUtc -ClaimedUtc $ClaimedUtc -ExecutionDeadlineUtc $originalExecutionDeadlineUtc -WorkerId $workerId -ExpectGuestPowerOff $true -GuestApplicationEraRunningObservedUtc $guestApplicationEraRunningObservedUtc -GuestPowerOffObservedUtc $guestPowerOffObservedUtc -GuestPowerOffBeforeCleanup $true -PowerOffRecoveryDeadlineUtc $powerOffRecoveryDeadlineUtc.ToString('o')
+                    if ($liveEvidenceContext) {
+                        try {
+                            Complete-HostLiveEvidenceFailure -Context $liveEvidenceContext -Status 'GuestPoweredOff' -FailureKind 'GuestPoweredOff' -Message 'The expected guest power-off ended the live application stage before any pending host capture could complete.' -LifecycleStage 'GuestPowerOffObserved' -ApplicationProcessId ([int]$liveEvidenceContext.Command.ExpectedApplicationProcessId)
+                        }
+                        catch {
+                        }
+                        $liveEvidenceContext = $null
+                    }
+                    if ($session) {
+                        Remove-PSSession -Session $session -ErrorAction SilentlyContinue
+                        $session = $null
+                    }
+                    Write-BrokerState -Status 'GuestPowerOffObserved' -RequestId $requestId -Message 'The broker observed the confirmed application-era VM transition from Running to Off before cleanup.'
+                    break
+                }
+            }
             Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
             if ($requestNetworkRuntime -and [DateTime]::UtcNow -ge $nextNetworkHostPolicyCheckUtc) {
                 $failureStage = 'VerifyingNetwork'
@@ -2196,6 +3889,10 @@ function Invoke-GuestRequest {
                 $failureStage = 'WaitingForGuestJob'
             }
             try {
+                if ($expectGuestPowerOff) {
+                    $completionState = Get-ExpectedPowerOffJobObservation -VmName $vmName -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc -InboxFile $guestInboxFile -ProcessingFile $guestProcessingFile -CompletedFile $guestCompletedFile -Outbox $guestOutbox
+                }
+                else {
                 if (-not $session -or [string]$session.State -ne 'Opened') {
                     if ($session) {
                         Remove-PSSession -Session $session -ErrorAction SilentlyContinue
@@ -2250,6 +3947,7 @@ function Invoke-GuestRequest {
                         ApplicationLease = $applicationLease
                     }
                 } -ArgumentList $guestInboxFile, $guestProcessingFile, $guestCompletedFile, $guestOutbox
+                }
             }
             catch {
                 if ($session) {
@@ -2263,6 +3961,30 @@ function Invoke-GuestRequest {
             }
 
             $guestLifecycle = Get-GuestLifecycleProgress -CompletionState $completionState -RequestId $requestId -ApplicationRunningPublished $applicationRunningPublished
+            $firstApplicationConfirmation = -not $applicationRunningPublished -and [bool]$guestLifecycle.ApplicationConfirmed
+            if ($firstApplicationConfirmation -and $expectGuestPowerOff) {
+                # Re-sample only after the guest lease proves Start-Process.
+                # Persist that application-era Running proof immediately: an
+                # AUT may execute shutdown /s /t 0 before any advisory
+                # lifecycle/live-evidence work completes.
+                $confirmationVmState = [string](Get-VM -Name $vmName -ErrorAction Stop).State
+                $confirmationObservation = Get-ExpectedGuestPowerOffObservation -Enabled $true -VmState $confirmationVmState -ApplicationConfirmed $true -ApplicationEraRunningObservedUtc $guestApplicationEraRunningObservedUtc -BrokerCleanupStartedUtc $brokerCleanupStartedUtc
+                if ([string]$confirmationObservation.Action -eq 'Fail') {
+                    $failureKind = [string]$confirmationObservation.FailureKind
+                    throw [InvalidOperationException]::new([string]$confirmationObservation.Message)
+                }
+                if ([string]$confirmationObservation.Action -ne 'RecordApplicationEraRunning') {
+                    $failureKind = 'ExpectedGuestPowerOffUnproven'
+                    throw [InvalidOperationException]::new("The VM was '$confirmationVmState' when the application launch was confirmed; an application-era Running observation is required.")
+                }
+                $applicationRunningPublished = $true
+                $guestApplicationEraRunningObservedUtc = [DateTime]::UtcNow.ToString('o')
+                Write-RequestState -ResultRoot $RequestStateRoot -RequestId $requestId -Status 'ApplicationRunning' -Message 'Guest Start-Process confirmation and application-era VM Running state were both observed.' -CreatedUtc $createdUtc -ClaimedUtc $ClaimedUtc -ExecutionDeadlineUtc $originalExecutionDeadlineUtc -WorkerId $workerId -ApplicationProcessId ([int]$guestLifecycle.ApplicationProcessId) -ApplicationStartedUtc ([string]$guestLifecycle.ApplicationStartedUtc) -ExpectGuestPowerOff $true -GuestApplicationEraRunningObservedUtc $guestApplicationEraRunningObservedUtc
+                # Leave the confirmation visible for at least one runner poll
+                # before publishing guest-action progress.
+                Start-Sleep -Milliseconds 750
+                continue
+            }
             $lifecycleStateParameters = @{
                 ResultRoot = $RequestStateRoot
                 RequestId = $requestId
@@ -2293,7 +4015,16 @@ function Invoke-GuestRequest {
                 [int]$completionState.ApplicationLease.ProcessId
             }
             else { 0 }
-            if ($liveApplicationProcessId -gt 0 -and [string]$guestLifecycle.Status -in @('ApplicationRunning', 'GuestAction')) {
+            if ($expectGuestPowerOff -and $liveApplicationProcessId -gt 0 -and [string]$guestLifecycle.Status -in @('ApplicationRunning', 'GuestAction')) {
+                # Exact expected-power-off monitoring deliberately owns no
+                # in-process guest session. Resolve pending capture commands
+                # host-side instead of risking a blocking remoting transaction.
+                $unavailableLiveEvidence = Get-HostLiveEvidenceContext -RequestId $requestId -Config $Config -ApplicationProcessId $liveApplicationProcessId
+                if ($unavailableLiveEvidence) {
+                    Complete-HostLiveEvidenceFailure -Context $unavailableLiveEvidence -Status 'CaptureUnavailableForExpectedPowerOff' -FailureKind 'CaptureUnavailableForExpectedPowerOff' -Message 'Live capture is unavailable while an exact expected-power-off run is monitored through watchdog-isolated guest probes.' -LifecycleStage ([string]$guestLifecycle.Status) -ApplicationProcessId $liveApplicationProcessId
+                }
+            }
+            elseif ($session -and $liveApplicationProcessId -gt 0 -and [string]$guestLifecycle.Status -in @('ApplicationRunning', 'GuestAction')) {
                 try {
                     $liveEvidenceContext = Invoke-HostLiveEvidenceService `
                         -Context $liveEvidenceContext `
@@ -2317,7 +4048,6 @@ function Invoke-GuestRequest {
                 }
             }
 
-            $firstApplicationConfirmation = -not $applicationRunningPublished -and [bool]$guestLifecycle.ApplicationConfirmed
             if ($firstApplicationConfirmation) {
                 $applicationRunningPublished = $true
                 # Leave the confirmation visible for at least one runner poll
@@ -2327,6 +4057,16 @@ function Invoke-GuestRequest {
             }
 
             if ($completionState.Result -or $completionState.AgentError) {
+                if ($expectGuestPowerOff) {
+                    if ($completionState.AgentError) {
+                        $failureKind = 'ExpectedGuestPowerOffGuestFailure'
+                        throw 'The guest agent failed before the expected guest power-off was observed.'
+                    }
+                    Write-BrokerState -Status 'AwaitingExpectedGuestPowerOff' -RequestId $requestId -Message 'Guest result exists; waiting for the causally observed application-era VM power-off.'
+                    Write-RequestState -ResultRoot $RequestStateRoot -RequestId $requestId -Status 'AwaitingExpectedGuestPowerOff' -Message 'Guest result exists; waiting for a broker-observed VM Off state before cleanup.' -CreatedUtc $createdUtc -ClaimedUtc $ClaimedUtc -ExecutionDeadlineUtc $originalExecutionDeadlineUtc -WorkerId $workerId -ExpectGuestPowerOff $true -GuestApplicationEraRunningObservedUtc $guestApplicationEraRunningObservedUtc
+                    Start-Sleep -Milliseconds 500
+                    continue
+                }
                 if ($liveEvidenceContext) {
                     Complete-HostLiveEvidenceFailure -Context $liveEvidenceContext -Status 'RequestAlreadyTerminal' -FailureKind 'RequestAlreadyTerminal' -Message 'The guest request reached terminal evidence before the live capture completed.' -LifecycleStage 'CollectingEvidence' -ApplicationProcessId $(if ($liveApplicationProcessId -gt 0) { $liveApplicationProcessId } else { $null })
                     $liveEvidenceContext = $null
@@ -2373,7 +4113,108 @@ function Invoke-GuestRequest {
             Start-Sleep -Milliseconds 500
         }
 
-        if ($requestNetworkRuntime) {
+        if ($expectGuestPowerOff) {
+            if ([string]::IsNullOrWhiteSpace($guestPowerOffObservedUtc) -or -not [bool]$guestPowerOffBeforeCleanup) {
+                $failureKind = 'ExpectedGuestPowerOffUnproven'
+                throw 'Expected guest power-off recovery was reached without a causal Running-to-Off observation before cleanup.'
+            }
+
+            $failureStage = 'RevokingNetworkBeforePowerOffRecovery'
+            if ($requestNetworkRuntime -and -not $requestNetworkCleanupPerformed) {
+                $requestNetworkCleanup = Invoke-WithRequestNetworkLifecycleMutex -BrokerRoot $BrokerRoot -Operation {
+                    Remove-RequestNetworkRuntime -Runtime $requestNetworkRuntime -BrokerRoot $BrokerRoot -SuppressErrors
+                }
+                if (-not $requestNetworkCleanup.Success) {
+                    $cleanupFailureObserved = $true
+                    $failureKind = 'GuestPowerOffEvidenceRecoveryNetworkCleanup'
+                    throw ('Request-network cleanup failed before expected-power-off evidence recovery: ' + (@($requestNetworkCleanup.Errors) -join ' | '))
+                }
+                $requestNetworkCleanupPerformed = $true
+            }
+            if ($hostInputShareRuntime -and -not $hostInputCleanup.Attempted) {
+                $hostInputCleanup.Attempted = $true
+                $shareCleanup = Remove-HostInputShareRuntime -Runtime $hostInputShareRuntime -BrokerRoot $BrokerRoot -SuppressErrors
+                $hostInputCleanup = [pscustomobject][ordered]@{
+                    Attempted = $true
+                    Success = [bool]$shareCleanup.Success
+                    Errors = @($shareCleanup.Errors)
+                    StateDeleted = [bool]$shareCleanup.StateDeleted
+                }
+                if (-not $shareCleanup.Success) {
+                    $cleanupFailureObserved = $true
+                    $failureKind = 'GuestPowerOffEvidenceRecoveryHostInputCleanup'
+                    throw ('Read-only host-input cleanup failed before expected-power-off evidence recovery: ' + (@($shareCleanup.Errors) -join ' | '))
+                }
+                $hostInputShareCleanupPerformed = $true
+            }
+            $connectedRecoveryAdapters = @(Get-VMNetworkAdapter -VMName $vmName -ErrorAction Stop | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.SwitchName) })
+            if ($connectedRecoveryAdapters.Count -ne 0) {
+                $failureKind = 'GuestPowerOffEvidenceRecoveryNetwork'
+                throw 'The broker refused to boot expected-power-off evidence recovery while a VM network adapter remained connected.'
+            }
+
+            $failureStage = 'RecoveringGuestPowerOffEvidence'
+            Write-BrokerState -Status 'RecoveringPowerOffEvidence' -RequestId $requestId -Message 'Network is revoked; booting the same disposable guest once to finalize persisted marker evidence without relaunching the application.'
+            Write-RequestState -ResultRoot $RequestStateRoot -RequestId $requestId -Status 'RecoveringPowerOffEvidence' -Message 'Network is revoked; performing one controlled evidence-recovery boot without resubmitting the job.' -CreatedUtc $createdUtc -ClaimedUtc $ClaimedUtc -ExecutionDeadlineUtc $originalExecutionDeadlineUtc -WorkerId $workerId -ExpectGuestPowerOff $true -GuestApplicationEraRunningObservedUtc $guestApplicationEraRunningObservedUtc -GuestPowerOffObservedUtc $guestPowerOffObservedUtc -GuestPowerOffBeforeCleanup $true -PowerOffRecoveryDeadlineUtc $powerOffRecoveryDeadlineUtc.ToString('o')
+            Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $powerOffRecoveryDeadlineUtc
+            Start-VM -Name $vmName -ErrorAction Stop | Out-Null
+            $guestPowerOffEvidenceRecoveryBootedUtc = [DateTime]::UtcNow
+            $guestState = Wait-GuestSession -VmName $vmName -Credential $credential -NotBeforeUtc $guestPowerOffEvidenceRecoveryBootedUtc -RequestId $requestId -ExecutionDeadlineUtc $powerOffRecoveryDeadlineUtc -RequireCurrentGuestBootTime
+            $recoveryStateBootProperty = @($guestState.PSObject.Properties | Where-Object { $_.Name -ceq 'GuestBootTimeUtc' }) | Select-Object -First 1
+            if (-not $recoveryStateBootProperty -or [string]::IsNullOrWhiteSpace([string]$recoveryStateBootProperty.Value)) {
+                $failureKind = 'GuestPowerOffEvidenceRecoveryBootUnproven'
+                throw 'The fresh recovery guest agent state did not publish its current guest boot epoch.'
+            }
+            $guestPowerOffEvidenceRecoveryGuestBootTimeUtc = [string]$recoveryStateBootProperty.Value
+            while ($true) {
+                Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $powerOffRecoveryDeadlineUtc
+                try {
+                    # Every PowerShell Direct attempt lives in a disposable
+                    # child process. The parent can therefore enforce the
+                    # request cancellation and recovery deadline even if the
+                    # remoting provider wedges during connection or invocation.
+                    $recoveryPresence = Get-ExpectedPowerOffRecoveryPresence -VmName $vmName -RequestId $requestId -ExecutionDeadlineUtc $powerOffRecoveryDeadlineUtc -InboxFile $guestInboxFile -ProcessingFile $guestProcessingFile -CompletedFile $guestCompletedFile -Outbox $guestOutbox
+                    $guestSessionReconnects++
+                }
+                catch [OperationCanceledException] {
+                    throw
+                }
+                catch [TimeoutException] {
+                    throw
+                }
+                catch {
+                    Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $powerOffRecoveryDeadlineUtc
+                    $recoveryVmState = [string](Get-VM -Name $vmName -ErrorAction Stop).State
+                    if ([string]::Equals($recoveryVmState, 'Off', [StringComparison]::OrdinalIgnoreCase)) {
+                        $failureKind = 'GuestPowerOffApplicationRelaunchRisk'
+                        throw 'The recovery guest powered off again while its session was reconnecting; application relaunch cannot be excluded.'
+                    }
+                    Write-BrokerState -Status 'RecoveringPowerOffEvidence' -RequestId $requestId -Message 'The post-reboot guest session was interrupted; reconnecting without resubmitting the application job.'
+                    Start-Sleep -Milliseconds 250
+                    continue
+                }
+                if ($recoveryPresence.Inbox) {
+                    $failureKind = 'GuestPowerOffApplicationRelaunchRisk'
+                    throw 'Expected-power-off recovery found the job runnable in Inbox; the broker refuses to risk relaunching the application.'
+                }
+                if ($recoveryPresence.AgentError) {
+                    $failureKind = 'GuestPowerOffEvidenceRecoveryFailure'
+                    throw 'Expected-power-off recovery produced a guest agent error instead of valid evidence.'
+                }
+                if ($recoveryPresence.Completed -and $recoveryPresence.Result -and -not $recoveryPresence.Processing) {
+                    break
+                }
+                $recoveryVmState = [string](Get-VM -Name $vmName -ErrorAction Stop).State
+                if ([string]::Equals($recoveryVmState, 'Off', [StringComparison]::OrdinalIgnoreCase)) {
+                    $failureKind = 'GuestPowerOffApplicationRelaunchRisk'
+                    throw 'The recovery guest powered off again before evidence became terminal; application relaunch cannot be excluded.'
+                }
+                Write-BrokerState -Status 'RecoveringPowerOffEvidence' -RequestId $requestId -Message 'Waiting for the post-reboot guest agent to make persisted marker evidence terminal.'
+                Start-Sleep -Milliseconds 250
+            }
+        }
+
+        if ($requestNetworkRuntime -and -not $requestNetworkCleanupPerformed) {
             $failureStage = 'VerifyingNetwork'
             Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
 
@@ -2402,6 +4243,97 @@ function Invoke-GuestRequest {
             catch {
             }
         }
+        if ($expectGuestPowerOff) {
+            $failureStage = 'CopyingRecoveredGuestEvidence'
+            Write-BrokerState -Status 'RecoveringPowerOffEvidence' -RequestId $requestId -Message 'Copying and staging recovered guest evidence through a deadline-bounded child process.'
+            Write-RequestState -ResultRoot $RequestStateRoot -RequestId $requestId -Status 'RecoveringPowerOffEvidence' -Message 'Copying recovered evidence within the configured recovery deadline.' -CreatedUtc $createdUtc -ClaimedUtc $ClaimedUtc -ExecutionDeadlineUtc $originalExecutionDeadlineUtc -WorkerId $workerId -ExpectGuestPowerOff $true -GuestApplicationEraRunningObservedUtc $guestApplicationEraRunningObservedUtc -GuestPowerOffObservedUtc $guestPowerOffObservedUtc -GuestPowerOffBeforeCleanup $true -PowerOffRecoveryDeadlineUtc $powerOffRecoveryDeadlineUtc.ToString('o')
+            for ($evidenceAttempt = 1; $evidenceAttempt -le 3; $evidenceAttempt++) {
+                $evidenceSnapshotAttempts = $evidenceAttempt
+                $evidenceTransferAttempts = $evidenceAttempt
+                $boundedHostStageRoot = $null
+                $promotionStarted = $false
+                try {
+                    $boundedTransfer = Invoke-ExpectedPowerOffEvidenceTransferBounded -VmName $vmName -RequestId $requestId -ExecutionDeadlineUtc $powerOffRecoveryDeadlineUtc -GuestOutbox $guestOutbox -HostResultRoot $ResultRoot
+                    $evidenceManifest = $boundedTransfer.Manifest
+                    $boundedHostStageRoot = [string]$boundedTransfer.HostStageRoot
+                    if (-not $evidenceManifest -or [string]::IsNullOrWhiteSpace($boundedHostStageRoot)) { throw 'The bounded evidence transfer returned no manifest or host stage.' }
+                    $guestOutboxRoot = [IO.Path]::GetFullPath($guestOutbox).TrimEnd('\') + '\'
+                    $guestAssertionPath = [IO.Path]::GetFullPath([string]$job.assertResultFile)
+                    if (-not $guestAssertionPath.StartsWith($guestOutboxRoot, [StringComparison]::OrdinalIgnoreCase)) {
+                        throw 'The expected-power-off assertion marker escaped the guest output root.'
+                    }
+                    $assertionRelativePath = $guestAssertionPath.Substring($guestOutboxRoot.Length)
+                    $stagedResultPath = Join-Path $boundedHostStageRoot 'result.json'
+                    $resultCopiedMatch = @($evidenceManifest.CopiedFiles | Where-Object { [string]::Equals([string]$_.RelativePath, 'result.json', [StringComparison]::OrdinalIgnoreCase) })
+                    $resultSkippedMatch = @($evidenceManifest.SkippedFiles | Where-Object { [string]::Equals([string]$_.RelativePath, 'result.json', [StringComparison]::OrdinalIgnoreCase) })
+                    if ($resultCopiedMatch.Count -ne 1 -or $resultSkippedMatch.Count -ne 0 -or -not (Test-Path -LiteralPath $stagedResultPath -PathType Leaf)) {
+                        throw "The current bounded transfer did not contain required recovered evidence 'result.json'."
+                    }
+                    $stagedGuestResult = Read-BrokerJsonWithRetry -Path $stagedResultPath
+                    $resultFileEvidenceProperty = $stagedGuestResult.PSObject.Properties['ResultFileEvidence']
+                    $markerExistsProperty = if ($resultFileEvidenceProperty) { $resultFileEvidenceProperty.Value.PSObject.Properties['Exists'] } else { $null }
+                    $markerPredatesRecoveryProperty = if ($resultFileEvidenceProperty) { $resultFileEvidenceProperty.Value.PSObject.Properties['PredatesRecoveryBoot'] } else { $null }
+                    if (-not $markerExistsProperty -or $markerExistsProperty.Value -isnot [bool]) {
+                        throw 'Recovered result.json did not contain exact Boolean ResultFileEvidence.Exists.'
+                    }
+                    if (-not $markerPredatesRecoveryProperty -or $markerPredatesRecoveryProperty.Value -isnot [bool] -or
+                        ([bool]$markerExistsProperty.Value -and -not [bool]$markerPredatesRecoveryProperty.Value) -or
+                        (-not [bool]$markerExistsProperty.Value -and [bool]$markerPredatesRecoveryProperty.Value)) {
+                        throw 'Recovered result.json did not prove a present marker predates the controlled recovery boot.'
+                    }
+                    $markerCopiedMatch = @($evidenceManifest.CopiedFiles | Where-Object { [string]::Equals([string]$_.RelativePath, $assertionRelativePath, [StringComparison]::OrdinalIgnoreCase) })
+                    $markerSkippedMatch = @($evidenceManifest.SkippedFiles | Where-Object { [string]::Equals([string]$_.RelativePath, $assertionRelativePath, [StringComparison]::OrdinalIgnoreCase) })
+                    $stagedMarkerPath = Join-Path $boundedHostStageRoot $assertionRelativePath
+                    if ([bool]$markerExistsProperty.Value) {
+                        if ($markerCopiedMatch.Count -ne 1 -or $markerSkippedMatch.Count -ne 0 -or -not (Test-Path -LiteralPath $stagedMarkerPath -PathType Leaf)) {
+                            throw "The current bounded transfer did not contain the recovered assertion marker '$assertionRelativePath'."
+                        }
+                        $stagedMarkerItem = Get-Item -LiteralPath $stagedMarkerPath -Force -ErrorAction Stop
+                        $stagedMarkerHash = (Get-FileHash -LiteralPath $stagedMarkerPath -Algorithm SHA256 -ErrorAction Stop).Hash
+                        if ([int64]$stagedMarkerItem.Length -ne [int64]$resultFileEvidenceProperty.Value.Length -or
+                            -not [string]::Equals($stagedMarkerHash, [string]$resultFileEvidenceProperty.Value.Sha256, [StringComparison]::OrdinalIgnoreCase)) {
+                            throw 'The recovered assertion marker did not match ResultFileEvidence length/hash attestation.'
+                        }
+                    }
+                    elseif ($markerCopiedMatch.Count -ne 0 -or (Test-Path -LiteralPath $stagedMarkerPath)) {
+                        throw 'Recovered result.json attested a missing marker, but the current bounded transfer contained one.'
+                    }
+                    $promotionStarted = $true
+                    foreach ($stagedItem in @(Get-ChildItem -LiteralPath $boundedHostStageRoot -Force -ErrorAction Stop)) {
+                        $destinationPath = Join-Path $ResultRoot $stagedItem.Name
+                        if (Test-Path -LiteralPath $destinationPath) {
+                            throw "Recovered evidence promotion refused to overwrite an existing host artifact: $destinationPath"
+                        }
+                        Move-Item -LiteralPath $stagedItem.FullName -Destination $destinationPath -ErrorAction Stop
+                    }
+                    Remove-Item -LiteralPath $boundedHostStageRoot -Force -ErrorAction SilentlyContinue
+                    $evidenceSnapshotSucceeded = $true
+                    $evidenceTransferSucceeded = $true
+                    break
+                }
+                catch {
+                    $evidenceError = $_
+                    if (-not [string]::IsNullOrWhiteSpace($boundedHostStageRoot)) {
+                        Remove-Item -LiteralPath $boundedHostStageRoot -Recurse -Force -ErrorAction SilentlyContinue
+                    }
+                    Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $powerOffRecoveryDeadlineUtc
+                    if ($promotionStarted -or $evidenceAttempt -ge 3) { throw $evidenceError }
+                    Write-BrokerState -Status 'RecoveringPowerOffEvidence' -RequestId $requestId -Message 'Bounded recovered-evidence transfer was interrupted; retrying without resubmitting the application.'
+                    Start-Sleep -Milliseconds 250
+                }
+            }
+            if (-not $evidenceSnapshotSucceeded -or -not $evidenceTransferSucceeded) {
+                throw 'Recovered guest evidence could not be copied within the configured recovery deadline.'
+            }
+            foreach ($skippedFile in @($evidenceManifest.SkippedFiles)) {
+                $evidenceWarnings.Add("Skipped optional guest evidence '$([string]$skippedFile.RelativePath)' after $([int]$skippedFile.Attempts) attempts: $([string]$skippedFile.Error)")
+            }
+            foreach ($enumerationError in @($evidenceManifest.EnumerationErrors)) {
+                $evidenceWarnings.Add("Guest evidence enumeration warning: $([string]$enumerationError)")
+            }
+            Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $powerOffRecoveryDeadlineUtc
+        }
+        else {
         $failureStage = 'StagingGuestEvidence'
         Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
         Write-BrokerState -Status 'CollectingEvidence' -RequestId $requestId -Message 'Creating a stable guest evidence snapshot.'
@@ -2416,7 +4348,7 @@ function Invoke-GuestRequest {
                     $session = Open-GuestSessionReliable -VmName $vmName -Credential $credential -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
                     $guestSessionReconnects++
                 }
-                $evidenceManifest = New-GuestEvidenceSnapshot -Session $session -GuestOutbox $guestOutbox -RequestId $requestId
+                $evidenceManifest = New-GuestEvidenceSnapshot -Session $session -GuestOutbox $guestOutbox -RequestId $requestId -SnapshotId ([Guid]::NewGuid().ToString('N'))
                 $guestEvidenceStage = [string]$evidenceManifest.StageRoot
                 if ([string]::IsNullOrWhiteSpace($guestEvidenceStage)) {
                     throw 'The guest evidence snapshot returned no stable stage root.'
@@ -2493,7 +4425,9 @@ function Invoke-GuestRequest {
         catch {
             $evidenceWarnings.Add("The disposable guest evidence stage will be removed with the VM: $($_.Exception.Message)")
         }
+        }
         $failureStage = 'ValidatingGuestEvidence'
+        Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
         Write-RequestState -ResultRoot $RequestStateRoot -RequestId $requestId -Status 'CollectingEvidence' -Message 'Validating collected guest evidence.' -CreatedUtc $createdUtc -ClaimedUtc $ClaimedUtc -ExecutionDeadlineUtc $executionDeadlineUtc -WorkerId $workerId
         $guestResultPath = Join-Path $ResultRoot 'result.json'
         if (-not (Test-Path -LiteralPath $guestResultPath)) {
@@ -2513,6 +4447,62 @@ function Invoke-GuestRequest {
             }
             throw "Guest agent reported failure: $($guestResult.Error)"
         }
+        if ($expectGuestPowerOff) {
+            $guestExpectProperty = $guestResult.PSObject.Properties['ExpectGuestPowerOff']
+            $guestRelaunchProperty = $guestResult.PSObject.Properties['ApplicationRelaunchedByHarnessAfterGuestPowerOff']
+            if (-not $guestExpectProperty -or $guestResult.ExpectGuestPowerOff -isnot [bool] -or -not [bool]$guestResult.ExpectGuestPowerOff) {
+                $failureKind = 'GuestPowerOffEvidenceRecoveryProtocol'
+                throw 'Recovered guest evidence did not attest exact Boolean ExpectGuestPowerOff=true.'
+            }
+            if (-not [string]::Equals([string]$guestResult.GuestPowerOffEvidenceRecoveryMode, 'ControlledReboot', [StringComparison]::Ordinal)) {
+                $failureKind = 'GuestPowerOffEvidenceRecoveryProtocol'
+                throw 'Recovered guest evidence did not attest the ControlledReboot recovery mode.'
+            }
+            $guestRecoveryBootProperty = @($guestResult.PSObject.Properties | Where-Object { $_.Name -ceq 'GuestBootTimeUtc' }) | Select-Object -First 1
+            if (-not $guestRecoveryBootProperty -or [string]::IsNullOrWhiteSpace([string]$guestRecoveryBootProperty.Value)) {
+                $failureKind = 'GuestPowerOffEvidenceRecoveryBootUnproven'
+                throw 'Recovered guest evidence did not include the exact recovery GuestBootTimeUtc.'
+            }
+            $guestRecoveryCompletedProperty = @($guestResult.PSObject.Properties | Where-Object { $_.Name -ceq 'RecoveryCompletedUtc' }) | Select-Object -First 1
+            $guestRecoveryCompletedTimestamp = $null
+            $guestRecoveryBootTimestamp = $null
+            if (-not $guestRecoveryCompletedProperty -or [string]::IsNullOrWhiteSpace([string]$guestRecoveryCompletedProperty.Value)) {
+                $failureKind = 'GuestPowerOffEvidenceRecoveryProtocol'
+                throw 'Recovered guest evidence did not include RecoveryCompletedUtc.'
+            }
+            try {
+                $guestRecoveryBootTimestamp = [DateTimeOffset]::Parse([string]$guestRecoveryBootProperty.Value, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).UtcDateTime
+                $agentStateBootTimestamp = [DateTimeOffset]::Parse([string]$guestPowerOffEvidenceRecoveryGuestBootTimeUtc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).UtcDateTime
+                $guestRecoveryCompletedTimestamp = [DateTimeOffset]::Parse([string]$guestRecoveryCompletedProperty.Value, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).UtcDateTime
+            }
+            catch {
+                $failureKind = 'GuestPowerOffEvidenceRecoveryProtocol'
+                throw 'Recovered guest evidence included an invalid guest boot or recovery-completion timestamp.'
+            }
+            if ($guestRecoveryBootTimestamp -ne $agentStateBootTimestamp) {
+                $failureKind = 'GuestPowerOffEvidenceRecoveryBootUnproven'
+                throw 'Recovered guest evidence does not belong to the current guest OS recovery boot.'
+            }
+            if ($guestRecoveryCompletedTimestamp -lt $guestRecoveryBootTimestamp) {
+                $failureKind = 'GuestPowerOffEvidenceRecoveryBootUnproven'
+                throw 'Recovered guest evidence completion predates its current guest OS recovery boot.'
+            }
+            if (-not $guestRelaunchProperty -or $guestResult.ApplicationRelaunchedByHarnessAfterGuestPowerOff -isnot [bool] -or [bool]$guestResult.ApplicationRelaunchedByHarnessAfterGuestPowerOff) {
+                $failureKind = 'GuestPowerOffApplicationRelaunchRisk'
+                throw 'Recovered guest evidence did not prove that the application was not relaunched.'
+            }
+            if ([string]::IsNullOrWhiteSpace($guestApplicationEraRunningObservedUtc) -or
+                [string]::IsNullOrWhiteSpace($guestPowerOffObservedUtc) -or
+                -not [bool]$guestPowerOffBeforeCleanup) {
+                $failureKind = 'ExpectedGuestPowerOffUnproven'
+                throw 'Recovered marker evidence exists, but broker-observed guest shutdown causality is incomplete.'
+            }
+            $applicationRelaunchedByHarnessAfterGuestPowerOff = $false
+            $expectedGuestPowerOffContractSatisfied = $true
+            Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $powerOffRecoveryDeadlineUtc
+            $guestPowerOffEvidenceRecoveryCompletedUtc = [DateTime]::UtcNow
+        }
+        Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
         $evidenceValidationSucceeded = $true
 
         $failureStage = 'CheckingCompletionLockState'
@@ -2539,13 +4529,25 @@ function Invoke-GuestRequest {
             $typedException = $typedException.InnerException
         }
         $cancelled = $typedException -is [OperationCanceledException]
-        $executionTimedOut = $typedException -is [TimeoutException]
+        $executionTimedOut = $typedException -is [TimeoutException] -and
+            $typedException.Data.Contains('CodexBrokerDeadlineExpired') -and
+            $typedException.Data['CodexBrokerDeadlineExpired'] -is [bool] -and
+            [bool]$typedException.Data['CodexBrokerDeadlineExpired']
+        if ($executionTimedOut -and $expectGuestPowerOff -and -not [string]::IsNullOrWhiteSpace($guestPowerOffObservedUtc)) {
+            $executionTimedOut = $false
+            $guestPowerOffEvidenceRecoveryTimedOut = $true
+            $failureKind = 'GuestPowerOffEvidenceRecoveryTimeout'
+        }
+        elseif ($executionTimedOut -and $expectGuestPowerOff -and $applicationRunningPublished) {
+            $failureKind = 'ExpectedGuestPowerOffNotObserved'
+        }
         if ([string]::IsNullOrWhiteSpace($failureKind)) {
             $failureKind = if ($cancelled) { 'Cancelled' } elseif ($executionTimedOut) { 'ExecutionTimeout' } else { 'Harness' }
         }
         $lockEvidenceAfter = Get-HostLockEvidence
     }
     finally {
+        $brokerCleanupStartedUtc = [DateTime]::UtcNow.ToString('o')
         if ($liveEvidenceContext) {
             try {
                 Complete-HostLiveEvidenceFailure -Context $liveEvidenceContext -Status 'RequestAlreadyTerminal' -FailureKind 'RequestAlreadyTerminal' -Message 'The request left its live application stage before capture publication completed.' -LifecycleStage 'StoppingVm' -ApplicationProcessId ([int]$liveEvidenceContext.Command.ExpectedApplicationProcessId)
@@ -2630,7 +4632,7 @@ function Invoke-GuestRequest {
                 $evidenceWarnings.Add("Could not publish StoppingVm broker state: $($_.Exception.Message)")
             }
             try {
-                Write-RequestState -ResultRoot $RequestStateRoot -RequestId $requestId -Status 'StoppingVm' -Message 'Stopping the isolated guest; the pool worker will recycle asynchronously.' -CreatedUtc $createdUtc -ClaimedUtc $ClaimedUtc -ExecutionDeadlineUtc $executionDeadlineUtc -WorkerId $workerId
+                Write-RequestState -ResultRoot $RequestStateRoot -RequestId $requestId -Status 'StoppingVm' -Message 'Stopping the isolated guest; the pool worker will recycle asynchronously.' -CreatedUtc $createdUtc -ClaimedUtc $ClaimedUtc -ExecutionDeadlineUtc $executionDeadlineUtc -WorkerId $workerId -ExpectGuestPowerOff $(if ($expectGuestPowerOff) { $true } else { $null }) -GuestApplicationEraRunningObservedUtc $guestApplicationEraRunningObservedUtc -GuestPowerOffObservedUtc $guestPowerOffObservedUtc -GuestPowerOffBeforeCleanup $guestPowerOffBeforeCleanup -PowerOffRecoveryDeadlineUtc $(if ($powerOffRecoveryDeadlineUtc) { $powerOffRecoveryDeadlineUtc.ToString('o') } else { $null }) -BrokerCleanupStartedUtc $brokerCleanupStartedUtc
             }
             catch {
                 $evidenceWarnings.Add("Could not publish StoppingVm request state: $($_.Exception.Message)")
@@ -2647,7 +4649,7 @@ function Invoke-GuestRequest {
             }
         }
 
-        if ($hostInputShareRuntime) {
+        if ($hostInputShareRuntime -and -not $hostInputShareCleanupPerformed) {
             $failureStageBeforeCleanup = $failureStage
             $hostInputCleanup.Attempted = $true
             try {
@@ -2661,6 +4663,7 @@ function Invoke-GuestRequest {
                     Errors = @($shareCleanup.Errors)
                     StateDeleted = [bool]$shareCleanup.StateDeleted
                 }
+                $hostInputShareCleanupPerformed = [bool]$shareCleanup.Success
             }
             catch {
                 $cleanupFailureObserved = $true
@@ -2786,10 +4789,10 @@ function Invoke-GuestRequest {
             if ($cancelled) {
                 $failureKind = 'Cancelled'
             }
-            elseif ($executionTimedOut) {
+            elseif ($executionTimedOut -and [string]::IsNullOrWhiteSpace($failureKind)) {
                 $failureKind = 'ExecutionTimeout'
             }
-            elseif ($cleanupFailureObserved) {
+            elseif ($cleanupFailureObserved -and [string]::IsNullOrWhiteSpace($failureKind)) {
                 $failureKind = 'HarnessCleanup'
             }
             elseif ([string]::IsNullOrWhiteSpace($failureKind)) {
@@ -2805,19 +4808,7 @@ function Invoke-GuestRequest {
         }
         elseif ($success) { 'Terminal result is ready; evidence collection and VM cleanup completed.' }
         else { $errorMessage }
-        if (-not $poolMode) {
-            try {
-                Write-RequestState -ResultRoot $RequestStateRoot -RequestId $requestId -Status $finalStatus -Message $finalMessage -CreatedUtc $createdUtc -ClaimedUtc $ClaimedUtc -ExecutionDeadlineUtc $executionDeadlineUtc -WorkerId $workerId
-            }
-            catch {
-                # Request-state publication is advisory. Never let a transient
-                # status-file race hide the terminal broker-result or a cleanup
-                # failure that has already been captured above.
-                $evidenceWarnings.Add("Could not publish final request state: $($_.Exception.Message)")
-            }
-        }
-
-        Write-JsonAtomic -Path (Join-Path $ResultRoot 'broker-result.json') -Value ([ordered]@{
+        $brokerResultValue = [ordered]@{
             RequestId = $requestId
             Success = $success
             HarnessSucceeded = $success
@@ -2836,7 +4827,7 @@ function Invoke-GuestRequest {
             ClaimedUtc = $ClaimedUtc.ToString('o')
             QueueWaitSeconds = [Math]::Round(($ClaimedUtc - $createdUtc).TotalSeconds, 3)
             ExecutionTimeoutSeconds = $executionTimeoutSeconds
-            ExecutionDeadlineUtc = $executionDeadlineUtc.ToString('o')
+            ExecutionDeadlineUtc = $originalExecutionDeadlineUtc.ToString('o')
             Cancelled = $cancelled
             QueueTimedOut = $false
             ExecutionTimedOut = $executionTimedOut
@@ -2966,7 +4957,37 @@ function Invoke-GuestRequest {
             RequireHostLocked = [bool]$Request.RequireHostLocked
             HostLockEvidenceBefore = $lockEvidenceBefore
             HostLockEvidenceAfter = $lockEvidenceAfter
-        })
+        }
+        if ($expectGuestPowerOff) {
+            $brokerResultValue['ExpectGuestPowerOff'] = $true
+            $brokerResultValue['GuestPowerOffRecoveryTimeoutSeconds'] = $guestPowerOffRecoveryTimeoutSeconds
+            $brokerResultValue['GuestApplicationEraRunningObservedUtc'] = $guestApplicationEraRunningObservedUtc
+            $brokerResultValue['GuestPowerOffObservedUtc'] = $guestPowerOffObservedUtc
+            $brokerResultValue['GuestPowerOffBeforeCleanup'] = if ($null -ne $guestPowerOffBeforeCleanup) { [bool]$guestPowerOffBeforeCleanup } else { $null }
+            $brokerResultValue['BrokerCleanupStartedUtc'] = $brokerCleanupStartedUtc
+            $brokerResultValue['PowerOffRecoveryDeadlineUtc'] = if ($powerOffRecoveryDeadlineUtc) { $powerOffRecoveryDeadlineUtc.ToString('o') } else { $null }
+            $brokerResultValue['GuestPowerOffEvidenceRecoveryMode'] = if ($expectedGuestPowerOffContractSatisfied) { 'ControlledReboot' } else { $null }
+            $brokerResultValue['GuestPowerOffEvidenceRecoveryBootedUtc'] = if ($guestPowerOffEvidenceRecoveryBootedUtc) { $guestPowerOffEvidenceRecoveryBootedUtc.ToString('o') } else { $null }
+            $brokerResultValue['GuestPowerOffEvidenceRecoveryGuestBootTimeUtc'] = $guestPowerOffEvidenceRecoveryGuestBootTimeUtc
+            $brokerResultValue['GuestPowerOffEvidenceRecoveryCompletedUtc'] = if ($guestPowerOffEvidenceRecoveryCompletedUtc) { $guestPowerOffEvidenceRecoveryCompletedUtc.ToString('o') } else { $null }
+            $brokerResultValue['GuestPowerOffEvidenceRecoveryTimedOut'] = [bool]$guestPowerOffEvidenceRecoveryTimedOut
+            $brokerResultValue['ApplicationRelaunchedByHarnessAfterGuestPowerOff'] = $applicationRelaunchedByHarnessAfterGuestPowerOff
+            $brokerResultValue['ExpectedGuestPowerOffContractSatisfied'] = [bool]$success -and [bool]$expectedGuestPowerOffContractSatisfied
+        }
+        $brokerResultPath = Join-Path $ResultRoot 'broker-result.json'
+        if ($poolMode) {
+            # This attempt root is private to one pool worker. HostWorker later
+            # publishes shared state/result under the request mutex.
+            Write-TerminalJsonAtomic -Path $brokerResultPath -Value $brokerResultValue | Out-Null
+        }
+        else {
+            Invoke-WithTerminalResultPublicationMutex -RequestId $requestId -ScopeRoot $ResultRoot -Operation {
+                if (-not (Test-Path -LiteralPath $brokerResultPath -PathType Leaf)) {
+                    Write-RequestState -ResultRoot $RequestStateRoot -RequestId $requestId -Status $finalStatus -Message $finalMessage -CreatedUtc $createdUtc -ClaimedUtc $ClaimedUtc -ExecutionDeadlineUtc $executionDeadlineUtc -WorkerId $workerId
+                    Write-TerminalJsonAtomic -Path $brokerResultPath -Value $brokerResultValue | Out-Null
+                }
+            }
+        }
     }
 
     if (-not $success) {
@@ -3103,6 +5124,21 @@ try {
             Move-Item -LiteralPath $invalidRequestFile.FullName -Destination $invalidArchive -Force
         }
         $requestFiles = @($requestFiles | Where-Object { [IO.Path]::GetFileNameWithoutExtension($_.Name) -match '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$' })
+        $activeRequestIds = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+        foreach ($processingRequestFile in @(Get-ChildItem -LiteralPath $processingPath -Filter '*.json' -File -ErrorAction SilentlyContinue)) {
+            $null = $activeRequestIds.Add([IO.Path]::GetFileNameWithoutExtension($processingRequestFile.Name))
+        }
+        foreach ($terminalQueuedFile in @($requestFiles)) {
+            $terminalQueuedId = [IO.Path]::GetFileNameWithoutExtension($terminalQueuedFile.Name)
+            if (Move-QueuedRequestWithTerminalResult -QueuedFile $terminalQueuedFile -RequestId $terminalQueuedId -Reason 'queued-after-terminal') {
+                $requestFiles = @($requestFiles | Where-Object { -not [string]::Equals($_.FullName, $terminalQueuedFile.FullName, [StringComparison]::OrdinalIgnoreCase) })
+            }
+            elseif ($activeRequestIds.Contains($terminalQueuedId)) {
+                $duplicateArchive = Join-Path $archivePath ($terminalQueuedId + '-duplicate-active-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ') + '-' + [Guid]::NewGuid().ToString('N') + '.json')
+                Move-Item -LiteralPath $terminalQueuedFile.FullName -Destination $duplicateArchive -ErrorAction Stop
+                $requestFiles = @($requestFiles | Where-Object { -not [string]::Equals($_.FullName, $terminalQueuedFile.FullName, [StringComparison]::OrdinalIgnoreCase) })
+            }
+        }
         $queueDepth = $requestFiles.Count
         for ($queueIndex = 0; $queueIndex -lt $requestFiles.Count; $queueIndex++) {
             $queuedFile = $requestFiles[$queueIndex]
@@ -3152,6 +5188,9 @@ try {
                     }
                     throw
                 }
+                if (Move-QueuedRequestWithTerminalResult -QueuedFile ([IO.FileInfo]$processingFile) -RequestId $requestId -Reason 'claimed-after-terminal') {
+                    continue
+                }
                 $claimedUtc = [DateTime]::UtcNow
                 $request = Get-Content -Raw -LiteralPath $processingFile | ConvertFrom-Json
                 if ([string]$request.RequestId -ne $requestId) {
@@ -3176,7 +5215,7 @@ try {
                     }
                     catch {
                     }
-                    Write-JsonAtomic -Path (Join-Path $resultRoot 'broker-result.json') -Value ([ordered]@{
+                    $terminalResult = [ordered]@{
                         RequestId = $requestId
                         Success = $false
                         Error = $errorMessage
@@ -3193,9 +5232,14 @@ try {
                         BrokerSessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
                         VmName = [string]$config.VmName
                         VmFinalState = $vmFinalState
-                    })
+                    }
                     $status = if ($queueTimedOut) { 'QueueTimedOut' } else { 'Cancelled' }
-                    Write-RequestState -ResultRoot $resultRoot -RequestId $requestId -Status $status -Message $errorMessage -CreatedUtc $createdUtc -ClaimedUtc $claimedUtc
+                    Invoke-WithTerminalResultPublicationMutex -RequestId $requestId -ScopeRoot $resultRoot -Operation {
+                        if (-not (Test-Path -LiteralPath (Join-Path $resultRoot 'broker-result.json') -PathType Leaf)) {
+                            Write-RequestState -ResultRoot $resultRoot -RequestId $requestId -Status $status -Message $errorMessage -CreatedUtc $createdUtc -ClaimedUtc $claimedUtc
+                            Write-TerminalJsonAtomic -Path (Join-Path $resultRoot 'broker-result.json') -Value $terminalResult | Out-Null
+                        }
+                    }
                     continue
                 }
 
@@ -3205,21 +5249,24 @@ try {
             }
             catch {
                 $brokerResultFile = Join-Path $resultRoot 'broker-result.json'
-                if (-not (Test-Path -LiteralPath $brokerResultFile)) {
-                    Write-JsonAtomic -Path (Join-Path $resultRoot 'broker-result.json') -Value ([ordered]@{
-                        RequestId = $requestId
-                        Success = $false
-                        Error = $_.Exception.Message
-                        CreatedUtc = if ($request) { $request.CreatedUtc } else { $null }
-                        ClaimedUtc = if ($claimedUtc) { $claimedUtc.ToString('o') } else { $null }
-                        Cancelled = $false
-                        QueueTimedOut = $false
-                        ExecutionTimedOut = $false
-                        CompletedUtc = [DateTime]::UtcNow.ToString('o')
-                        BrokerIdentity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-                        BrokerSessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
-                    })
-                    Write-RequestState -ResultRoot $resultRoot -RequestId $requestId -Status 'Failed' -Message $_.Exception.Message -CreatedUtc $createdUtc -ClaimedUtc $claimedUtc
+                $terminalError = $_.Exception.Message
+                Invoke-WithTerminalResultPublicationMutex -RequestId $requestId -ScopeRoot $resultRoot -Operation {
+                    if (-not (Test-Path -LiteralPath $brokerResultFile -PathType Leaf)) {
+                        Write-RequestState -ResultRoot $resultRoot -RequestId $requestId -Status 'Failed' -Message $terminalError -CreatedUtc $createdUtc -ClaimedUtc $claimedUtc
+                        Write-TerminalJsonAtomic -Path $brokerResultFile -Value ([ordered]@{
+                            RequestId = $requestId
+                            Success = $false
+                            Error = $terminalError
+                            CreatedUtc = if ($request) { $request.CreatedUtc } else { $null }
+                            ClaimedUtc = if ($claimedUtc) { $claimedUtc.ToString('o') } else { $null }
+                            Cancelled = $false
+                            QueueTimedOut = $false
+                            ExecutionTimedOut = $false
+                            CompletedUtc = [DateTime]::UtcNow.ToString('o')
+                            BrokerIdentity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+                            BrokerSessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
+                        }) | Out-Null
+                    }
                 }
             }
             finally {

@@ -24,13 +24,15 @@ function Test-WorkerCaptureRetryAllowed {
     param(
         [Parameter(Mandatory = $true)] $AttemptResult,
         [Parameter(Mandatory = $true)] [int] $RetryCount,
-        [Parameter(Mandatory = $true)] [bool] $CancellationRequested
+        [Parameter(Mandatory = $true)] [bool] $CancellationRequested,
+        [bool] $ExpectGuestPowerOff = $false
     )
 
     -not [bool]$AttemptResult.Success -and
         [string]$AttemptResult.FailureKind -eq 'CaptureInfrastructure' -and
         $RetryCount -lt 1 -and
-        -not $CancellationRequested
+        -not $CancellationRequested -and
+        -not $ExpectGuestPowerOff
 }
 
 function Publish-WorkerAttemptResult {
@@ -40,9 +42,14 @@ function Publish-WorkerAttemptResult {
         [hashtable] $TerminalStateParameters
     )
 
+    return Invoke-WithTerminalResultPublicationMutex -RequestId $RequestId -ScopeRoot $DestinationRoot -Operation {
     $attemptBrokerResult = Join-Path $AttemptRoot 'broker-result.json'
     if (-not (Test-Path -LiteralPath $attemptBrokerResult -PathType Leaf)) {
         throw 'The worker attempt did not publish broker-result.json.'
+    }
+    $destinationBrokerResult = Join-Path $DestinationRoot 'broker-result.json'
+    if (Test-Path -LiteralPath $destinationBrokerResult -PathType Leaf) {
+        throw 'A terminal broker result already exists; refusing to overwrite or replay the request.'
     }
     foreach ($item in @(Get-ChildItem -LiteralPath $AttemptRoot -Force | Where-Object Name -ne 'broker-result.json')) {
         Move-Item -LiteralPath $item.FullName -Destination (Join-Path $DestinationRoot $item.Name) -Force
@@ -52,8 +59,9 @@ function Publish-WorkerAttemptResult {
     }
     # The client treats this filename as the terminal publication marker, so it
     # must be promoted only after every other evidence file is in place.
-    Move-Item -LiteralPath $attemptBrokerResult -Destination (Join-Path $DestinationRoot 'broker-result.json') -Force
+    Move-Item -LiteralPath $attemptBrokerResult -Destination $destinationBrokerResult
     Remove-Item -LiteralPath $AttemptRoot -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Set-WorkerCaptureRetry {
@@ -113,6 +121,15 @@ try {
     New-Item -ItemType Directory -Force -Path $attemptRoot | Out-Null
     $attemptError = $null
     try {
+        $latestOwnership = Read-PoolWorkerState -BrokerRoot $BrokerRoot -WorkerId $WorkerId
+        $terminalResultPath = Join-Path $resultRoot 'broker-result.json'
+        if (-not $latestOwnership -or
+            -not [string]::Equals([string]$latestOwnership.OperationId, $OperationId, [StringComparison]::Ordinal) -or
+            -not [string]::Equals([string]$latestOwnership.RequestId, $RequestId, [StringComparison]::Ordinal) -or
+            $null -eq $latestOwnership.ProcessId -or [int]$latestOwnership.ProcessId -ne $PID -or
+            (Test-Path -LiteralPath $terminalResultPath -PathType Leaf)) {
+            throw 'The pool worker no longer owns this request; delivery was aborted before application launch.'
+        }
         Invoke-GuestRequest -Request $request -ResultRoot $attemptRoot -RequestStateRoot $resultRoot -Config $workerConfig -ClaimedUtc ([DateTime]::Parse($ClaimedUtc).ToUniversalTime())
     }
     catch {
@@ -125,7 +142,9 @@ try {
         throw 'The guest request attempt ended without broker-result.json.'
     }
     $attemptResult = Get-Content -Raw -LiteralPath $attemptBrokerPath | ConvertFrom-Json
-    $captureRetryAllowed = Test-WorkerCaptureRetryAllowed -AttemptResult $attemptResult -RetryCount $retryCount -CancellationRequested (Test-Path -LiteralPath (Join-Path (Join-Path $BrokerRoot 'Cancellations') ($RequestId + '.json')) -PathType Leaf)
+    $requestExpectProperty = $request.PSObject.Properties['ExpectGuestPowerOff']
+    $requestExpectsGuestPowerOff = $requestExpectProperty -and $requestExpectProperty.Value -is [bool] -and [bool]$requestExpectProperty.Value
+    $captureRetryAllowed = Test-WorkerCaptureRetryAllowed -AttemptResult $attemptResult -RetryCount $retryCount -CancellationRequested (Test-Path -LiteralPath (Join-Path (Join-Path $BrokerRoot 'Cancellations') ($RequestId + '.json')) -PathType Leaf) -ExpectGuestPowerOff $requestExpectsGuestPowerOff
     if ($captureRetryAllowed) {
         Set-WorkerCaptureRetry -Request $request -AttemptResult $attemptResult -AttemptRoot $attemptRoot
         Write-RequestState -ResultRoot $resultRoot -RequestId $RequestId -Status 'RetryPendingRecycle' -Message 'A transient capture failure will be replayed once on a clean pool worker.' -CreatedUtc ([DateTime]::Parse([string]$request.CreatedUtc).ToUniversalTime()) -ClaimedUtc ([DateTime]::Parse($ClaimedUtc).ToUniversalTime())
@@ -164,28 +183,33 @@ try {
 catch {
     $exitCode = 1
     $brokerResultPath = Join-Path $resultRoot 'broker-result.json'
-    if (-not $retryRequested -and -not (Test-Path -LiteralPath $brokerResultPath -PathType Leaf)) {
-        $vmFinalState = 'Unknown'
-        try { $vmFinalState = [string](Get-VM -Name ([string]$worker.VmName)).State } catch { }
-        $requestCreatedUtc = if ($request -and -not [string]::IsNullOrWhiteSpace([string]$request.CreatedUtc)) { [DateTime]::Parse([string]$request.CreatedUtc).ToUniversalTime() } else { $null }
-        Write-RequestState -ResultRoot $resultRoot -RequestId $RequestId -Status 'Failed' -Message $_.Exception.Message -CreatedUtc $requestCreatedUtc -ClaimedUtc ([DateTime]::Parse($ClaimedUtc).ToUniversalTime()) -WorkerId $WorkerId
-        Write-JsonAtomic -Path $brokerResultPath -Value ([ordered]@{
-            RequestId = $RequestId
-            Success = $false
-            HarnessSucceeded = $false
-            OverallSucceeded = $false
-            TestEvaluated = $false
-            TestPassed = $null
-            FailureKind = 'Harness'
-            Error = $_.Exception.Message
-            FailureStage = 'WorkerProcess'
-            ClaimedUtc = $ClaimedUtc
-            CompletedUtc = [DateTime]::UtcNow.ToString('o')
-            VmName = [string]$worker.VmName
-            VmFinalState = $vmFinalState
-            PoolWorkerId = $WorkerId
-            PoolWorkerRecyclePending = $true
-        })
+    $terminalError = $_.Exception.Message
+    if (-not $retryRequested) {
+        Invoke-WithTerminalResultPublicationMutex -RequestId $RequestId -ScopeRoot $resultRoot -Operation {
+            if (-not (Test-Path -LiteralPath $brokerResultPath -PathType Leaf)) {
+                $vmFinalState = 'Unknown'
+                try { $vmFinalState = [string](Get-VM -Name ([string]$worker.VmName)).State } catch { }
+                $requestCreatedUtc = if ($request -and -not [string]::IsNullOrWhiteSpace([string]$request.CreatedUtc)) { [DateTime]::Parse([string]$request.CreatedUtc).ToUniversalTime() } else { $null }
+                Write-RequestState -ResultRoot $resultRoot -RequestId $RequestId -Status 'Failed' -Message $terminalError -CreatedUtc $requestCreatedUtc -ClaimedUtc ([DateTime]::Parse($ClaimedUtc).ToUniversalTime()) -WorkerId $WorkerId
+                Write-TerminalJsonAtomic -Path $brokerResultPath -Value ([ordered]@{
+                    RequestId = $RequestId
+                    Success = $false
+                    HarnessSucceeded = $false
+                    OverallSucceeded = $false
+                    TestEvaluated = $false
+                    TestPassed = $null
+                    FailureKind = 'Harness'
+                    Error = $terminalError
+                    FailureStage = 'WorkerProcess'
+                    ClaimedUtc = $ClaimedUtc
+                    CompletedUtc = [DateTime]::UtcNow.ToString('o')
+                    VmName = [string]$worker.VmName
+                    VmFinalState = $vmFinalState
+                    PoolWorkerId = $WorkerId
+                    PoolWorkerRecyclePending = $true
+                }) | Out-Null
+            }
+        }
     }
 }
 finally {
