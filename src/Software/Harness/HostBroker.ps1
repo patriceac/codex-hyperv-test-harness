@@ -1817,8 +1817,7 @@ try {
     $credentialData = Get-Content -Raw -LiteralPath __CREDENTIAL_PATH__ | ConvertFrom-Json
     $securePassword = ConvertTo-SecureString ([string]$credentialData.Password) -AsPlainText -Force
     $credential = New-Object Management.Automation.PSCredential([string]$credentialData.UserName, $securePassword)
-    $sessionOption = New-PSSessionOption -OpenTimeout 15000 -OperationTimeout 15000 -CancelTimeout 1000
-    $session = New-PSSession -VMName __VM_NAME__ -Credential $credential -SessionOption $sessionOption -ErrorAction Stop
+    $session = New-PSSession -VMName __VM_NAME__ -Credential $credential -ErrorAction Stop
     $presenceScript = {
         param($InboxFile, $ProcessingFile, $CompletedFile, $Outbox)
         [ordered]@{
@@ -2278,10 +2277,7 @@ function Open-GuestSessionReliable {
     for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
         Assert-RequestActive -RequestId $RequestId -ExecutionDeadlineUtc $ExecutionDeadlineUtc
         try {
-            $remainingMilliseconds = [Math]::Max(1000, [Math]::Floor(($ExecutionDeadlineUtc - [DateTime]::UtcNow).TotalMilliseconds))
-            $remoteOperationTimeout = [int][Math]::Min(15000, $remainingMilliseconds)
-            $sessionOption = New-PSSessionOption -OpenTimeout $remoteOperationTimeout -OperationTimeout $remoteOperationTimeout -CancelTimeout 1000
-            return New-PSSession -VMName $VmName -Credential $Credential -SessionOption $sessionOption -ErrorAction Stop
+            return New-PSSession -VMName $VmName -Credential $Credential -ErrorAction Stop
         }
         catch {
             $lastError = $_
