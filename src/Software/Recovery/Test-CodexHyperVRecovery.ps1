@@ -82,6 +82,7 @@ try {
         'Software\Harness\tests\Test-HostInputTokenExpansion.ps1',
         'Software\Harness\tests\Test-HostInputShareSafety.ps1',
         'Software\Harness\tests\Test-HostInputHostIntegration.ps1',
+        'Software\Harness\tests\Test-ConfigurationPolicyPreservation.ps1',
         'Software\Harness\tests\Test-RequestNetworkingUpdateContract.ps1',
         'Software\Harness\tests\Test-RequestNetworkPropagation.ps1',
         'Software\Harness\tests\Test-RequestNetworkSafety.ps1',

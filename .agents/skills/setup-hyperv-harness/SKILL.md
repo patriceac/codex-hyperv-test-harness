@@ -64,6 +64,8 @@ $parameters = @{
 
 Report the exact command, selected values, resource totals, failed checks, and any discrepancy from the approved proposal. Do not silently redirect the install root or adjust sizing. Stop and obtain a second explicit approval before running a mutating command. The public audit and `-PlanOnly` preflight do not authorize the installation.
 
+For an existing installation, also report `Configuration.ExistingConfigurationSha256`, `RequestNetworkPolicyDisposition`, and `RequestNetworkPolicySha256`. An ordinary source refresh must say `PreservedExisting`; add the exact reviewed configuration hash as `ExpectedExistingConfigurationSha256` to the approved apply parameters. The installer revalidates that fingerprint before staging and preserves the complete schema-valid installed `RequestNetworkPolicy`, including enabled-profile infrastructure identities. Drift, a missing configuration or policy, malformed JSON, an incompatible configuration identity, or an unsupported policy fails closed without replacing the configuration; existing Live, Recovery, Harness, or Setup state is never reclassified as a first installation merely because `harness-config.json` is absent. `ResetRequestNetworkPolicy` is never part of an ordinary refresh: it discards the installed request-network policy and restores fail-closed external-profile defaults, must appear in a new PlanOnly result as `ResetToFailClosed`, and requires separate explicit approval with the exact configuration fingerprint.
+
 ## Rebuild only after the second approval
 
 Tell the user to save open work. Run `setup\Install.ps1` with the exact approved parameter set and restart/recovery switches. A human may use `INSTALL.cmd` as a pausing wrapper only when the same explicit arguments are supplied. Never invoke a bare installer command during Codex-guided setup. Keep the approved values unchanged through retries and resume.
@@ -112,6 +114,8 @@ Never infer permission for `-ForceRebuild`. It removes only this harness's named
 ## Maintain
 
 After intentional baseline or backend changes, run `setup\Refresh-LocalRecovery.ps1 -InstallRoot '<USER_SELECTED_NON_ROOT_DIRECTORY>'`. Before any public push, rerun `setup\Test-PublicRepository.ps1`; no media, VM state, binaries, credentials, request evidence, or personal profile data may enter Git.
+
+For an ordinary source refresh, first run `setup\Install.ps1 -PlanOnly` with every selected value. If an existing configuration is detected, the plan must report `PreservedExisting`; copy its exact `ExistingConfigurationSha256` into `ExpectedExistingConfigurationSha256` for the separately approved apply. Never use `ResetRequestNetworkPolicy` to work around an unexpected validation failure. Review the installed configuration and renew the proposal; use the reset switch only when the user explicitly chooses to discard the installed runtime request-network policy and return `InternetOnly` and `TrustedLan` to disabled defaults.
 
 Treat enabling or changing runtime request networking as a privileged broker-policy update, not as image maintenance and not as an ordinary test request. Keep `None` as the request default. The runner may choose `None`, `InternetOnly`, `IsolatedTestNet`, or `TrustedLan`, plus an isolated cohort where required; it never chooses a switch, NAT, address, DNS server, route, VLAN, or firewall rule. Enabled `TrustedLan` policy must contain exactly one external switch pinned by logical ID and physical-interface identity.
 

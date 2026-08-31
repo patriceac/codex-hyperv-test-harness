@@ -171,6 +171,7 @@ $recoveryVerifierText = Get-Content -LiteralPath $recoveryVerifierPath -Raw
 foreach ($requiredRecoveryPath in @(
     'Software\Setup\Update-RequestNetworking.ps1',
     'Software\Harness\RequestNetwork.ps1',
+    'Software\Harness\tests\Test-ConfigurationPolicyPreservation.ps1',
     'Software\Harness\tests\Test-RequestNetworkingUpdateContract.ps1',
     'Software\Harness\tests\Test-RequestNetworkPropagation.ps1',
     'Software\Harness\tests\Test-RequestNetworkSafety.ps1',

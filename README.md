@@ -82,6 +82,8 @@ $parameters = @{
 
 `INSTALL.cmd` remains available as a pausing wrapper, but guided recovery must pass the user's selected values explicitly instead of relying on its compatibility defaults. Save open work before the approved installation starts: if Hyper-V is disabled, the installer registers a narrow resume task and restarts Windows automatically unless `-NoRestart` is supplied. The installer requests elevation once, downloads the current official x64 multi-edition Windows 11 ISO through Microsoft's own download page, validates the media, finds `EditionId=Professional`, installs Windows 11 Pro unattended, builds the worker pool, installs the SYSTEM broker and Codex skill, performs its own elevated audit and isolated visual canary, and creates a faster local recovery bundle.
 
+On an existing installation, PlanOnly reports the installed configuration and request-network-policy fingerprints. An ordinary source refresh must report `PreservedExisting`; the approved apply must include the exact reported `ExpectedExistingConfigurationSha256`. The full validated installed policy is then preserved atomically, including deliberately enabled `InternetOnly` or `TrustedLan` identities. Missing, malformed, incompatible, or changed configuration fails closed. `ResetRequestNetworkPolicy` is a separately reviewed and approved recovery path that intentionally replaces the installed policy with fail-closed external-profile defaults; it is not an ordinary refresh option.
+
 Windows activation and licensing are intentionally outside this project. The guest may remain unactivated until the user handles licensing.
 
 ## Reference profile and compatibility defaults

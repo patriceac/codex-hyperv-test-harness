@@ -222,7 +222,8 @@ function Assert-RequestNetworkPolicySchema {
             }
         }
         foreach ($prefix in @($internet.DenyRemotePrefixes)) {
-            $null = ConvertTo-RequestNetworkCanonicalAclAddress -Address ([string]$prefix)
+            $prefixText = [string]$prefix
+            $null = ConvertTo-RequestNetworkCanonicalAclAddress -Address $prefixText -AddressType (Get-RequestNetworkIpAclAddressType -Address $prefixText)
         }
     }
 

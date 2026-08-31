@@ -20,6 +20,8 @@ param(
     [switch] $SkipLocalRecoveryBundle,
     [switch] $AllowLowResources,
     [switch] $ForceRebuild,
+    [ValidatePattern('^[A-Fa-f0-9]{64}$')] [string] $ExpectedExistingConfigurationSha256,
+    [switch] $ResetRequestNetworkPolicy,
     [switch] $PlanOnly,
     [switch] $SkipGlobalPolicy,
     [switch] $NoElevation
@@ -138,7 +140,8 @@ function Get-ElevationArguments {
         '-AttemptId', $AttemptId, '-NoElevation'
     )
     if (-not [string]::IsNullOrWhiteSpace($ExpectedDotNetSdkVersion)) { $arguments += @('-ExpectedDotNetSdkVersion', $ExpectedDotNetSdkVersion) }
-    foreach ($switchName in @('Resume','NoRestart','SkipSmokeTest','SkipLocalRecoveryBundle','AllowLowResources','ForceRebuild','SkipGlobalPolicy')) {
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedExistingConfigurationSha256)) { $arguments += @('-ExpectedExistingConfigurationSha256', $ExpectedExistingConfigurationSha256) }
+    foreach ($switchName in @('Resume','NoRestart','SkipSmokeTest','SkipLocalRecoveryBundle','AllowLowResources','ForceRebuild','ResetRequestNetworkPolicy','SkipGlobalPolicy')) {
         if ((Get-Variable -Name $switchName -ValueOnly)) { $arguments += '-' + $switchName }
     }
     $arguments
@@ -277,6 +280,25 @@ function Remove-ExistingHarnessVms {
     }
 }
 
+$configurationScript = if ($runningFromCheckout) { Join-Path $PSScriptRoot 'New-HarnessConfiguration.ps1' } else { Join-Path $installedSetup 'New-HarnessConfiguration.ps1' }
+$configurationParameters = @{
+    InstallRoot = $InstallRoot
+    PoolSize = $PoolSize
+    VmMemoryGiB = $VmMemoryGiB
+    VmProcessorCount = $VmProcessorCount
+    IdleTimeoutSeconds = $IdleTimeoutSeconds
+    DisplayWidth = $DisplayWidth
+    DisplayHeight = $DisplayHeight
+    OutputPath = $configPath
+    PlanOnly = $true
+}
+if (-not [string]::IsNullOrWhiteSpace($ExpectedExistingConfigurationSha256)) { $configurationParameters.ExpectedExistingConfigurationSha256 = $ExpectedExistingConfigurationSha256 }
+if ($ResetRequestNetworkPolicy) { $configurationParameters.ResetRequestNetworkPolicy = $true }
+$configurationPreview = & $configurationScript @configurationParameters
+if (-not $PlanOnly -and [bool]$configurationPreview.ExistingConfigurationDetected -and [string]::IsNullOrWhiteSpace($ExpectedExistingConfigurationSha256)) {
+    throw 'An existing harness configuration can be refreshed only with ExpectedExistingConfigurationSha256 from the reviewed PlanOnly result.'
+}
+
 if ($PlanOnly) {
     $preflightPath = if ($runningFromCheckout) { Join-Path $PSScriptRoot 'Test-Prerequisites.ps1' } else { Join-Path $installedSetup 'Test-Prerequisites.ps1' }
     $preflightJson = & $preflightPath -InstallRoot $InstallRoot -PoolSize $PoolSize -VmMemoryGiB $VmMemoryGiB -GuestUpdateSwitchName $GuestUpdateSwitchName -DotNetChannel $DotNetChannel -ExpectedDotNetSdkVersion $ExpectedDotNetSdkVersion -AllowLowResources:$AllowLowResources -AsJson -ReportOnly
@@ -295,6 +317,16 @@ if ($PlanOnly) {
             NetworkFinalState = 'Disconnected before the clean checkpoint is created'
         }
         Pool = "$PoolSize $workerNoun, $VmMemoryGiB GiB each, ${DisplayWidth}x${DisplayHeight}, $IdleTimeoutSeconds second idle timeout"
+        Configuration = [ordered]@{
+            ExistingConfigurationDetected = [bool]$configurationPreview.ExistingConfigurationDetected
+            ExistingConfigurationSha256 = $configurationPreview.ExistingConfigurationSha256
+            ApplyRequiresExpectedExistingConfigurationSha256 = [bool]$configurationPreview.ExistingConfigurationDetected
+            RequestNetworkPolicyDisposition = [string]$configurationPreview.RequestNetworkPolicyDisposition
+            RequestNetworkPolicySha256 = [string]$configurationPreview.RequestNetworkPolicySha256
+            IntentionalPolicyReset = [bool]$configurationPreview.IntentionalPolicyReset
+            PolicyResetApproval = if ($ResetRequestNetworkPolicy) { 'Separate explicit approval required before apply' } else { 'Not requested' }
+            NoMutationPerformed = $true
+        }
         Licensing = 'Not configured; activation and licensing remain the user responsibility'
         Preflight = $preflightJson | ConvertFrom-Json
     }
@@ -325,13 +357,17 @@ try {
         throw "Required prerequisite checks failed: $failedChecks"
     }
 
+    $configurationPreview = & $configurationScript @configurationParameters
+
     Write-SetupState -Phase 'StagingSource' -Message 'Installing the sanitized harness source and resumable setup scripts.'
     New-Item -ItemType Directory -Force -Path $installedSoftware, $installedSetup | Out-Null
     if ($runningFromCheckout) {
-        Invoke-Robocopy -Source $sourceSoftware -Destination $installedSoftware -Mirror -ExcludeFiles @('*.exe','pool-definition.json','pool-provision-status.json','pool-broker-install-status.json','guest-credential.json') -ExcludeDirectories @('private','seed-build')
+        Invoke-Robocopy -Source $sourceSoftware -Destination $installedSoftware -Mirror -ExcludeFiles @('*.exe','harness-config.json','pool-definition.json','pool-provision-status.json','pool-broker-install-status.json','guest-credential.json') -ExcludeDirectories @('private','seed-build')
         Invoke-Robocopy -Source $PSScriptRoot -Destination $installedSetup -Mirror -ExcludeDirectories @('artifacts')
     }
-    $layout = & (Join-Path $installedSetup 'New-HarnessConfiguration.ps1') -InstallRoot $InstallRoot -PoolSize $PoolSize -VmMemoryGiB $VmMemoryGiB -VmProcessorCount $VmProcessorCount -IdleTimeoutSeconds $IdleTimeoutSeconds -DisplayWidth $DisplayWidth -DisplayHeight $DisplayHeight -OutputPath $configPath
+    $null = $configurationParameters.Remove('PlanOnly')
+    $layout = & (Join-Path $installedSetup 'New-HarnessConfiguration.ps1') @configurationParameters
+    $ExpectedExistingConfigurationSha256 = [string]$layout.CommittedConfigurationSha256
     . (Join-Path ([string]$layout.HarnessSourceRoot) 'HarnessPaths.ps1')
     $layout = Get-CodexHarnessConfig -ConfigPath $configPath
     Install-LocationPointer -Layout $layout
