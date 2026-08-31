@@ -1183,7 +1183,7 @@ function Stop-TestVm {
 }
 
 function ConvertTo-PowerShellSingleQuotedLiteral {
-    param([Parameter(Mandatory = $true)] [string] $Value)
+    param([Parameter(Mandatory = $true)] [AllowEmptyString()] [string] $Value)
 
     "'" + $Value.Replace("'", "''") + "'"
 }
