@@ -31,6 +31,7 @@ namespace Codex.HostControl
 
     public static class HostControlContract
     {
+        private static readonly double[] HaloBandBaseOpacity = new double[] { 0.96, 0.52, 0.30, 0.17, 0.10, 0.05 };
         public const int InitialWarningSeconds = 5;
         public const int ResumeIdleSeconds = 10;
         public const int CancelVirtualKey = 0x1B;
@@ -38,6 +39,10 @@ namespace Codex.HostControl
         public const uint SyntheticInputMarker32 = 0x58484F53U;
         public const string ActiveHaloHex = "#F000FF";
         public const string PausedHaloHex = "#FFB000";
+        public const int HaloFrameThicknessPixels = 12;
+        public const int HaloCoreThicknessPixels = 2;
+        public const int HaloBandThicknessPixels = 2;
+        public const int HaloBandCount = 6;
 
         public static ulong SyntheticInputMarker
         {
@@ -66,6 +71,21 @@ namespace Codex.HostControl
         public static bool HasUnobservedPhysicalInput(long currentVersion, long observedVersion)
         {
             return currentVersion != observedVersion;
+        }
+
+        public static bool ShouldPauseForPhysicalInput(bool pauseDetectionArmed, long currentVersion, long observedVersion)
+        {
+            return pauseDetectionArmed && HasUnobservedPhysicalInput(currentVersion, observedVersion);
+        }
+
+        public static double GetHaloBandOpacity(int bandIndex, double intensity)
+        {
+            if (bandIndex < 0 || bandIndex >= HaloBandCount)
+            {
+                throw new ArgumentOutOfRangeException("bandIndex");
+            }
+            double clampedIntensity = Math.Max(0.0, Math.Min(1.0, intensity));
+            return HaloBandBaseOpacity[bandIndex] * clampedIntensity;
         }
 
         public static int GetResumeDelayMilliseconds(DateTime nowUtc, DateTime lastPhysicalInputUtc)
@@ -476,7 +496,7 @@ namespace Codex.HostControl
         private readonly Control _dispatcher;
         private readonly System.Windows.Forms.Timer _timer;
         private readonly Stopwatch _animation = Stopwatch.StartNew();
-        private readonly List<HaloEdgeForm> _forms = new List<HaloEdgeForm>();
+        private readonly List<HaloBandForm> _forms = new List<HaloBandForm>();
         private HaloState _state = HaloState.Warning;
         private bool _captureProtectionSucceeded = true;
         private string _captureProtectionMode = "ExcludeFromCapture";
@@ -520,7 +540,7 @@ namespace Codex.HostControl
                 _dispatcher.Invoke(new Action<bool>(SetVisible), visible);
                 return;
             }
-            foreach (HaloEdgeForm form in _forms)
+            foreach (HaloBandForm form in _forms)
             {
                 form.Visible = visible;
             }
@@ -593,25 +613,18 @@ namespace Codex.HostControl
             _captureProtectionSucceeded = true;
             _captureProtectionMode = "ExcludeFromCapture";
             _captureProtectionError = 0;
-            double[] baseIntensity = new double[] { 0.22, 0.50, 1.0 };
-            int[] thickness = new int[] { 14, 7, 3 };
             foreach (Screen screen in Screen.AllScreens)
             {
-                for (int layer = 0; layer < thickness.Length; layer++)
+                for (int bandIndex = 0; bandIndex < HostControlContract.HaloBandCount; bandIndex++)
                 {
-                    int size = thickness[layer];
-                    Rectangle bounds = screen.Bounds;
-                    AddEdge(new Rectangle(bounds.Left, bounds.Top, bounds.Width, size), baseIntensity[layer]);
-                    AddEdge(new Rectangle(bounds.Left, bounds.Bottom - size, bounds.Width, size), baseIntensity[layer]);
-                    AddEdge(new Rectangle(bounds.Left, bounds.Top, size, bounds.Height), baseIntensity[layer]);
-                    AddEdge(new Rectangle(bounds.Right - size, bounds.Top, size, bounds.Height), baseIntensity[layer]);
+                    AddFrameBand(screen.Bounds, bandIndex);
                 }
             }
         }
 
-        private void AddEdge(Rectangle bounds, double baseIntensity)
+        private void AddFrameBand(Rectangle bounds, int bandIndex)
         {
-            HaloEdgeForm form = new HaloEdgeForm(bounds, baseIntensity);
+            HaloBandForm form = new HaloBandForm(bounds, bandIndex);
             form.Show();
             _captureProtectionSucceeded = _captureProtectionSucceeded && form.CaptureProtectionSucceeded;
             if (!form.CaptureProtectionSucceeded)
@@ -630,7 +643,7 @@ namespace Codex.HostControl
 
         private void CloseHaloForms()
         {
-            foreach (HaloEdgeForm form in _forms)
+            foreach (HaloBandForm form in _forms)
             {
                 form.Close();
                 form.Dispose();
@@ -650,12 +663,12 @@ namespace Codex.HostControl
             Color color;
             if (_state == HaloState.Warning)
             {
-                intensity = 0.62 + (0.38 * ((Math.Sin(seconds * Math.PI * 2.0 / 1.0) + 1.0) / 2.0));
+                intensity = 0.70 + (0.30 * ((Math.Sin(seconds * Math.PI * 2.0 / 1.8) + 1.0) / 2.0));
                 color = ColorTranslator.FromHtml(HostControlContract.ActiveHaloHex);
             }
             else if (_state == HaloState.Active)
             {
-                intensity = 0.76 + (0.24 * ((Math.Sin(seconds * Math.PI * 2.0 / 3.6) + 1.0) / 2.0));
+                intensity = 0.78 + (0.22 * ((Math.Sin(seconds * Math.PI * 2.0 / 3.6) + 1.0) / 2.0));
                 color = ColorTranslator.FromHtml(HostControlContract.ActiveHaloHex);
             }
             else
@@ -664,14 +677,14 @@ namespace Codex.HostControl
                 color = ColorTranslator.FromHtml(HostControlContract.PausedHaloHex);
             }
 
-            foreach (HaloEdgeForm form in _forms)
+            foreach (HaloBandForm form in _forms)
             {
                 form.Apply(color, intensity);
             }
         }
     }
 
-    internal sealed class HaloEdgeForm : Form
+    internal sealed class HaloBandForm : Form
     {
         private const int WS_EX_TRANSPARENT = 0x00000020;
         private const int WS_EX_TOOLWINDOW = 0x00000080;
@@ -680,28 +693,32 @@ namespace Codex.HostControl
         private const int HTTRANSPARENT = -1;
         private const uint WDA_MONITOR = 0x00000001;
         private const uint WDA_EXCLUDEFROMCAPTURE = 0x00000011;
-        private readonly double _baseIntensity;
+        private readonly int _bandIndex;
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool SetWindowDisplayAffinity(IntPtr window, uint affinity);
 
-        public HaloEdgeForm(Rectangle bounds, double baseIntensity)
+        public HaloBandForm(Rectangle bounds, int bandIndex)
         {
-            _baseIntensity = baseIntensity;
+            if (bandIndex < 0 || bandIndex >= HostControlContract.HaloBandCount)
+            {
+                throw new ArgumentOutOfRangeException("bandIndex");
+            }
+            _bandIndex = bandIndex;
             AutoScaleMode = AutoScaleMode.None;
-            // Keep the halo non-layered: opacity-backed WinForms windows can be
-            // rejected by SetWindowDisplayAffinity. RGB intensity provides the
-            // same graduated glow while retaining the most compatible window type.
-            BackColor = Color.FromArgb(48, 0, 51);
+            BackColor = ColorTranslator.FromHtml(HostControlContract.ActiveHaloHex);
             Bounds = bounds;
             Enabled = false;
             FormBorderStyle = FormBorderStyle.None;
             MaximizeBox = false;
             MinimizeBox = false;
+            Opacity = HostControlContract.GetHaloBandOpacity(_bandIndex, 0.7);
+            ResizeRedraw = true;
             ShowIcon = false;
             ShowInTaskbar = false;
             StartPosition = FormStartPosition.Manual;
             TopMost = true;
+            ApplyBandRegion();
         }
 
         public bool CaptureProtectionSucceeded { get; private set; }
@@ -739,6 +756,12 @@ namespace Codex.HostControl
             }
         }
 
+        protected override void OnSizeChanged(EventArgs args)
+        {
+            base.OnSizeChanged(args);
+            ApplyBandRegion();
+        }
+
         protected override void WndProc(ref Message message)
         {
             if (message.Msg == WM_NCHITTEST)
@@ -751,11 +774,41 @@ namespace Codex.HostControl
 
         public void Apply(Color color, double intensity)
         {
-            double brightness = Math.Max(0.04, Math.Min(1.0, _baseIntensity * intensity));
-            BackColor = Color.FromArgb(
-                (int)Math.Round(color.R * brightness),
-                (int)Math.Round(color.G * brightness),
-                (int)Math.Round(color.B * brightness));
+            BackColor = color;
+            Opacity = HostControlContract.GetHaloBandOpacity(_bandIndex, intensity);
+        }
+
+        private void ApplyBandRegion()
+        {
+            if (ClientSize.Width <= 0 || ClientSize.Height <= 0)
+            {
+                return;
+            }
+
+            int outerInset = _bandIndex * HostControlContract.HaloBandThicknessPixels;
+            int innerInset = Math.Min(
+                outerInset + HostControlContract.HaloBandThicknessPixels,
+                Math.Min(ClientSize.Width / 2, ClientSize.Height / 2));
+            Rectangle outerBounds = new Rectangle(
+                outerInset,
+                outerInset,
+                ClientSize.Width - (outerInset * 2),
+                ClientSize.Height - (outerInset * 2));
+            Region band = new Region(outerBounds);
+            if (ClientSize.Width > innerInset * 2 && ClientSize.Height > innerInset * 2)
+            {
+                band.Exclude(new Rectangle(
+                    innerInset,
+                    innerInset,
+                    ClientSize.Width - (innerInset * 2),
+                    ClientSize.Height - (innerInset * 2)));
+            }
+            Region previous = Region;
+            Region = band;
+            if (previous != null)
+            {
+                previous.Dispose();
+            }
         }
     }
 

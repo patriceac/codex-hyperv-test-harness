@@ -16,7 +16,7 @@ Keep the application-under-test off the physical host by default. Build on the h
 
 Trusted compilers, linkers, package managers, linters, and non-application test runners may run on the host. Outside an explicit host override, do not launch the built application, installer, CLI artifact, or packaged desktop process there.
 
-The host controller gives a five-second fuchsia halo warning on every display before launch. Physical mouse or keyboard activity pauses automation immediately; it resumes only after ten seconds without user input and restores the controlled application to the foreground first. Physical `Escape` cancels the run. The halo is click-through, non-activating, and excluded from evidence capture. These protections do not make host execution isolated.
+The host controller gives a five-second thin, continuous fuchsia halo warning on every display before launch. Ordinary mouse or keyboard activity does not pause that grace period; after it expires, physical input pauses automation immediately. It resumes only after ten seconds without user input and restores the controlled application to the foreground first. Physical `Escape` cancels at any time. The halo is click-through, non-activating, and excluded from evidence capture. These protections do not make host execution isolated.
 
 ## Run an artifact
 

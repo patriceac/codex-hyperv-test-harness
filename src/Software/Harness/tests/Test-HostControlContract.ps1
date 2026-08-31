@@ -45,6 +45,10 @@ $skillText = Get-Content -LiteralPath $skillPath -Raw
 
 Assert-True ($runnerText.Contains('$initialWarningSeconds = 5') -and $runnerText.Contains('$resumeIdleSeconds = 10')) 'The host runner does not pin the requested five-second warning and ten-second idle resume.'
 Assert-True ($runnerText.Contains('Wait-InitialHostControlWarning') -and $runnerText.Contains('Wait-ForHostControlReady') -and $runnerText.Contains('Restore-ControlledWindowFocus')) 'The host runner is missing warning, pause/resume, or refocus integration.'
+$initialWarningFunction = [regex]::Match($runnerText, '(?ms)^function Wait-InitialHostControlWarning \{.*?^\}').Value
+Assert-True (-not [string]::IsNullOrWhiteSpace($initialWarningFunction)) 'The initial host-control grace-period function could not be inspected.'
+Assert-True (-not $initialWarningFunction.Contains('Wait-ForHostControlReady')) 'Ordinary physical input can still enter the amber paused state during the initial five-second grace period.'
+Assert-True ($initialWarningFunction.Contains('$script:observedPhysicalInputVersion = [long]$snapshot.PhysicalInputVersion') -and $initialWarningFunction.Contains('$script:pauseDetectionArmed = $true')) 'The grace period does not discard pre-control activity and arm pause detection only after it expires.'
 Assert-True ($runnerText.Contains("HostExecutionAuthorized is required")) 'The host runner does not fail closed without an explicit host authorization signal.'
 Assert-True (-not ($runnerText -match '\[.*\]\s*\$WarningSeconds') -and -not ($runnerText -match '\[.*\]\s*\$ResumeIdleSeconds')) 'The user-selected host-control timing was accidentally exposed as a caller override.'
 $scenarios.Add('fixed-warning-idle-and-authorization-contract')
@@ -53,6 +57,8 @@ Assert-True ($nativeText.Contains('WH_KEYBOARD_LL') -and $nativeText.Contains('W
 Assert-True ($nativeText.Contains('LLKHF_INJECTED') -and $nativeText.Contains('LLMHF_INJECTED') -and $nativeText.Contains('SyntheticInputMarker')) 'The native guard cannot distinguish controller-generated input from physical input.'
 Assert-True ($nativeText.Contains('CancelVirtualKey = 0x1B') -and $nativeText.Contains('return new IntPtr(1)')) 'Escape cancellation is not globally captured and swallowed while host control is active.'
 Assert-True ($nativeText.Contains('Screen.AllScreens') -and $nativeText.Contains('WS_EX_TRANSPARENT') -and $nativeText.Contains('WS_EX_NOACTIVATE') -and $nativeText.Contains('WM_NCHITTEST') -and $nativeText.Contains('HTTRANSPARENT')) 'The halo is not multi-monitor, click-through, and non-activating.'
+Assert-True ($nativeText.Contains('HaloBandForm') -and $nativeText.Contains('AddFrameBand(screen.Bounds, bandIndex)') -and $nativeText.Contains('ApplyBandRegion')) 'The halo is not rendered as one continuous, non-overlapping frame stack per monitor.'
+Assert-True (-not $nativeText.Contains('HaloEdgeForm') -and -not $nativeText.Contains('AddEdge(')) 'The overlapping edge-window halo implementation is still present.'
 Assert-True ($nativeText.Contains('WDA_EXCLUDEFROMCAPTURE') -and $nativeText.Contains('WDA_MONITOR') -and $runnerText.Contains('HaloSuppressedCopyFromScreen') -and $runnerText.Contains('CaptureProtectionSucceeded')) 'The halo is not protected from runner screenshot evidence with a compatible fallback.'
 Assert-True ($nativeText.Contains('MOUSEEVENTF_VIRTUALDESK') -and $nativeText.Contains('MOUSEEVENTF_ABSOLUTE')) 'Synthetic mouse input does not support the complete multi-monitor virtual desktop.'
 $scenarios.Add('native-input-halo-and-capture-safety-contract')
@@ -75,6 +81,13 @@ Add-Type -Path '$escapedNative' -ReferencedAssemblies @('System.dll','System.Cor
     MarkedMouse = [Codex.HostControl.HostControlContract]::IsPhysicalMouseInput(0, [Codex.HostControl.HostControlContract]::SyntheticInputMarker)
     NewActivity = [Codex.HostControl.HostControlContract]::HasUnobservedPhysicalInput(3, 2)
     SameActivity = [Codex.HostControl.HostControlContract]::HasUnobservedPhysicalInput(3, 3)
+    UnarmedNewActivity = [Codex.HostControl.HostControlContract]::ShouldPauseForPhysicalInput(`$false, 3, 2)
+    ArmedNewActivity = [Codex.HostControl.HostControlContract]::ShouldPauseForPhysicalInput(`$true, 3, 2)
+    ArmedSameActivity = [Codex.HostControl.HostControlContract]::ShouldPauseForPhysicalInput(`$true, 3, 3)
+    FrameThickness = [Codex.HostControl.HostControlContract]::HaloFrameThicknessPixels
+    CoreThickness = [Codex.HostControl.HostControlContract]::HaloCoreThicknessPixels
+    BandThickness = [Codex.HostControl.HostControlContract]::HaloBandThicknessPixels
+    HaloOpacity = @(0..5 | ForEach-Object { [Codex.HostControl.HostControlContract]::GetHaloBandOpacity(`$_, 1.0) })
     ResumeAtNineSeconds = [Codex.HostControl.HostControlContract]::GetResumeDelayMilliseconds(`$probeNow, `$probeNow.AddSeconds(-9))
     ResumeAtTenSeconds = [Codex.HostControl.HostControlContract]::GetResumeDelayMilliseconds(`$probeNow, `$probeNow.AddSeconds(-10))
 } | ConvertTo-Json -Compress
@@ -86,6 +99,14 @@ Assert-True ($nativeContract.Warning -eq 5 -and $nativeContract.Resume -eq 10 -a
 Assert-True ($nativeContract.PhysicalKeyboard -and $nativeContract.PhysicalMouse) 'Physical input was not classified as user activity.'
 Assert-True (-not $nativeContract.InjectedKeyboard -and -not $nativeContract.MarkedKeyboard -and -not $nativeContract.InjectedMouse -and -not $nativeContract.MarkedMouse) 'Controller-generated input would incorrectly pause its own host-control run.'
 Assert-True ($nativeContract.NewActivity -and -not $nativeContract.SameActivity) 'The compiled pause decision does not distinguish new physical input.'
+Assert-True (-not $nativeContract.UnarmedNewActivity -and $nativeContract.ArmedNewActivity -and -not $nativeContract.ArmedSameActivity) 'Physical input can pause before the grace period expires or fails to pause after it is armed.'
+Assert-True ($nativeContract.FrameThickness -eq 12 -and $nativeContract.CoreThickness -eq 2 -and $nativeContract.BandThickness -eq 2) 'The continuous halo frame does not keep the intended thin core and restrained inward glow.'
+$haloOpacity = @($nativeContract.HaloOpacity | ForEach-Object { [double]$_ })
+Assert-True ($haloOpacity.Count -eq 6 -and $haloOpacity[0] -ge 0.95) 'The halo does not keep a crisp two-pixel fuchsia core.'
+for ($index = 1; $index -lt $haloOpacity.Count; $index++) {
+    Assert-True ($haloOpacity[$index] -lt $haloOpacity[$index - 1]) 'The halo glow opacity does not fade smoothly inward.'
+}
+Assert-True ($haloOpacity[-1] -le 0.051) 'The inner halo edge does not fade to a restrained glow.'
 Assert-True ($nativeContract.ResumeAtNineSeconds -ge 900 -and $nativeContract.ResumeAtNineSeconds -le 1100 -and $nativeContract.ResumeAtTenSeconds -eq 0) 'The compiled resume decision does not require ten uninterrupted idle seconds.'
 $scenarios.Add('native-source-compiles-and-input-classification-passes')
 
@@ -100,6 +121,8 @@ Assert-True ($validationResult.ExitCode -eq 0) "The host runner validation-only 
 $validation = $validationResult.Text | ConvertFrom-Json
 Assert-True ($validation.Success -and $validation.Status -eq 'Validated' -and $validation.ActionCount -eq 1) 'The host runner did not validate a supported action contract.'
 Assert-True ($validation.HostControl.InitialWarningSeconds -eq 5 -and $validation.HostControl.ResumeIdleSeconds -eq 10 -and $validation.HostControl.CancelKey -eq 'Escape') 'The validation result did not advertise the exact requested interaction policy.'
+Assert-True ($validation.HostControl.InitialGraceInputBehavior -eq 'IgnoreForPause' -and $validation.HostControl.PostGraceInputBehavior -eq 'PauseImmediately') 'The validation result does not distinguish the non-pausing grace period from post-grace user takeover.'
+Assert-True ($validation.HostControl.HaloRendering -eq 'ContinuousNonOverlappingBands' -and $validation.HostControl.HaloFrameThicknessPixels -eq 12) 'The validation result does not advertise the clean continuous halo geometry.'
 $scenarios.Add('validation-only-contract-succeeds-without-launch')
 
 $escapedArtifactDirectory = (Split-Path -Parent $windowsPowerShell).Replace("'", "''")
@@ -134,7 +157,7 @@ $unsafeEvidence = Invoke-WindowsPowerShellEncoded -Script $unsafeEvidenceProbe
 Assert-True ($unsafeEvidence.ExitCode -ne 0 -and $unsafeEvidence.Text -like '*escapes the request output directory*') 'The host runner accepted an evidence path traversal.'
 $scenarios.Add('host-evidence-path-traversal-rejected')
 
-Assert-True ($skillText.Contains('Invoke-HostExecutableTest.ps1') -and $skillText.Contains('five-second') -and $skillText.Contains('ten seconds') -and $skillText.Contains('Escape')) 'The runtime skill does not document the explicit host-control path and its user-visible behavior.'
+Assert-True ($skillText.Contains('Invoke-HostExecutableTest.ps1') -and $skillText.Contains('five-second') -and $skillText.Contains('does not pause') -and $skillText.Contains('ten seconds') -and $skillText.Contains('Escape')) 'The runtime skill does not document the explicit host-control path and its user-visible behavior.'
 $scenarios.Add('runtime-skill-documents-host-control')
 
 [pscustomobject][ordered]@{
