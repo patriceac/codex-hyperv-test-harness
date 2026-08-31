@@ -84,12 +84,17 @@ try {
     Copy-Item -Path (Join-Path $stageRoot '*') -Destination $hostStageRoot -Recurse -Force
     $hostManifest = $manifest | ConvertTo-Json -Depth 20 | ConvertFrom-Json
     $hostManifest.StageRoot = 'C:\CodexGuest\EvidenceStage\' + $snapshotId
-    $hostManifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $hostStageRoot 'evidence-copy-manifest.json') -Encoding UTF8
-    Assert-True (Assert-ExpectedPowerOffEvidenceStageMatchesManifest -HostStageRoot $hostStageRoot -Manifest $hostManifest -RequestId 'synthetic-request' -SnapshotId $snapshotId) 'A complete host evidence stage did not pass manifest verification.'
+    $hostManifestPath = Join-Path $hostStageRoot 'evidence-copy-manifest.json'
+    $hostManifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $hostManifestPath -Encoding UTF8
+    $hostManifestSha256 = (Get-FileHash -LiteralPath $hostManifestPath -Algorithm SHA256).Hash
+    $remotedManifest = $hostManifest | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+    $remotedManifest.SkippedFiles = $null
+    $remotedManifest.EnumerationErrors = $null
+    Assert-True (Assert-ExpectedPowerOffEvidenceStageMatchesManifest -HostStageRoot $hostStageRoot -Manifest $remotedManifest -ManifestSha256 $hostManifestSha256 -RequestId 'synthetic-request' -SnapshotId $snapshotId) 'A complete host evidence stage did not pass hash-bound manifest verification after remoting changed empty collection shapes.'
     $tamperedResultPath = Join-Path $hostStageRoot 'result.json'
     [IO.File]::AppendAllText($tamperedResultPath, 'tampered')
     $tamperedTransferRejected = $false
-    try { $null = Assert-ExpectedPowerOffEvidenceStageMatchesManifest -HostStageRoot $hostStageRoot -Manifest $hostManifest -RequestId 'synthetic-request' -SnapshotId $snapshotId }
+    try { $null = Assert-ExpectedPowerOffEvidenceStageMatchesManifest -HostStageRoot $hostStageRoot -Manifest $remotedManifest -ManifestSha256 $hostManifestSha256 -RequestId 'synthetic-request' -SnapshotId $snapshotId }
     catch { $tamperedTransferRejected = $_.Exception.Message -like '*length/SHA-256 verification*' }
     Assert-True $tamperedTransferRejected 'A host evidence file corrupted after PowerShell Direct transfer passed manifest verification.'
     Copy-Item -LiteralPath (Join-Path $stageRoot 'result.json') -Destination $tamperedResultPath -Force
@@ -97,7 +102,7 @@ try {
     New-Item -ItemType Directory -Force -Path $injectedDirectory | Out-Null
     'injected' | Set-Content -LiteralPath (Join-Path $injectedDirectory 'payload.txt') -Encoding UTF8
     $injectedDirectoryRejected = $false
-    try { $null = Assert-ExpectedPowerOffEvidenceStageMatchesManifest -HostStageRoot $hostStageRoot -Manifest $hostManifest -RequestId 'synthetic-request' -SnapshotId $snapshotId }
+    try { $null = Assert-ExpectedPowerOffEvidenceStageMatchesManifest -HostStageRoot $hostStageRoot -Manifest $remotedManifest -ManifestSha256 $hostManifestSha256 -RequestId 'synthetic-request' -SnapshotId $snapshotId }
     catch { $injectedDirectoryRejected = $_.Exception.Message -like '*unmanifested or unsafe directory*' }
     Assert-True $injectedDirectoryRejected 'An unmanifested host-stage directory could bypass inventory verification and reach promotion.'
     $scenarios.Add('host-transfer-is-rehashed-before-promotion')

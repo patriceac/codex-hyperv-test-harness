@@ -1958,6 +1958,7 @@ function Assert-ExpectedPowerOffEvidenceStageMatchesManifest {
     param(
         [Parameter(Mandatory = $true)] [string] $HostStageRoot,
         [Parameter(Mandatory = $true)] $Manifest,
+        [Parameter(Mandatory = $true)] [ValidatePattern('^[A-Fa-f0-9]{64}$')] [string] $ManifestSha256,
         [Parameter(Mandatory = $true)] [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$')] [string] $RequestId,
         [Parameter(Mandatory = $true)] [ValidatePattern('^[a-f0-9]{32}$')] [string] $SnapshotId
     )
@@ -2008,11 +2009,14 @@ function Assert-ExpectedPowerOffEvidenceStageMatchesManifest {
     try { $hostManifest = Get-Content -Raw -LiteralPath $manifestPath -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
     catch { throw "The copied host evidence manifest is unreadable: $($_.Exception.Message)" }
     & $assertManifestIdentity $hostManifest 'The copied host evidence manifest'
-    $returnedManifestJson = $Manifest | ConvertTo-Json -Depth 20 -Compress
-    $copiedManifestJson = $hostManifest | ConvertTo-Json -Depth 20 -Compress
-    if (-not [string]::Equals($returnedManifestJson, $copiedManifestJson, [StringComparison]::Ordinal)) {
-        throw 'The copied host evidence manifest does not match the manifest returned over the control channel.'
+    $copiedManifestSha256 = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256 -ErrorAction Stop).Hash
+    if (-not [string]::Equals($copiedManifestSha256, $ManifestSha256, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The copied host evidence manifest SHA-256 does not match the guest manifest SHA-256 returned over the control channel.'
     }
+    # PowerShell remoting may collapse empty arrays or deserialize timestamps
+    # differently from ConvertFrom-Json. The attested file is authoritative
+    # after its exact hash and both manifest identities have been verified.
+    $Manifest = $hostManifest
 
     $copiedFilesProperty = & $getExactProperty $Manifest 'CopiedFiles'
     $skippedFilesProperty = & $getExactProperty $Manifest 'SkippedFiles'
@@ -2155,11 +2159,16 @@ try {
     $credential = Get-GuestCredential
     $session = New-PSSession -VMName __VM_NAME__ -Credential $credential -ErrorAction Stop
     $manifest = New-GuestEvidenceSnapshot -Session $session -GuestOutbox __GUEST_OUTBOX__ -RequestId __REQUEST_ID__ -SnapshotId __SNAPSHOT_ID__
+    $manifestSha256 = Invoke-Command -Session $session -ErrorAction Stop -ScriptBlock {
+        param($Path)
+        (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash
+    } -ArgumentList (Join-Path ([string]$manifest.StageRoot) 'evidence-copy-manifest.json')
     Copy-Item -Path (([string]$manifest.StageRoot).TrimEnd('\') + '\*') -Destination __HOST_RESULT_ROOT__ -FromSession $session -Recurse -Force -ErrorAction Stop
     Remove-GuestEvidenceSnapshot -Session $session -StageRoot ([string]$manifest.StageRoot)
     $result = [ordered]@{
         Success = $true
         Manifest = $manifest
+        ManifestSha256 = [string]$manifestSha256
         Error = $null
         CompletedUtc = [DateTime]::UtcNow.ToString('o')
     }
@@ -2245,7 +2254,7 @@ function Invoke-ExpectedPowerOffEvidenceTransferBounded {
         if (-not [bool]$operationResult.Success) {
             throw "Expected-power-off evidence transfer failed: $([string]$operationResult.Error)"
         }
-        Assert-ExpectedPowerOffEvidenceStageMatchesManifest -HostStageRoot $hostStageRoot -Manifest $operationResult.Manifest -RequestId $RequestId -SnapshotId $snapshotId | Out-Null
+        Assert-ExpectedPowerOffEvidenceStageMatchesManifest -HostStageRoot $hostStageRoot -Manifest $operationResult.Manifest -ManifestSha256 ([string]$operationResult.ManifestSha256) -RequestId $RequestId -SnapshotId $snapshotId | Out-Null
         Assert-RequestActive -RequestId $RequestId -ExecutionDeadlineUtc $ExecutionDeadlineUtc
         $preserveHostStage = $true
         [pscustomobject][ordered]@{
