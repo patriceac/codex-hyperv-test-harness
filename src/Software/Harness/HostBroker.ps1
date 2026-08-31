@@ -4354,7 +4354,13 @@ function Invoke-GuestRequest {
                         if (Test-Path -LiteralPath $destinationPath) {
                             throw "Recovered evidence promotion refused to overwrite an existing host artifact: $destinationPath"
                         }
-                        Move-Item -LiteralPath $stagedItem.FullName -Destination $destinationPath -ErrorAction Stop
+                        # Copy into the client-readable result root so the
+                        # published artifact inherits that root's ACL. Moving
+                        # from the SYSTEM-only probe stage preserves its
+                        # private ACL and makes the recovered result unreadable
+                        # to the runner.
+                        Copy-Item -LiteralPath $stagedItem.FullName -Destination $destinationPath -Recurse -Force -ErrorAction Stop
+                        Remove-Item -LiteralPath $stagedItem.FullName -Recurse -Force -ErrorAction Stop
                     }
                     Remove-Item -LiteralPath $boundedHostStageRoot -Force -ErrorAction SilentlyContinue
                     $evidenceSnapshotSucceeded = $true

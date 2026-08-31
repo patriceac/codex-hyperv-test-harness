@@ -123,6 +123,7 @@ try {
     $hostBrokerText = Get-Content -Raw -LiteralPath $HostBrokerPath
     Assert-True ($hostBrokerText -notlike '*Copy-Item -Path "$guestOutbox\*"*') 'The broker still recursively copies the live guest outbox.'
     Assert-True ($hostBrokerText -like '*Copy-Item -Path "$guestEvidenceStage\*"*') 'The broker does not transfer the stable evidence stage.'
+    Assert-True ($hostBrokerText -like '*Copy-Item -LiteralPath $stagedItem.FullName -Destination $destinationPath -Recurse -Force*') 'Recovered evidence is moved from the private broker stage instead of inheriting the client-readable result ACL.'
     Assert-True ($hostBrokerText -like '*if (-not (Test-Path -LiteralPath $guestResultPath))*') 'Terminal result validation was removed.'
     Assert-True ($hostBrokerText -like '*EvidenceFilesSkipped*' -and $hostBrokerText -like '*EvidenceWarnings*') 'Evidence degradation is not exposed in the broker result.'
     $scenarios.Add('broker-copies-stage-and-retains-terminal-contract')
