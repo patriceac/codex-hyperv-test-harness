@@ -74,13 +74,88 @@ $watcher = Get-Content -Raw -LiteralPath $watcherPath
 $inertControllerPath = $PSCommandPath
 $installer = Get-Content -Raw -LiteralPath (Join-Path $setupRoot 'Install.ps1')
 $guestServicing = Get-Content -Raw -LiteralPath (Join-Path $harnessRoot 'Update-WindowsGuestImage.ps1')
-$imageUpdate = Get-Content -Raw -LiteralPath (Join-Path $harnessRoot 'Update-HyperVTestImages.ps1')
+$imageUpdatePath = Join-Path $harnessRoot 'Update-HyperVTestImages.ps1'
+$imageUpdate = Get-Content -Raw -LiteralPath $imageUpdatePath
 $resolverPath = Join-Path $harnessRoot 'Resolve-DotNetSdkInstaller.ps1'
 $resolver = Get-Content -Raw -LiteralPath $resolverPath
 $recovery = Get-Content -Raw -LiteralPath (Join-Path $softwareRoot 'Recovery\New-CodexHyperVRecovery.ps1')
 $maintenanceDoc = Get-Content -Raw -LiteralPath (Join-Path $repositoryRoot 'docs\maintenance.md')
 $setupSkill = Get-Content -Raw -LiteralPath (Join-Path $repositoryRoot '.agents\skills\setup-hyperv-harness\SKILL.md')
 $scenarios = New-Object Collections.Generic.List[string]
+
+function Get-ScriptAst {
+    param([Parameter(Mandatory = $true)] [string] $Path)
+
+    $tokens = $null
+    $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errors)
+    if ($errors.Count -gt 0) { throw "$Path has a parse error: $($errors[0].Message)" }
+    $ast
+}
+
+function Import-AstFunction {
+    param(
+        [Parameter(Mandatory = $true)] $Ast,
+        [Parameter(Mandatory = $true)] [string] $Name
+    )
+
+    $definition = @($Ast.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $Name
+    }, $true)) | Select-Object -First 1
+    if (-not $definition) { throw "Function not found: $Name" }
+    $body = $definition.Body.Extent.Text
+    $body = $body.Substring(1, $body.Length - 2)
+    Set-Item -LiteralPath ("Function:\script:$Name") -Value ([scriptblock]::Create($body))
+}
+
+$wrapperAst = Get-ScriptAst -Path (Join-Path $setupRoot 'Update-Images.ps1')
+Import-AstFunction -Ast $wrapperAst -Name 'New-ImageUpdateInvocationParameters'
+
+$normalInvocation = New-ImageUpdateInvocationParameters `
+    -ConfigPath 'C:\CodexHarness\missing-config.json' `
+    -NetworkSwitchName 'Codex Test NAT' `
+    -DotNetChannel '10.0' `
+    -ExpectedDotNetSdkVersion '10.0.400' `
+    -ExpectedInstalledChannelVersions @{} `
+    -TargetUserSid 'S-1-5-18' `
+    -CancellationPath 'C:\CodexHarness\image-update-cancel.json' `
+    -GuestRestartMode Automatic `
+    -ResumeUpdateId '' `
+    -PreserveRecoveryPrevious
+if ($normalInvocation.ContainsKey('ResumeUpdateId') -or
+    $normalInvocation.ContainsKey('AdoptCurrentBaseline') -or
+    $normalInvocation.ContainsKey('SkipSmokeTest') -or
+    -not $normalInvocation.ContainsKey('PreserveRecoveryPrevious')) {
+    throw 'The normal image-update invocation did not omit unset optional parameters exactly.'
+}
+$normalPreflight = & $imageUpdatePath @normalInvocation -InvocationPreflightOnly
+if (-not [bool]$normalPreflight.Success -or
+    -not [bool]$normalPreflight.NoMutationPerformed -or
+    [bool]$normalPreflight.ResumeUpdateIdBound -or
+    -not [bool]$normalPreflight.PreserveRecoveryPreviousBound) {
+    throw 'The exact normal wrapper-to-inner invocation did not bind safely without a resume ID.'
+}
+$scenarios.Add('normal-wrapper-to-inner-binding-omits-empty-resume-id')
+
+$resumeInvocation = New-ImageUpdateInvocationParameters `
+    -ConfigPath 'C:\CodexHarness\missing-config.json' `
+    -NetworkSwitchName 'Codex Test NAT' `
+    -DotNetChannel '10.0' `
+    -ExpectedDotNetSdkVersion '10.0.400' `
+    -ExpectedInstalledChannelVersions @{} `
+    -TargetUserSid 'S-1-5-18' `
+    -CancellationPath 'C:\CodexHarness\image-update-cancel.json' `
+    -GuestRestartMode Manual `
+    -ResumeUpdateId '20260831T123456789Z' `
+    -PreserveRecoveryPrevious
+$resumePreflight = & $imageUpdatePath @resumeInvocation -InvocationPreflightOnly
+if (-not [bool]$resumePreflight.Success -or
+    -not [bool]$resumePreflight.ResumeUpdateIdBound -or
+    [string]$resumePreflight.ResumeUpdateId -ne '20260831T123456789Z') {
+    throw 'The retained-generation wrapper-to-inner invocation did not bind its exact resume ID.'
+}
+$scenarios.Add('resume-wrapper-to-inner-binding-preserves-valid-resume-id')
 
 if ($guestServicing -match 'Stop-VM\s+-Name\s+\$VmName\s+-TurnOff' -or
     $guestServicing -match 'if\s*\(\s*-not\s+\$success\s*\)[\s\S]{0,500}Stop-VM') {
@@ -100,8 +175,10 @@ foreach ($optionalResultContract in @(
 $scenarios.Add('successful-result-shapes-do-not-require-cancellation-fields')
 
 $planPosition = $wrapper.IndexOf('if ($PlanOnly)', [StringComparison]::Ordinal)
+$invocationPreflightPosition = $wrapper.IndexOf('$invocationPreflight = & $innerUpdatePath @updateParameters -InvocationPreflightOnly', [StringComparison]::Ordinal)
 $elevationPosition = $wrapper.IndexOf('if (-not (Test-Administrator))', $planPosition + 1, [StringComparison]::Ordinal)
-if ($planPosition -lt 0 -or $elevationPosition -le $planPosition -or $wrapper -notmatch 'NoMutationPerformed = \$true' -or $wrapper -notmatch 'RequiresSecondApproval = \$true') {
+if ($invocationPreflightPosition -lt 0 -or $planPosition -le $invocationPreflightPosition -or $elevationPosition -le $planPosition -or
+    $wrapper -notmatch 'NoMutationPerformed = \$true' -or $wrapper -notmatch 'ApprovalReady = \$true' -or $wrapper -notmatch 'RequiresSecondApproval = \$true') {
     throw 'Image maintenance does not expose a non-mutating plan before elevation and the second approval.'
 }
 $scenarios.Add('plan-only-precedes-elevation')

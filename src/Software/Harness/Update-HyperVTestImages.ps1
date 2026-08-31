@@ -12,10 +12,24 @@ param(
     [switch] $AdoptCurrentBaseline,
     [ValidatePattern('^\d{8}T\d{9}Z$')] [string] $ResumeUpdateId,
     [switch] $PreserveRecoveryPrevious,
-    [switch] $SkipSmokeTest
+    [switch] $SkipSmokeTest,
+    [switch] $InvocationPreflightOnly
 )
 
 $ErrorActionPreference = 'Stop'
+if ($InvocationPreflightOnly) {
+    [pscustomobject][ordered]@{
+        Success = $true
+        NoMutationPerformed = $true
+        BoundParameterNames = @($PSBoundParameters.Keys | Where-Object { $_ -ne 'InvocationPreflightOnly' } | Sort-Object)
+        ResumeUpdateIdBound = $PSBoundParameters.ContainsKey('ResumeUpdateId')
+        ResumeUpdateId = if ($PSBoundParameters.ContainsKey('ResumeUpdateId')) { [string]$ResumeUpdateId } else { $null }
+        AdoptCurrentBaselineBound = $PSBoundParameters.ContainsKey('AdoptCurrentBaseline')
+        PreserveRecoveryPreviousBound = $PSBoundParameters.ContainsKey('PreserveRecoveryPrevious')
+        SkipSmokeTestBound = $PSBoundParameters.ContainsKey('SkipSmokeTest')
+    }
+    return
+}
 . (Join-Path $PSScriptRoot 'HarnessPaths.ps1')
 $layout = Get-CodexHarnessConfig -ConfigPath $ConfigPath
 if ([string]::IsNullOrWhiteSpace($StatusPath)) { $StatusPath = Get-CodexHarnessManagementStatusPath -Config $layout -Name 'image-update-status.json' }

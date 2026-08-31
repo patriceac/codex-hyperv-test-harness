@@ -96,12 +96,64 @@ function Get-ElevationArguments {
     $arguments
 }
 
+function New-ImageUpdateInvocationParameters {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [string] $ConfigPath,
+        [Parameter(Mandatory = $true)] [string] $NetworkSwitchName,
+        [Parameter(Mandatory = $true)] [string] $DotNetChannel,
+        [Parameter(Mandatory = $true)] [string] $ExpectedDotNetSdkVersion,
+        [Parameter(Mandatory = $true)] [hashtable] $ExpectedInstalledChannelVersions,
+        [Parameter(Mandatory = $true)] [string] $TargetUserSid,
+        [Parameter(Mandatory = $true)] [string] $CancellationPath,
+        [Parameter(Mandatory = $true)] [ValidateSet('Automatic', 'Manual')] [string] $GuestRestartMode,
+        [switch] $AdoptCurrentBaseline,
+        [AllowEmptyString()] [string] $ResumeUpdateId,
+        [switch] $PreserveRecoveryPrevious,
+        [switch] $SkipSmokeTest
+    )
+
+    $parameters = @{
+        ConfigPath = $ConfigPath
+        NetworkSwitchName = $NetworkSwitchName
+        DotNetChannel = $DotNetChannel
+        ExpectedDotNetSdkVersion = $ExpectedDotNetSdkVersion
+        ExpectedInstalledChannelVersions = $ExpectedInstalledChannelVersions
+        TargetUserSid = $TargetUserSid
+        GuestRestartMode = $GuestRestartMode
+        CancellationPath = $CancellationPath
+    }
+    if ($AdoptCurrentBaseline) { $parameters.AdoptCurrentBaseline = $true }
+    if (-not [string]::IsNullOrWhiteSpace($ResumeUpdateId)) { $parameters.ResumeUpdateId = $ResumeUpdateId }
+    if ($PreserveRecoveryPrevious) { $parameters.PreserveRecoveryPrevious = $true }
+    if ($SkipSmokeTest) { $parameters.SkipSmokeTest = $true }
+    $parameters
+}
+
 if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { throw "Harness configuration is missing: $configPath" }
 . (Join-Path $installedSoftware 'Harness\HarnessPaths.ps1')
 $layout = Get-CodexHarnessConfig -ConfigPath $configPath
 $definitionPath = Join-Path ([string]$layout.HarnessSourceRoot) 'pool-definition.json'
 if (-not (Test-Path -LiteralPath $definitionPath -PathType Leaf)) { throw "Pool definition is missing: $definitionPath" }
 $definition = Get-Content -Raw -LiteralPath $definitionPath | ConvertFrom-Json
+$updateParameters = New-ImageUpdateInvocationParameters `
+    -ConfigPath $configPath `
+    -NetworkSwitchName $GuestUpdateSwitchName `
+    -DotNetChannel $DotNetChannel `
+    -ExpectedDotNetSdkVersion $ExpectedDotNetSdkVersion `
+    -ExpectedInstalledChannelVersions $expectedInstalledChannels `
+    -TargetUserSid $TargetUserSid `
+    -CancellationPath $cancellationPath `
+    -GuestRestartMode $GuestRestartMode `
+    -AdoptCurrentBaseline:$AdoptCurrentBaseline `
+    -ResumeUpdateId $ResumeUpdateId `
+    -PreserveRecoveryPrevious:$PreserveRecoveryPrevious `
+    -SkipSmokeTest:$SkipSmokeTest
+$innerUpdatePath = Join-Path $checkoutSoftware 'Harness\Update-HyperVTestImages.ps1'
+$invocationPreflight = & $innerUpdatePath @updateParameters -InvocationPreflightOnly
+if (-not [bool]$invocationPreflight.Success -or -not [bool]$invocationPreflight.NoMutationPerformed) {
+    throw 'The image-maintenance wrapper-to-inner invocation preflight failed.'
+}
 
 if ($PlanOnly) {
     $resumeRetainedGeneration = -not [string]::IsNullOrWhiteSpace($ResumeUpdateId)
@@ -127,6 +179,7 @@ if ($PlanOnly) {
     [pscustomobject][ordered]@{
         PlanOnly = $true
         NoMutationPerformed = $true
+        ApprovalReady = $true
         RepositoryRoot = $repositoryRoot
         RepositoryCommit = $repositoryCommit
         InstallRoot = [string]$layout.InstallRoot
@@ -200,6 +253,7 @@ if ($PlanOnly) {
             'Source-only repository changes prepared for an audited public GitHub push'
         )
         ExplicitlyExcluded = @('Host reboot','Windows activation or product key','Microsoft account sign-in','Unrelated Hyper-V VMs','Preview updates','Optional drivers','Windows feature-version upgrade','.NET preview SDKs','VM images or credentials in Git')
+        InvocationPreflight = $invocationPreflight
         RequiresSecondApproval = $true
     }
     return
@@ -250,20 +304,6 @@ try {
     Invoke-Robocopy -Source $PSScriptRoot -Destination $installedSetup -ExcludeDirectories @('artifacts')
     $canaries = @(& (Join-Path $installedSetup 'Build-Canaries.ps1') -CanaryRoot (Join-Path $installedSoftware 'Canaries'))
 
-    $updateParameters = @{
-        ConfigPath = $configPath
-        NetworkSwitchName = $GuestUpdateSwitchName
-        DotNetChannel = $DotNetChannel
-        ExpectedDotNetSdkVersion = $ExpectedDotNetSdkVersion
-        ExpectedInstalledChannelVersions = $expectedInstalledChannels
-        TargetUserSid = $TargetUserSid
-            GuestRestartMode = $GuestRestartMode
-            CancellationPath = $cancellationPath
-            AdoptCurrentBaseline = [bool]$AdoptCurrentBaseline
-            ResumeUpdateId = $ResumeUpdateId
-            PreserveRecoveryPrevious = [bool]$PreserveRecoveryPrevious
-        SkipSmokeTest = [bool]$SkipSmokeTest
-    }
     $result = & (Join-Path $installedSoftware 'Harness\Update-HyperVTestImages.ps1') @updateParameters
     $resultCancelled = ($null -ne $result.PSObject.Properties['Cancelled']) -and [bool]$result.Cancelled
     $resultResumeRequired = ($null -ne $result.PSObject.Properties['ResumeRequired']) -and [bool]$result.ResumeRequired
