@@ -10,11 +10,13 @@ Keep the application-under-test off the physical host by default. Build on the h
 ## Route the test
 
 1. Use a browser first for a pure web application when browser automation can faithfully exercise the requested behavior.
-2. Honor an explicit user request to run, install, or interactively test a named artifact on the physical host. Natural wording such as "run this on the host" or "test it locally, not in Hyper-V" is sufficient; acknowledge it briefly and proceed without requiring a magic phrase or additional confirmation. Scope the override to that artifact and test only, and do not infer it from generic wording such as "run it."
+2. Honor an explicit user request to run, install, or interactively test a named artifact on the physical host. Natural wording such as "run this on the host" or "test it locally, not in Hyper-V" is sufficient; acknowledge it briefly and proceed without requiring a magic phrase or additional confirmation. Scope the override to that artifact and test only, and do not infer it from generic wording such as "run it." For scripted host UI control, read [host control](references/host-control.md) and use `scripts/Invoke-HostExecutableTest.ps1`; pass its internal authorization switch only after that explicit named override.
 3. Otherwise use this skill for every application-under-test, including native shells, tray behavior, installers, WebView2, Windows integration, and proof of a VM network boundary. Treat Electron as a native desktop application; a Chromium-based shell is not the browser exception.
 4. Never silently fall back to host execution. Report a broker or VM failure instead.
 
 Trusted compilers, linkers, package managers, linters, and non-application test runners may run on the host. Outside an explicit host override, do not launch the built application, installer, CLI artifact, or packaged desktop process there.
+
+The host controller gives a five-second fuchsia halo warning on every display before launch. Physical mouse or keyboard activity pauses automation immediately; it resumes only after ten seconds without user input and restores the controlled application to the foreground first. Physical `Escape` cancels the run. The halo is click-through, non-activating, and excluded from evidence capture. These protections do not make host execution isolated.
 
 ## Run an artifact
 
