@@ -118,7 +118,11 @@ function Invoke-PoolAudit {
 function Invoke-AcceptanceTest {
     param([Parameter(Mandatory = $true)] $Definition)
 
-    foreach ($requiredPath in @([string]$Definition.Parameters.ArtifactPath, [string]$Definition.Parameters.ActionsPath)) {
+    $requiredPaths = @([string]$Definition.Parameters['ArtifactPath'])
+    if ($Definition.Parameters.ContainsKey('ActionsPath')) {
+        $requiredPaths += [string]$Definition.Parameters['ActionsPath']
+    }
+    foreach ($requiredPath in $requiredPaths) {
         if (-not [string]::IsNullOrWhiteSpace($requiredPath) -and -not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
             throw "Release acceptance input is missing: $requiredPath"
         }
