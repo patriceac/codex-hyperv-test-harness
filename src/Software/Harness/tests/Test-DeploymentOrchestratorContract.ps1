@@ -135,6 +135,9 @@ if ($sendKeys.Count -ne 1 -or [string]$sendKeys[0].keys -cne 'WIN+LEFT' -or [int
 $scenarios.Add('keyboard-proof-captures-before-and-after-exact-chord')
 
 $deploy = Get-Content -LiteralPath $deployPath -Raw
+if ($deploy -notmatch [regex]::Escape("Run legacy launch, accented-name UI Automation, bounded keyboard, and expected-guest-power-off acceptance in isolated workers.")) {
+    throw 'The immutable release plan does not describe all four isolated acceptance paths.'
+}
 $phaseNames = @('CandidateQualification','LiveReadiness','SourcePromotion','GuestBaselinePromotion','IsolatedAcceptance','RecoveryRefresh','Finalization')
 $lastIndex = -1
 foreach ($phaseName in $phaseNames) {

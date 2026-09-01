@@ -246,7 +246,7 @@ function New-ReleasePlan {
     $operations.Add('Stage and publish source through Install.ps1 without creating recovery or running duplicate smoke acceptance.')
     if ($guestUpdateRequired) { $operations.Add('Replace the guest harness in the canonical baseline and rebuild the disposable pool exactly once.') }
     else { $operations.Add('Refresh the disposable pool exactly once from the unchanged canonical baseline.') }
-    $operations.Add('Run legacy launch, bounded keyboard, and expected-guest-power-off acceptance in isolated workers.')
+    $operations.Add('Run legacy launch, accented-name UI Automation, bounded keyboard, and expected-guest-power-off acceptance in isolated workers.')
     $operations.Add('Create and deep-verify local recovery exactly once after acceptance.')
     $operations.Add('Revalidate the exact commit and public payload, then publish a terminal release receipt.')
 
