@@ -18,13 +18,16 @@ function Assert-True {
     if (-not $Condition) { throw $Message }
 }
 
-function Invoke-WindowsPowerShellEncoded {
-    param([Parameter(Mandatory = $true)] [string] $Script)
+function Invoke-PowerShellEncoded {
+    param(
+        [Parameter(Mandatory = $true)] [string] $ExecutablePath,
+        [Parameter(Mandatory = $true)] [string] $Script
+    )
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Script))
     $priorErrorPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
-        $output = & $windowsPowerShell -NoLogo -NoProfile -NonInteractive -EncodedCommand $encoded 2>&1
+        $output = & $ExecutablePath -NoLogo -NoProfile -NonInteractive -EncodedCommand $encoded 2>&1
         $exitCode = $LASTEXITCODE
     }
     finally {
@@ -33,10 +36,57 @@ function Invoke-WindowsPowerShellEncoded {
     [pscustomobject]@{ ExitCode = $exitCode; Output = @($output); Text = (@($output) -join [Environment]::NewLine) }
 }
 
+function Invoke-WindowsPowerShellEncoded {
+    param([Parameter(Mandatory = $true)] [string] $Script)
+    Invoke-PowerShellEncoded -ExecutablePath $windowsPowerShell -Script $Script
+}
+
+function Resolve-PowerShell7Path {
+    $candidates = New-Object 'Collections.Generic.List[string]'
+    if ([string]$PSVersionTable.PSEdition -eq 'Core') {
+        try { $candidates.Add((Get-Process -Id $PID -ErrorAction Stop).Path) } catch {}
+    }
+    try {
+        $command = Get-Command pwsh.exe -ErrorAction Stop
+        if ($command.Source) { $candidates.Add([string]$command.Source) }
+    }
+    catch {}
+    $programFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
+    if (-not [string]::IsNullOrWhiteSpace($programFiles)) {
+        $candidates.Add((Join-Path $programFiles 'PowerShell\7\pwsh.exe'))
+    }
+    $userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+    if (-not [string]::IsNullOrWhiteSpace($userProfile)) {
+        $runtimeRoot = Join-Path $userProfile '.cache\codex-runtimes'
+        if (Test-Path -LiteralPath $runtimeRoot -PathType Container) {
+            foreach ($runtime in @(Get-ChildItem -Path (Join-Path $runtimeRoot '*\dependencies\native\powershell\pwsh.exe') -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTimeUtc -Descending)) {
+                $candidates.Add($runtime.FullName)
+            }
+        }
+    }
+
+    $seen = @{}
+    foreach ($candidate in $candidates) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+        $fullPath = try { [IO.Path]::GetFullPath($candidate) } catch { continue }
+        if ($seen.ContainsKey($fullPath)) { continue }
+        $seen[$fullPath] = $true
+        if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) { continue }
+        try {
+            $edition = & $fullPath -NoLogo -NoProfile -NonInteractive -Command '[Console]::Out.Write($PSVersionTable.PSEdition)' 2>$null
+            if ($LASTEXITCODE -eq 0 -and [string]$edition -eq 'Core') { return $fullPath }
+        }
+        catch {}
+    }
+    $null
+}
+
 Assert-True (Test-Path -LiteralPath $runnerPath -PathType Leaf) 'The host-control runner is missing.'
 Assert-True (Test-Path -LiteralPath $nativePath -PathType Leaf) 'The host-control native source is missing.'
 Assert-True (Test-Path -LiteralPath $skillPath -PathType Leaf) 'The runtime skill documentation is missing.'
 Assert-True (Test-Path -LiteralPath $windowsPowerShell -PathType Leaf) 'Windows PowerShell 5.1 is required for the installed host-control runtime contract.'
+$powerShell7 = Resolve-PowerShell7Path
+Assert-True (-not [string]::IsNullOrWhiteSpace($powerShell7)) 'PowerShell 7 is required to validate the current host-control native bootstrap.'
 $scenarios.Add('host-control-files-present')
 
 $runnerText = Get-Content -LiteralPath $runnerPath -Raw
@@ -50,6 +100,7 @@ Assert-True (-not [string]::IsNullOrWhiteSpace($initialWarningFunction)) 'The in
 Assert-True (-not $initialWarningFunction.Contains('Wait-ForHostControlReady')) 'Ordinary physical input can still enter the amber paused state during the initial five-second grace period.'
 Assert-True ($initialWarningFunction.Contains('$script:observedPhysicalInputVersion = [long]$snapshot.PhysicalInputVersion') -and $initialWarningFunction.Contains('$script:pauseDetectionArmed = $true')) 'The grace period does not discard pre-control activity and arm pause detection only after it expires.'
 Assert-True ($runnerText.Contains("HostExecutionAuthorized is required")) 'The host runner does not fail closed without an explicit host authorization signal.'
+Assert-True ($runnerText.Contains('PowerShellCoreReferencePack') -and $runnerText.Contains("Join-Path `$PSHOME 'ref'") -and $runnerText.Contains('NativeBootstrap')) 'The host runner does not expose the runtime-aware PowerShell 7 native bootstrap.'
 Assert-True (-not ($runnerText -match '\[.*\]\s*\$WarningSeconds') -and -not ($runnerText -match '\[.*\]\s*\$ResumeIdleSeconds')) 'The user-selected host-control timing was accidentally exposed as a caller override.'
 $scenarios.Add('fixed-warning-idle-and-authorization-contract')
 
@@ -120,10 +171,25 @@ $validationResult = Invoke-WindowsPowerShellEncoded -Script $validationProbe
 Assert-True ($validationResult.ExitCode -eq 0) "The host runner validation-only path failed: $($validationResult.Text)"
 $validation = $validationResult.Text | ConvertFrom-Json
 Assert-True ($validation.Success -and $validation.Status -eq 'Validated' -and $validation.ActionCount -eq 1) 'The host runner did not validate a supported action contract.'
+Assert-True ($validation.NativeBootstrap.TypeLoaded -and $validation.NativeBootstrap.PSEdition -eq 'Desktop' -and $validation.NativeBootstrap.ReferenceMode -eq 'WindowsPowerShellFrameworkAssemblies') 'ValidationOnly did not compile and load the native helper through the Windows PowerShell 5.1 reference path.'
 Assert-True ($validation.HostControl.InitialWarningSeconds -eq 5 -and $validation.HostControl.ResumeIdleSeconds -eq 10 -and $validation.HostControl.CancelKey -eq 'Escape') 'The validation result did not advertise the exact requested interaction policy.'
 Assert-True ($validation.HostControl.InitialGraceInputBehavior -eq 'IgnoreForPause' -and $validation.HostControl.PostGraceInputBehavior -eq 'PauseImmediately') 'The validation result does not distinguish the non-pausing grace period from post-grace user takeover.'
 Assert-True ($validation.HostControl.HaloRendering -eq 'ContinuousNonOverlappingBands' -and $validation.HostControl.HaloFrameThicknessPixels -eq 12) 'The validation result does not advertise the clean continuous halo geometry.'
-$scenarios.Add('validation-only-contract-succeeds-without-launch')
+$scenarios.Add('windows-powershell-validation-compiles-native-helper-without-launch')
+
+$escapedPowerShell7 = $powerShell7.Replace("'", "''")
+$powerShell7ValidationProbe = @"
+`$ErrorActionPreference = 'Stop'
+& '$escapedRunner' -ArtifactPath '$escapedPowerShell7' -HostExecutionAuthorized -ValidateOnly -ActionsJson '[{"type":"wait_window","timeoutMs":1000}]'
+"@
+$powerShell7ValidationResult = Invoke-PowerShellEncoded -ExecutablePath $powerShell7 -Script $powerShell7ValidationProbe
+Assert-True ($powerShell7ValidationResult.ExitCode -eq 0) "The host runner native bootstrap failed under PowerShell 7: $($powerShell7ValidationResult.Text)"
+$powerShell7Validation = $powerShell7ValidationResult.Text | ConvertFrom-Json
+Assert-True ($powerShell7Validation.Success -and $powerShell7Validation.Status -eq 'Validated' -and $powerShell7Validation.ActionCount -eq 1) 'PowerShell 7 did not complete the validation-only host runner path.'
+Assert-True ($powerShell7Validation.NativeBootstrap.TypeLoaded -and $powerShell7Validation.NativeBootstrap.PSEdition -eq 'Core' -and $powerShell7Validation.NativeBootstrap.ReferenceMode -eq 'PowerShellCoreReferencePack') 'PowerShell 7 did not compile and load the host-control native helper through its matching reference pack.'
+Assert-True ([version]$powerShell7Validation.NativeBootstrap.PowerShellVersion -ge [version]'7.0') 'The PowerShell 7 validation did not report a supported engine version.'
+Assert-True (-not [string]::IsNullOrWhiteSpace([string]$powerShell7Validation.NativeBootstrap.RuntimeDescription)) 'The PowerShell 7 validation did not report its .NET runtime.'
+$scenarios.Add('powershell7-validation-compiles-native-helper-without-launch')
 
 $escapedArtifactDirectory = (Split-Path -Parent $windowsPowerShell).Replace("'", "''")
 $directoryValidationProbe = @"
@@ -164,4 +230,11 @@ $scenarios.Add('runtime-skill-documents-host-control')
     Success = $true
     ScenarioCount = $scenarios.Count
     Scenarios = $scenarios.ToArray()
+    Metrics = [ordered]@{
+        WindowsPowerShellVersion = [string]$validation.NativeBootstrap.PowerShellVersion
+        WindowsPowerShellRuntime = [string]$validation.NativeBootstrap.RuntimeDescription
+        PowerShell7Path = $powerShell7
+        PowerShell7Version = [string]$powerShell7Validation.NativeBootstrap.PowerShellVersion
+        PowerShell7Runtime = [string]$powerShell7Validation.NativeBootstrap.RuntimeDescription
+    }
 } | ConvertTo-Json -Depth 8

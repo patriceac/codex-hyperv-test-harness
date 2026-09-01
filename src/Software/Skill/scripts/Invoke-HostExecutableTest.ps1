@@ -28,6 +28,7 @@ $script:runtime = $null
 $script:rootProcess = $null
 $script:rootProcessStartedUtc = $null
 $script:trackedProcessStarts = @{}
+$script:hostControlNativeReferenceMode = $null
 
 function Assert-HostExecutionAuthorization {
     if (-not $HostExecutionAuthorized) {
@@ -236,11 +237,50 @@ function Import-HostControlNative {
     Add-Type -AssemblyName System.Drawing
     Add-Type -AssemblyName UIAutomationClient
     Add-Type -AssemblyName UIAutomationTypes
-    if (-not ('Codex.HostControl.HostControlRuntime' -as [type])) {
-        $nativePath = Join-Path $PSScriptRoot 'HostControlNative.cs'
-        if (-not (Test-Path -LiteralPath $nativePath -PathType Leaf)) { throw "Host-control native source is missing: $nativePath" }
-        Add-Type -Path $nativePath -ReferencedAssemblies @('System.dll', 'System.Core.dll', 'System.Drawing.dll', 'System.Windows.Forms.dll')
+    if ('Codex.HostControl.HostControlRuntime' -as [type]) {
+        $script:hostControlNativeReferenceMode = 'AlreadyLoaded'
+        return
     }
+
+    $nativePath = Join-Path $PSScriptRoot 'HostControlNative.cs'
+    if (-not (Test-Path -LiteralPath $nativePath -PathType Leaf)) { throw "Host-control native source is missing: $nativePath" }
+
+    if ([string]$PSVersionTable.PSEdition -eq 'Core') {
+        # Supplying -ReferencedAssemblies replaces Add-Type's default compiler references.
+        # PowerShell 7 runs on .NET, where the legacy System*.dll list omits forwarded
+        # Windows Desktop types such as Component, Message, and Rectangle. Compile against
+        # PowerShell's matching reference pack, then add the runtime-only desktop assemblies.
+        Add-Type -AssemblyName Microsoft.Win32.SystemEvents
+        $referenceRoot = Join-Path $PSHOME 'ref'
+        if (-not (Test-Path -LiteralPath $referenceRoot -PathType Container)) {
+            throw "PowerShell 7 reference assemblies are missing: $referenceRoot"
+        }
+
+        $referenceAssemblies = New-Object 'Collections.Generic.List[string]'
+        foreach ($referenceFile in @(Get-ChildItem -LiteralPath $referenceRoot -File -Filter '*.dll' | Sort-Object Name)) {
+            $referenceAssemblies.Add($referenceFile.FullName)
+        }
+        foreach ($runtimeAssembly in @(
+            [System.Windows.Forms.Form].Assembly.Location,
+            [System.Windows.Forms.Message].Assembly.Location,
+            [System.Drawing.Bitmap].Assembly.Location,
+            [System.Windows.Automation.AutomationElement].Assembly.Location,
+            [System.Windows.Automation.AutomationIdentifier].Assembly.Location,
+            [Microsoft.Win32.SystemEvents].Assembly.Location
+        )) {
+            if ([string]::IsNullOrWhiteSpace($runtimeAssembly)) { continue }
+            if (-not $referenceAssemblies.Contains($runtimeAssembly)) { $referenceAssemblies.Add($runtimeAssembly) }
+        }
+        if ($referenceAssemblies.Count -eq 0) { throw 'PowerShell 7 exposed no compiler reference assemblies for host control.' }
+        Add-Type -Path $nativePath -ReferencedAssemblies ([string[]]$referenceAssemblies)
+        $script:hostControlNativeReferenceMode = 'PowerShellCoreReferencePack'
+    }
+    else {
+        Add-Type -Path $nativePath -ReferencedAssemblies @('System.dll', 'System.Core.dll', 'System.Drawing.dll', 'System.Windows.Forms.dll')
+        $script:hostControlNativeReferenceMode = 'WindowsPowerShellFrameworkAssemblies'
+    }
+
+    if (-not ('Codex.HostControl.HostControlRuntime' -as [type])) { throw 'The host-control native type was not loaded after compilation.' }
 }
 
 function Throw-IfHostControlCancelled {
@@ -635,6 +675,21 @@ $contract = [ordered]@{
     HaloFrameThicknessPixels = $haloFrameThicknessPixels
     ExecutionTarget = 'PhysicalHost'
 }
+$isValidationOnly = [bool]$ValidateOnly
+if (-not $isValidationOnly) { Assert-InteractiveHostSession }
+Import-HostControlNative
+if ([Codex.HostControl.HostControlContract]::InitialWarningSeconds -ne $initialWarningSeconds -or
+    [Codex.HostControl.HostControlContract]::ResumeIdleSeconds -ne $resumeIdleSeconds -or
+    [Codex.HostControl.HostControlContract]::HaloFrameThicknessPixels -ne $haloFrameThicknessPixels) {
+    throw 'The PowerShell and native host-control timing or visual contracts disagree.'
+}
+$nativeBootstrap = [ordered]@{
+    TypeLoaded = [bool]('Codex.HostControl.HostControlRuntime' -as [type])
+    ReferenceMode = $script:hostControlNativeReferenceMode
+    PSEdition = [string]$PSVersionTable.PSEdition
+    PowerShellVersion = [string]$PSVersionTable.PSVersion
+    RuntimeDescription = [string][Runtime.InteropServices.RuntimeInformation]::FrameworkDescription
+}
 if ($ValidateOnly) {
     [pscustomobject][ordered]@{
         Success = $true
@@ -643,16 +698,9 @@ if ($ValidateOnly) {
         ExecutablePath = $executablePath
         ActionCount = $actions.Count
         HostControl = $contract
+        NativeBootstrap = $nativeBootstrap
     } | ConvertTo-Json -Depth 10
     return
-}
-
-Assert-InteractiveHostSession
-Import-HostControlNative
-if ([Codex.HostControl.HostControlContract]::InitialWarningSeconds -ne $initialWarningSeconds -or
-    [Codex.HostControl.HostControlContract]::ResumeIdleSeconds -ne $resumeIdleSeconds -or
-    [Codex.HostControl.HostControlContract]::HaloFrameThicknessPixels -ne $haloFrameThicknessPixels) {
-    throw 'The PowerShell and native host-control timing or visual contracts disagree.'
 }
 
 if ([string]::IsNullOrWhiteSpace($ResultsRoot)) {
@@ -845,6 +893,7 @@ $result = [ordered]@{
         FocusRestoreCount = $script:focusRestoreCount
         TotalPausedMilliseconds = $script:totalPausedMilliseconds
     }
+    NativeBootstrap = $nativeBootstrap
     Actions = $actionLog.ToArray()
     Assertion = $assertion
     ProcessCleanup = $processCleanup

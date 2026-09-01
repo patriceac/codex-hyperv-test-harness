@@ -18,6 +18,8 @@ The guest `InputProbe.exe` had the same source-provenance gap. Its C# source and
 
 GitHub Actions runs layers 1 and 2. A release should also have current local evidence for layers 3 and 4.
 
+The host-control contract launches isolated validation-only processes under both current PowerShell 7/.NET and Windows PowerShell 5.1. Each process runs the real `Invoke-HostExecutableTest.ps1` native bootstrap and requires `HostControlNative.cs` to compile and load before validation succeeds; neither process displays the halo or launches the supplied artifact. A separately authorized physical-host acceptance run proves the visible halo and interactive lifecycle.
+
 Keyboard interaction uses the request action `{ "type": "send_keys", "keys": "WIN+LEFT" }`. The runner, broker, and guest independently enforce the same named-key allowlist and bounded chord shape; no request may supply raw virtual-key numbers, scan codes, scripts, or more than one non-modifier key. For a release proof, capture screenshots immediately before and after the chord and verify the guest `Actions` evidence records the exact canonical chord and virtual-key codes.
 
 `setup\Invoke-HarnessReleaseAcceptance.ps1` is the canonical live software-release check. It audits before and after running the legacy launch, accented UI Automation Name, keyboard, and expected-power-off paths. The accented-name path clicks `Approuver le pilote et débloquer la file` without an AutomationId and requires both selector evidence and an application marker. `ShutdownProbe.cs` is compiled locally and may run only as an application-under-test in a disposable Hyper-V worker; it writes and flushes its assertion marker before requesting guest shutdown.

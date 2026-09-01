@@ -16,7 +16,7 @@ Use the same action shapes documented in the main skill:
   -HostExecutionAuthorized
 ```
 
-`-HostExecutionAuthorized` is an internal fail-closed signal, not wording the user must provide. Pass it only when the current request explicitly authorizes physical-host execution for this artifact and test. `-ValidateOnly` validates paths, tokens, actions, and the fixed interaction policy without displaying the halo or launching the artifact.
+`-HostExecutionAuthorized` is an internal fail-closed signal, not wording the user must provide. Pass it only when the current request explicitly authorizes physical-host execution for this artifact and test. `-ValidateOnly` validates paths, tokens, actions, and the fixed interaction policy without displaying the halo or launching the artifact. It still compiles and loads `HostControlNative.cs`, and reports the engine, .NET runtime, and reference mode in `NativeBootstrap`; this keeps the real native bootstrap covered under both current PowerShell 7/.NET and Windows PowerShell 5.1.
 
 The host runner accepts `wait_window`, `focus_window`, `click_control`, `click_relative`, `type_text`, `wait`, `wait_result_file`, `wait_process_exit`, and `screenshot`. `{PAYLOAD}` resolves to the artifact directory and `{OUTDIR}` to the request result directory. `wait_result_file` and `AssertResultFile` remain confined below `{OUTDIR}`. Host mode has no VM payload, read-only-host-input transport, network profile, worker lease, or OS rollback.
 

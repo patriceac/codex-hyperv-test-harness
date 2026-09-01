@@ -18,6 +18,8 @@ Trusted compilers, linkers, package managers, linters, and non-application test 
 
 The host controller gives a five-second thin, continuous fuchsia halo warning on every display before launch. Ordinary mouse or keyboard activity does not pause that grace period; after it expires, physical input pauses automation immediately. It resumes only after ten seconds without user input and restores the controlled application to the foreground first. Physical `Escape` cancels at any time. The halo is click-through, non-activating, and excluded from evidence capture. These protections do not make host execution isolated.
 
+The host runner supports both current PowerShell 7/.NET and Windows PowerShell 5.1. Its validation-only path compiles and loads the same native helper used by a real run, without displaying the halo or launching the artifact, so an engine-specific assembly-resolution failure cannot hide behind schema-only validation.
+
 ## Run an artifact
 
 Use `scripts/Invoke-HyperVExecutableTest.ps1`.
