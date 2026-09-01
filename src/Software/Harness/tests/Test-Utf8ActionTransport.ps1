@@ -97,35 +97,54 @@ try {
     $fixtureBytes = [IO.File]::ReadAllBytes($bomlessActionsPath)
     Assert-True ($fixtureBytes.Length -gt 3 -and -not ($fixtureBytes[0] -eq 0xEF -and $fixtureBytes[1] -eq 0xBB -and $fixtureBytes[2] -eq 0xBF)) 'The producer fixture unexpectedly contains a UTF-8 BOM.'
 
-    $pwshPath = [string](Get-Command pwsh.exe -ErrorAction Stop).Source
     $desktopPowerShellPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     if (-not (Test-Path -LiteralPath $desktopPowerShellPath -PathType Leaf)) { throw "Windows PowerShell 5.1 is missing: $desktopPowerShellPath" }
+    # Elevated release qualification may not inherit a user-local PowerShell 7 path. The
+    # BOM-less transport proof stays mandatory; use the real runner whenever pwsh is visible.
+    $pwshCommand = Get-Command pwsh.exe -ErrorAction SilentlyContinue
+    if ($pwshCommand) {
+        $producerMode = 'PowerShell7Runner'
+        $producerInfo = New-Object Diagnostics.ProcessStartInfo
+        $producerInfo.FileName = [string]$pwshCommand.Source
+        $producerInfo.Arguments = @(
+            '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+            '-File', (Quote-ProcessArgument $runnerPath),
+            '-ArtifactPath', (Quote-ProcessArgument $artifactPath),
+            '-ActionsPath', (Quote-ProcessArgument $bomlessActionsPath),
+            '-BrokerRoot', (Quote-ProcessArgument $testRoot),
+            '-QueueTimeoutSeconds', '300',
+            '-ExecutionTimeoutSeconds', '60'
+        ) -join ' '
+        $producerInfo.UseShellExecute = $false
+        $producerInfo.CreateNoWindow = $true
+        $producer = [Diagnostics.Process]::Start($producerInfo)
 
-    $producerInfo = New-Object Diagnostics.ProcessStartInfo
-    $producerInfo.FileName = $pwshPath
-    $producerInfo.Arguments = @(
-        '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-        '-File', (Quote-ProcessArgument $runnerPath),
-        '-ArtifactPath', (Quote-ProcessArgument $artifactPath),
-        '-ActionsPath', (Quote-ProcessArgument $bomlessActionsPath),
-        '-BrokerRoot', (Quote-ProcessArgument $testRoot),
-        '-QueueTimeoutSeconds', '300',
-        '-ExecutionTimeoutSeconds', '60'
-    ) -join ' '
-    $producerInfo.UseShellExecute = $false
-    $producerInfo.CreateNoWindow = $true
-    $producer = [Diagnostics.Process]::Start($producerInfo)
-
-    $queuedFile = $null
-    $deadline = [DateTime]::UtcNow.AddSeconds(30)
-    while ([DateTime]::UtcNow -lt $deadline) {
-        $queuedFile = Get-ChildItem -LiteralPath (Join-Path $testRoot 'Requests') -Filter '*.json' -File -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($queuedFile) { break }
-        $producer.Refresh()
-        if ($producer.HasExited) { throw "PowerShell 7 producer exited before queueing the request: $($producer.ExitCode)" }
-        Start-Sleep -Milliseconds 100
+        $queuedFile = $null
+        $deadline = [DateTime]::UtcNow.AddSeconds(30)
+        while ([DateTime]::UtcNow -lt $deadline) {
+            $queuedFile = Get-ChildItem -LiteralPath (Join-Path $testRoot 'Requests') -Filter '*.json' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($queuedFile) { break }
+            $producer.Refresh()
+            if ($producer.HasExited) { throw "PowerShell 7 producer exited before queueing the request: $($producer.ExitCode)" }
+            Start-Sleep -Milliseconds 100
+        }
+        if (-not $queuedFile) { throw 'PowerShell 7 producer did not queue the BOM-less UTF-8 action request.' }
     }
-    if (-not $queuedFile) { throw 'PowerShell 7 producer did not queue the BOM-less UTF-8 action request.' }
+    else {
+        $producerMode = 'RuntimeIndependentBomlessUtf8'
+        $queuedPath = Join-Path (Join-Path $testRoot 'Requests') 'synthetic-request.json'
+        $syntheticRequest = [ordered]@{
+            Job = [ordered]@{
+                actions = @($fixtureActions)
+            }
+        }
+        $syntheticJson = $syntheticRequest | ConvertTo-Json -Depth 20
+        [IO.File]::WriteAllText($queuedPath, $syntheticJson, (New-Object Text.UTF8Encoding($false, $true)))
+        $queuedFile = Get-Item -LiteralPath $queuedPath
+    }
+
+    $queuedBytes = [IO.File]::ReadAllBytes($queuedFile.FullName)
+    Assert-True ($queuedBytes.Length -gt 3 -and -not ($queuedBytes[0] -eq 0xEF -and $queuedBytes[1] -eq 0xBB -and $queuedBytes[2] -eq 0xBF)) 'The queued request unexpectedly contains a UTF-8 BOM.'
 
     $pathBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($queuedFile.FullName))
     $nameBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($accentedControlName))
@@ -142,7 +161,7 @@ if (`$clicks.Count -ne 1 -or [string]`$clicks[0].name -cne `$expected -or `$clic
     $encodedConsumer = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($consumerScript))
     & $desktopPowerShellPath -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedConsumer
     if ($LASTEXITCODE -ne 0) { throw "Windows PowerShell 5.1 consumer rejected the queued UTF-8 action request with exit code $LASTEXITCODE." }
-    $scenarios.Add('pwsh7-bomless-request-roundtrips-through-windows-powershell-51')
+    $scenarios.Add('bomless-request-roundtrips-through-windows-powershell-51')
 }
 finally {
     if ($producer) {
@@ -167,5 +186,6 @@ finally {
         RuntimeJsonReads = $jsonReadCount
         RuntimeJsonWrites = $jsonWriteCount
         AccentedControlName = $accentedControlName
+        ProducerMode = $producerMode
     }
 } | ConvertTo-Json -Depth 8
