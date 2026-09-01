@@ -18,6 +18,13 @@ namespace Codex.HostControl
         Paused
     }
 
+    public enum ControlledWindowGeometryChange
+    {
+        None,
+        PositionOnly,
+        Shape
+    }
+
     public sealed class HostControlSnapshot
     {
         public bool CancelRequested { get; internal set; }
@@ -57,6 +64,7 @@ namespace Codex.HostControl
         public const int ControlledWindowBandThicknessPixels = 2;
         public const int ControlledWindowBandCount = 3;
         public const int ControlledWindowCornerRadiusPixels = 8;
+        public const string SingleControllerLeaseName = @"Local\CodexPhysicalHostControl";
 
         public static ulong SyntheticInputMarker
         {
@@ -123,6 +131,23 @@ namespace Codex.HostControl
                 windowBounds.Right >= screenBounds.Right && windowBounds.Bottom >= screenBounds.Bottom;
         }
 
+        public static ControlledWindowGeometryChange ClassifyControlledWindowGeometryChange(
+            Rectangle currentBounds,
+            bool currentSquareCorners,
+            Rectangle nextBounds,
+            bool nextSquareCorners)
+        {
+            if (currentBounds == nextBounds && currentSquareCorners == nextSquareCorners)
+            {
+                return ControlledWindowGeometryChange.None;
+            }
+            if (currentBounds.Size == nextBounds.Size && currentSquareCorners == nextSquareCorners)
+            {
+                return ControlledWindowGeometryChange.PositionOnly;
+            }
+            return ControlledWindowGeometryChange.Shape;
+        }
+
         public static int GetResumeDelayMilliseconds(DateTime nowUtc, DateTime lastPhysicalInputUtc)
         {
             double remaining = (ResumeIdleSeconds * 1000.0) -
@@ -132,6 +157,53 @@ namespace Codex.HostControl
                 return 0;
             }
             return (int)Math.Min(ResumeIdleSeconds * 1000, Math.Ceiling(remaining));
+        }
+    }
+
+    public sealed class HostControlLease : IDisposable
+    {
+        private readonly Mutex _mutex;
+        private bool _taken;
+        private bool _disposed;
+
+        public HostControlLease()
+        {
+            _mutex = new Mutex(false, HostControlContract.SingleControllerLeaseName);
+            try
+            {
+                try
+                {
+                    _taken = _mutex.WaitOne(0, false);
+                }
+                catch (AbandonedMutexException)
+                {
+                    _taken = true;
+                }
+                if (!_taken)
+                {
+                    throw new InvalidOperationException("Another physical-host controller is already active in this interactive session.");
+                }
+            }
+            catch
+            {
+                _mutex.Dispose();
+                throw;
+            }
+        }
+
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+            _disposed = true;
+            if (_taken)
+            {
+                _mutex.ReleaseMutex();
+                _taken = false;
+            }
+            _mutex.Dispose();
         }
     }
 
@@ -643,6 +715,9 @@ namespace Codex.HostControl
         private readonly List<ControlledWindowBandForm> _controlledWindowForms = new List<ControlledWindowBandForm>();
         private HaloState _state = HaloState.Warning;
         private IntPtr _controlledWindow = IntPtr.Zero;
+        private Rectangle _controlledWindowBounds = Rectangle.Empty;
+        private bool _controlledWindowSquareCorners;
+        private bool _controlledWindowGeometryInitialized;
         private bool _controlledWindowHighlightVisible;
         private bool _controlledWindowHighlightEverShown;
         private bool _visible = true;
@@ -836,24 +911,48 @@ namespace Codex.HostControl
                 return;
             }
 
+            Screen targetScreen = Screen.FromRectangle(bounds);
+            Rectangle screenBounds = targetScreen.Bounds;
+            bool squareCorners = HostControlContract.ShouldUseSquareControlledWindowCorners(bounds, screenBounds);
+
             if (_controlledWindowForms.Count == 0)
             {
                 for (int bandIndex = 0; bandIndex < HostControlContract.ControlledWindowBandCount; bandIndex++)
                 {
-                    ControlledWindowBandForm form = new ControlledWindowBandForm(bounds, bandIndex);
+                    ControlledWindowBandForm form = new ControlledWindowBandForm(bounds, bandIndex, squareCorners);
                     form.Show();
                     RegisterCaptureProtection(form.CaptureProtectionSucceeded, form.CaptureProtectionMode, form.CaptureProtectionError);
                     _controlledWindowForms.Add(form);
                 }
+                _controlledWindowBounds = bounds;
+                _controlledWindowSquareCorners = squareCorners;
+                _controlledWindowGeometryInitialized = true;
             }
 
-            Screen targetScreen = Screen.FromRectangle(bounds);
-            Rectangle screenBounds = targetScreen.Bounds;
-            bool squareCorners = HostControlContract.ShouldUseSquareControlledWindowCorners(bounds, screenBounds);
+            ControlledWindowGeometryChange geometryChange = _controlledWindowGeometryInitialized
+                ? HostControlContract.ClassifyControlledWindowGeometryChange(
+                    _controlledWindowBounds,
+                    _controlledWindowSquareCorners,
+                    bounds,
+                    squareCorners)
+                : ControlledWindowGeometryChange.Shape;
+            if (geometryChange != ControlledWindowGeometryChange.None)
+            {
+                ControlledWindowBandForm.SetTargetBoundsAtomically(
+                    _controlledWindowForms,
+                    bounds,
+                    squareCorners,
+                    geometryChange == ControlledWindowGeometryChange.Shape);
+                _controlledWindowBounds = bounds;
+                _controlledWindowSquareCorners = squareCorners;
+                _controlledWindowGeometryInitialized = true;
+            }
             foreach (ControlledWindowBandForm form in _controlledWindowForms)
             {
-                form.SetTargetBounds(bounds, squareCorners);
-                form.Visible = true;
+                if (!form.Visible)
+                {
+                    form.Visible = true;
+                }
             }
             _controlledWindowHighlightVisible = true;
             _controlledWindowHighlightEverShown = true;
@@ -888,6 +987,9 @@ namespace Codex.HostControl
                 form.Dispose();
             }
             _controlledWindowForms.Clear();
+            _controlledWindowBounds = Rectangle.Empty;
+            _controlledWindowSquareCorners = false;
+            _controlledWindowGeometryInitialized = false;
             _controlledWindowHighlightVisible = false;
         }
 
@@ -1071,19 +1173,43 @@ namespace Codex.HostControl
         private const int HTTRANSPARENT = -1;
         private const uint WDA_MONITOR = 0x00000001;
         private const uint WDA_EXCLUDEFROMCAPTURE = 0x00000011;
+        private const uint SWP_NOZORDER = 0x0004;
+        private const uint SWP_NOACTIVATE = 0x0010;
+        private const uint SWP_NOOWNERZORDER = 0x0200;
         private readonly int _bandIndex;
         private bool _squareCorners;
+        private bool _regionInitialized;
+        private Size _regionClientSize = Size.Empty;
+        private bool _regionSquareCorners;
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool SetWindowDisplayAffinity(IntPtr window, uint affinity);
 
-        public ControlledWindowBandForm(Rectangle bounds, int bandIndex)
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr BeginDeferWindowPos(int windowCount);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr DeferWindowPos(
+            IntPtr deferredWindowPosition,
+            IntPtr window,
+            IntPtr insertAfter,
+            int x,
+            int y,
+            int width,
+            int height,
+            uint flags);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool EndDeferWindowPos(IntPtr deferredWindowPosition);
+
+        public ControlledWindowBandForm(Rectangle bounds, int bandIndex, bool squareCorners)
         {
             if (bandIndex < 0 || bandIndex >= HostControlContract.ControlledWindowBandCount)
             {
                 throw new ArgumentOutOfRangeException("bandIndex");
             }
             _bandIndex = bandIndex;
+            _squareCorners = squareCorners;
             AutoScaleMode = AutoScaleMode.None;
             BackColor = ColorTranslator.FromHtml(HostControlContract.ControlledWindowHighlightHex);
             Bounds = bounds;
@@ -1151,14 +1277,51 @@ namespace Codex.HostControl
             base.WndProc(ref message);
         }
 
-        public void SetTargetBounds(Rectangle bounds, bool squareCorners)
+        public static void SetTargetBoundsAtomically(
+            IList<ControlledWindowBandForm> forms,
+            Rectangle bounds,
+            bool squareCorners,
+            bool hideWhileReshaping)
         {
-            _squareCorners = squareCorners;
-            if (Bounds != bounds)
+            if (forms == null)
             {
-                Bounds = bounds;
+                throw new ArgumentNullException("forms");
             }
-            ApplyRoundedBandRegion();
+            if (forms.Count == 0)
+            {
+                return;
+            }
+
+            foreach (ControlledWindowBandForm form in forms)
+            {
+                if (form == null || form.IsDisposed || !form.IsHandleCreated)
+                {
+                    throw new InvalidOperationException("A controlled-window highlight band is unavailable for atomic repositioning.");
+                }
+                if (hideWhileReshaping)
+                {
+                    form.Visible = false;
+                }
+                form._squareCorners = squareCorners;
+            }
+
+            bool batchSucceeded = TrySetBoundsAsBatch(forms, bounds);
+            if (!batchSucceeded)
+            {
+                foreach (ControlledWindowBandForm form in forms)
+                {
+                    form.Visible = false;
+                }
+                foreach (ControlledWindowBandForm form in forms)
+                {
+                    form.Bounds = bounds;
+                }
+            }
+
+            foreach (ControlledWindowBandForm form in forms)
+            {
+                form.ApplyRoundedBandRegion();
+            }
         }
 
         public void Apply(Color color, double intensity)
@@ -1170,6 +1333,10 @@ namespace Codex.HostControl
         private void ApplyRoundedBandRegion()
         {
             if (ClientSize.Width <= 0 || ClientSize.Height <= 0)
+            {
+                return;
+            }
+            if (_regionInitialized && _regionClientSize == ClientSize && _regionSquareCorners == _squareCorners)
             {
                 return;
             }
@@ -1206,7 +1373,38 @@ namespace Codex.HostControl
                 {
                     previous.Dispose();
                 }
+                _regionClientSize = ClientSize;
+                _regionSquareCorners = _squareCorners;
+                _regionInitialized = true;
             }
+        }
+
+        private static bool TrySetBoundsAsBatch(IList<ControlledWindowBandForm> forms, Rectangle bounds)
+        {
+            IntPtr deferredWindowPosition = BeginDeferWindowPos(forms.Count);
+            if (deferredWindowPosition == IntPtr.Zero)
+            {
+                return false;
+            }
+
+            uint flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
+            foreach (ControlledWindowBandForm form in forms)
+            {
+                deferredWindowPosition = DeferWindowPos(
+                    deferredWindowPosition,
+                    form.Handle,
+                    IntPtr.Zero,
+                    bounds.X,
+                    bounds.Y,
+                    bounds.Width,
+                    bounds.Height,
+                    flags);
+                if (deferredWindowPosition == IntPtr.Zero)
+                {
+                    return false;
+                }
+            }
+            return EndDeferWindowPos(deferredWindowPosition);
         }
 
         private static GraphicsPath CreateRoundedRectanglePath(Rectangle bounds, int radius)

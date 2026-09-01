@@ -31,6 +31,7 @@ $script:highlightedWindowHandle = [IntPtr]::Zero
 $script:nextHighlightProbeUtc = [DateTime]::MinValue
 $script:highlightProbeDeadlineUtc = [DateTime]::MinValue
 $script:runtime = $null
+$script:hostControlLease = $null
 $script:rootProcess = $null
 $script:rootProcessStartedUtc = $null
 $script:trackedProcessStarts = @{}
@@ -716,6 +717,8 @@ $contract = [ordered]@{
     ControlledWindowHighlightFrameThicknessPixels = $controlledWindowHighlightFrameThicknessPixels
     ControlledWindowHighlightPauseBehavior = 'Dim'
     ControlledWindowHighlightBackgroundBehavior = 'Hidden'
+    ControlledWindowHighlightTracking = 'AtomicBatchedGeometryOnChange'
+    ConcurrentControllerBehavior = 'FailClosedPerInteractiveSession'
     VisualCoordinateSpace = 'PerMonitorV2PhysicalPixels'
     ExecutionTarget = 'PhysicalHost'
 }
@@ -732,6 +735,7 @@ if ([Codex.HostControl.HostControlContract]::InitialWarningSeconds -ne $initialW
 }
 $nativeBootstrap = [ordered]@{
     TypeLoaded = [bool]('Codex.HostControl.HostControlRuntime' -as [type])
+    SingleControllerLeaseTypeLoaded = [bool]('Codex.HostControl.HostControlLease' -as [type])
     ReferenceMode = $script:hostControlNativeReferenceMode
     PSEdition = [string]$PSVersionTable.PSEdition
     PowerShellVersion = [string]$PSVersionTable.PSVersion
@@ -770,6 +774,7 @@ $initialSnapshot = $null
 $finalSnapshot = $null
 
 try {
+    $script:hostControlLease = New-Object Codex.HostControl.HostControlLease
     $script:runtime = New-Object Codex.HostControl.HostControlRuntime
     $initialSnapshot = $script:runtime.GetSnapshot()
     $script:observedPhysicalInputVersion = [long]$initialSnapshot.PhysicalInputVersion
@@ -911,6 +916,10 @@ finally {
         $script:runtime.Dispose()
         $script:runtime = $null
     }
+    if ($script:hostControlLease) {
+        $script:hostControlLease.Dispose()
+        $script:hostControlLease = $null
+    }
 }
 
 $effectiveSnapshot = if ($finalSnapshot) { $finalSnapshot } else { $initialSnapshot }
@@ -944,6 +953,8 @@ $result = [ordered]@{
         ControlledWindowHighlightFrameThicknessPixels = [Codex.HostControl.HostControlContract]::ControlledWindowFrameThicknessPixels
         ControlledWindowHighlightPauseBehavior = 'Dim'
         ControlledWindowHighlightBackgroundBehavior = 'Hidden'
+        ControlledWindowHighlightTracking = 'AtomicBatchedGeometryOnChange'
+        ConcurrentControllerBehavior = 'FailClosedPerInteractiveSession'
         ControlledWindowHighlightEverShown = if ($effectiveSnapshot) { [bool]$effectiveSnapshot.ControlledWindowHighlightEverShown } else { $false }
         VisualCoordinateSpace = 'PerMonitorV2PhysicalPixels'
         UiThreadPerMonitorV2DpiAware = if ($effectiveSnapshot) { [bool]$effectiveSnapshot.UiThreadPerMonitorV2DpiAware } else { $false }

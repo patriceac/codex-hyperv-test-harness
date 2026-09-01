@@ -36,6 +36,15 @@ function Invoke-PowerShellEncoded {
     [pscustomobject]@{ ExitCode = $exitCode; Output = @($output); Text = (@($output) -join [Environment]::NewLine) }
 }
 
+function Start-PowerShellEncoded {
+    param(
+        [Parameter(Mandatory = $true)] [string] $ExecutablePath,
+        [Parameter(Mandatory = $true)] [string] $Script
+    )
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Script))
+    Start-Process -FilePath $ExecutablePath -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', $encoded) -PassThru -WindowStyle Hidden
+}
+
 function Invoke-WindowsPowerShellEncoded {
     param([Parameter(Mandatory = $true)] [string] $Script)
     Invoke-PowerShellEncoded -ExecutablePath $windowsPowerShell -Script $Script
@@ -118,9 +127,12 @@ $scenarios.Add('native-input-halo-and-capture-safety-contract')
 
 Assert-True ($nativeText.Contains('ControlledWindowBandForm') -and $nativeText.Contains('ApplyRoundedBandRegion') -and $nativeText.Contains('TryGetVisibleBounds')) 'The controlled app does not have a rounded inward highlight bound to its visible window bounds.'
 Assert-True ($nativeText.Contains('ControlledWindowHighlightHex = "#B86CFF"') -and $nativeText.Contains('ControlledWindowFrameThicknessPixels = 6')) 'The controlled-app violet highlight contract is missing or has drifted.'
+Assert-True ($nativeText.Contains('BeginDeferWindowPos') -and $nativeText.Contains('DeferWindowPos') -and $nativeText.Contains('EndDeferWindowPos') -and $nativeText.Contains('SetTargetBoundsAtomically') -and $nativeText.Contains('ClassifyControlledWindowGeometryChange')) 'The controlled-app highlight bands are not repositioned as one geometry-change-aware atomic batch.'
+Assert-True (-not $nativeText.Contains('form.SetTargetBounds(bounds, squareCorners);')) 'The old sequential per-band controlled-window repositioning loop is still present.'
 Assert-True ($runnerText.Contains('Set-ControlledWindowHighlight') -and $runnerText.Contains('$script:runtime.SetControlledWindow($Window)') -and $runnerText.Contains('$script:highlightProbeDeadlineUtc = [DateTime]::UtcNow.AddSeconds(30)')) 'The verified controlled window is not connected to the native highlight runtime through bounded discovery.'
 Assert-True ($nativeText.Contains('DoesWindowProcessOwnForeground') -and $nativeText.Contains('ShouldShowControlledWindowHighlight(_visible, targetWindowUsable, targetProcessOwnsForeground)')) 'The controlled-app highlight can remain visible when another application owns the foreground.'
 Assert-True ($runnerText.Contains('ControlledWindowHighlightPauseBehavior') -and $runnerText.Contains("'Dim'") -and $runnerText.Contains('ControlledWindowHighlightBackgroundBehavior') -and $runnerText.Contains("'Hidden'")) 'The controlled-app highlight does not advertise its paused and background behavior.'
+Assert-True ($nativeText.Contains('SingleControllerLeaseName = @"Local\CodexPhysicalHostControl"') -and $nativeText.Contains('new Mutex(false, HostControlContract.SingleControllerLeaseName)') -and $runnerText.Contains('$script:hostControlLease = New-Object Codex.HostControl.HostControlLease') -and $runnerText.Contains('$script:hostControlLease.Dispose()')) 'The host controller does not fail closed with one lease per interactive session.'
 $scenarios.Add('controlled-window-highlight-wiring-and-safety-contract')
 
 $dpiRequirementIndex = $nativeText.IndexOf('HostDpiAwareness.RequirePerMonitorV2ForCurrentThread();', [StringComparison]::Ordinal)
@@ -170,6 +182,11 @@ Add-Type -Path '$escapedNative' -ReferencedAssemblies @('System.dll','System.Cor
     ControlledWindowOpacity = @(0..2 | ForEach-Object { [Codex.HostControl.HostControlContract]::GetControlledWindowBandOpacity(`$_, 1.0) })
     WindowedCornersAreSquare = [Codex.HostControl.HostControlContract]::ShouldUseSquareControlledWindowCorners([Drawing.Rectangle]::FromLTRB(100,100,900,700), [Drawing.Rectangle]::FromLTRB(0,0,1920,1080))
     MaximizedCornersAreSquare = [Codex.HostControl.HostControlContract]::ShouldUseSquareControlledWindowCorners([Drawing.Rectangle]::FromLTRB(0,0,1920,1080), [Drawing.Rectangle]::FromLTRB(0,0,1920,1080))
+    UnchangedGeometry = [string][Codex.HostControl.HostControlContract]::ClassifyControlledWindowGeometryChange([Drawing.Rectangle]::FromLTRB(100,100,900,700), `$false, [Drawing.Rectangle]::FromLTRB(100,100,900,700), `$false)
+    MovedGeometry = [string][Codex.HostControl.HostControlContract]::ClassifyControlledWindowGeometryChange([Drawing.Rectangle]::FromLTRB(100,100,900,700), `$false, [Drawing.Rectangle]::FromLTRB(300,200,1100,800), `$false)
+    ResizedGeometry = [string][Codex.HostControl.HostControlContract]::ClassifyControlledWindowGeometryChange([Drawing.Rectangle]::FromLTRB(100,100,900,700), `$false, [Drawing.Rectangle]::FromLTRB(100,100,1000,800), `$false)
+    CornerGeometry = [string][Codex.HostControl.HostControlContract]::ClassifyControlledWindowGeometryChange([Drawing.Rectangle]::FromLTRB(100,100,900,700), `$false, [Drawing.Rectangle]::FromLTRB(100,100,900,700), `$true)
+    SingleControllerLeaseName = [Codex.HostControl.HostControlContract]::SingleControllerLeaseName
     ZeroWindowHasVisibleBounds = [Codex.HostControl.HostWindowControl]::TryGetVisibleBounds([IntPtr]::Zero, [ref]`$zeroBounds)
     DpiEnabled = `$dpiEnabled
     DpiError = `$dpiError
@@ -197,6 +214,8 @@ for ($index = 1; $index -lt $haloOpacity.Count; $index++) {
 Assert-True ($haloOpacity[-1] -le 0.051) 'The inner halo edge does not fade to a restrained glow.'
 $controlledWindowOpacity = @($nativeContract.ControlledWindowOpacity | ForEach-Object { [double]$_ })
 Assert-True ($nativeContract.ControlledWindowFrameThickness -eq 6 -and $nativeContract.ControlledWindowCoreThickness -eq 2 -and $nativeContract.ControlledWindowBandThickness -eq 2 -and $nativeContract.ControlledWindowCornerRadius -eq 8) 'The controlled-app highlight does not keep the approved inward geometry.'
+Assert-True ($nativeContract.UnchangedGeometry -eq 'None' -and $nativeContract.MovedGeometry -eq 'PositionOnly' -and $nativeContract.ResizedGeometry -eq 'Shape' -and $nativeContract.CornerGeometry -eq 'Shape') 'The controlled-app geometry classifier would churn unchanged regions or fail to isolate atomic position-only movement.'
+Assert-True ($nativeContract.SingleControllerLeaseName -eq 'Local\CodexPhysicalHostControl') 'The host-control lease is not scoped to one interactive Windows session.'
 Assert-True ($controlledWindowOpacity.Count -eq 3 -and $controlledWindowOpacity[0] -ge 0.95) 'The controlled-app highlight does not keep a crisp two-pixel violet core.'
 for ($index = 1; $index -lt $controlledWindowOpacity.Count; $index++) {
     Assert-True ($controlledWindowOpacity[$index] -lt $controlledWindowOpacity[$index - 1]) 'The controlled-app highlight does not fade smoothly inward.'
@@ -206,6 +225,75 @@ Assert-True (-not $nativeContract.WindowedCornersAreSquare -and $nativeContract.
 Assert-True ($nativeContract.DpiEnabled -and $nativeContract.PerMonitorV2 -and $nativeContract.DpiError -eq 0) 'The native helper could not establish a PerMonitorV2 physical-pixel coordinate space.'
 Assert-True ($nativeContract.ResumeAtNineSeconds -ge 900 -and $nativeContract.ResumeAtNineSeconds -le 1100 -and $nativeContract.ResumeAtTenSeconds -eq 0) 'The compiled resume decision does not require ten uninterrupted idle seconds.'
 $scenarios.Add('native-source-compiles-and-input-classification-passes')
+
+$leaseProbeRoot = Join-Path ([IO.Path]::GetTempPath()) ('codex-host-control-lease-' + [Guid]::NewGuid().ToString('N'))
+$leaseReadyPath = Join-Path $leaseProbeRoot 'ready'
+$leaseReleasePath = Join-Path $leaseProbeRoot 'release'
+$null = New-Item -ItemType Directory -Path $leaseProbeRoot
+$escapedLeaseReadyPath = $leaseReadyPath.Replace("'", "''")
+$escapedLeaseReleasePath = $leaseReleasePath.Replace("'", "''")
+$leaseHolderScript = @"
+`$ErrorActionPreference = 'Stop'
+Add-Type -Path '$escapedNative' -ReferencedAssemblies @('System.dll','System.Core.dll','System.Drawing.dll','System.Windows.Forms.dll')
+`$lease = New-Object Codex.HostControl.HostControlLease
+try {
+    [IO.File]::WriteAllText('$escapedLeaseReadyPath', 'ready')
+    while (-not [IO.File]::Exists('$escapedLeaseReleasePath')) { Start-Sleep -Milliseconds 25 }
+}
+finally {
+    `$lease.Dispose()
+}
+"@
+$leaseHolder = $null
+try {
+    $leaseHolder = Start-PowerShellEncoded -ExecutablePath $windowsPowerShell -Script $leaseHolderScript
+    $leaseReadyDeadline = [DateTime]::UtcNow.AddSeconds(30)
+    while (-not (Test-Path -LiteralPath $leaseReadyPath -PathType Leaf) -and -not $leaseHolder.HasExited -and [DateTime]::UtcNow -lt $leaseReadyDeadline) {
+        Start-Sleep -Milliseconds 50
+    }
+    Assert-True (Test-Path -LiteralPath $leaseReadyPath -PathType Leaf) 'The first host-control lease process did not acquire the session lease.'
+
+    $leaseContenderScript = @"
+`$ErrorActionPreference = 'Stop'
+Add-Type -Path '$escapedNative' -ReferencedAssemblies @('System.dll','System.Core.dll','System.Drawing.dll','System.Windows.Forms.dll')
+try {
+    `$lease = New-Object Codex.HostControl.HostControlLease
+    try { throw 'A second host controller acquired the same interactive-session lease.' } finally { `$lease.Dispose() }
+}
+catch {
+    if (`$_.Exception.ToString() -notlike '*Another physical-host controller is already active*') { throw }
+    [Console]::Out.Write('CONTENDED')
+}
+"@
+    $leaseContender = Invoke-WindowsPowerShellEncoded -Script $leaseContenderScript
+    Assert-True ($leaseContender.ExitCode -eq 0 -and $leaseContender.Text -eq 'CONTENDED') "The second host controller did not fail closed on the occupied session lease: $($leaseContender.Text)"
+
+    [IO.File]::WriteAllText($leaseReleasePath, 'release')
+    Assert-True ($leaseHolder.WaitForExit(10000) -and $leaseHolder.ExitCode -eq 0) 'The first host-control lease process did not release its lease cleanly.'
+
+    $leaseReacquireScript = @"
+`$ErrorActionPreference = 'Stop'
+Add-Type -Path '$escapedNative' -ReferencedAssemblies @('System.dll','System.Core.dll','System.Drawing.dll','System.Windows.Forms.dll')
+`$lease = New-Object Codex.HostControl.HostControlLease
+try { [Console]::Out.Write('REACQUIRED') } finally { `$lease.Dispose() }
+"@
+    $leaseReacquire = Invoke-WindowsPowerShellEncoded -Script $leaseReacquireScript
+    Assert-True ($leaseReacquire.ExitCode -eq 0 -and $leaseReacquire.Text -eq 'REACQUIRED') "The host-control lease was not reusable after clean release: $($leaseReacquire.Text)"
+}
+finally {
+    if (-not (Test-Path -LiteralPath $leaseReleasePath -PathType Leaf)) {
+        [IO.File]::WriteAllText($leaseReleasePath, 'release')
+    }
+    if ($leaseHolder -and -not $leaseHolder.HasExited) {
+        $null = $leaseHolder.WaitForExit(2000)
+        if (-not $leaseHolder.HasExited) { Stop-Process -Id $leaseHolder.Id -Force }
+    }
+    foreach ($leaseProbeFile in @($leaseReadyPath, $leaseReleasePath)) {
+        if (Test-Path -LiteralPath $leaseProbeFile -PathType Leaf) { Remove-Item -LiteralPath $leaseProbeFile -Force }
+    }
+    if (Test-Path -LiteralPath $leaseProbeRoot -PathType Container) { Remove-Item -LiteralPath $leaseProbeRoot -Force }
+}
+$scenarios.Add('single-controller-session-lease-contends-and-releases')
 
 $escapedRunner = $runnerPath.Replace("'", "''")
 $escapedArtifact = $windowsPowerShell.Replace("'", "''")
@@ -217,11 +305,12 @@ $validationResult = Invoke-WindowsPowerShellEncoded -Script $validationProbe
 Assert-True ($validationResult.ExitCode -eq 0) "The host runner validation-only path failed: $($validationResult.Text)"
 $validation = $validationResult.Text | ConvertFrom-Json
 Assert-True ($validation.Success -and $validation.Status -eq 'Validated' -and $validation.ActionCount -eq 1) 'The host runner did not validate a supported action contract.'
-Assert-True ($validation.NativeBootstrap.TypeLoaded -and $validation.NativeBootstrap.PSEdition -eq 'Desktop' -and $validation.NativeBootstrap.ReferenceMode -eq 'WindowsPowerShellFrameworkAssemblies') 'ValidationOnly did not compile and load the native helper through the Windows PowerShell 5.1 reference path.'
+Assert-True ($validation.NativeBootstrap.TypeLoaded -and $validation.NativeBootstrap.SingleControllerLeaseTypeLoaded -and $validation.NativeBootstrap.PSEdition -eq 'Desktop' -and $validation.NativeBootstrap.ReferenceMode -eq 'WindowsPowerShellFrameworkAssemblies') 'ValidationOnly did not compile and load the native helper and single-controller lease through the Windows PowerShell 5.1 reference path.'
 Assert-True ($validation.HostControl.InitialWarningSeconds -eq 6 -and $validation.HostControl.InitialInputIgnoreSeconds -eq 3 -and $validation.HostControl.InitialInputPauseEligibleSeconds -eq 3 -and $validation.HostControl.ResumeIdleSeconds -eq 10 -and $validation.HostControl.CancelKey -eq 'Escape') 'The validation result did not advertise the exact requested interaction policy.'
 Assert-True ($validation.HostControl.InitialGraceInputBehavior -eq 'IgnoreThenPauseImmediately' -and $validation.HostControl.PostGraceInputBehavior -eq 'PauseImmediately') 'The validation result does not distinguish the two initial input phases from post-grace user takeover.'
 Assert-True ($validation.HostControl.HaloRendering -eq 'ContinuousNonOverlappingBands' -and $validation.HostControl.HaloFrameThicknessPixels -eq 12) 'The validation result does not advertise the clean continuous halo geometry.'
 Assert-True ($validation.HostControl.ControlledWindowHighlightColor -eq '#B86CFF' -and $validation.HostControl.ControlledWindowHighlightRendering -eq 'RoundedInwardNonOverlappingBands' -and $validation.HostControl.ControlledWindowHighlightFrameThicknessPixels -eq 6 -and $validation.HostControl.ControlledWindowHighlightPauseBehavior -eq 'Dim' -and $validation.HostControl.ControlledWindowHighlightBackgroundBehavior -eq 'Hidden') 'The validation result does not advertise the approved controlled-app highlight.'
+Assert-True ($validation.HostControl.ControlledWindowHighlightTracking -eq 'AtomicBatchedGeometryOnChange' -and $validation.HostControl.ConcurrentControllerBehavior -eq 'FailClosedPerInteractiveSession') 'The validation result does not advertise atomic movement or the single-controller lease.'
 Assert-True ($validation.HostControl.VisualCoordinateSpace -eq 'PerMonitorV2PhysicalPixels') 'The validation result does not advertise DPI-safe physical-pixel visual coordinates.'
 $scenarios.Add('windows-powershell-validation-compiles-native-helper-without-launch')
 
@@ -234,11 +323,12 @@ $powerShell7ValidationResult = Invoke-PowerShellEncoded -ExecutablePath $powerSh
 Assert-True ($powerShell7ValidationResult.ExitCode -eq 0) "The host runner native bootstrap failed under PowerShell 7: $($powerShell7ValidationResult.Text)"
 $powerShell7Validation = $powerShell7ValidationResult.Text | ConvertFrom-Json
 Assert-True ($powerShell7Validation.Success -and $powerShell7Validation.Status -eq 'Validated' -and $powerShell7Validation.ActionCount -eq 1) 'PowerShell 7 did not complete the validation-only host runner path.'
-Assert-True ($powerShell7Validation.NativeBootstrap.TypeLoaded -and $powerShell7Validation.NativeBootstrap.PSEdition -eq 'Core' -and $powerShell7Validation.NativeBootstrap.ReferenceMode -eq 'PowerShellCoreReferencePack') 'PowerShell 7 did not compile and load the host-control native helper through its matching reference pack.'
+Assert-True ($powerShell7Validation.NativeBootstrap.TypeLoaded -and $powerShell7Validation.NativeBootstrap.SingleControllerLeaseTypeLoaded -and $powerShell7Validation.NativeBootstrap.PSEdition -eq 'Core' -and $powerShell7Validation.NativeBootstrap.ReferenceMode -eq 'PowerShellCoreReferencePack') 'PowerShell 7 did not compile and load the host-control native helper and single-controller lease through its matching reference pack.'
 Assert-True ([version]$powerShell7Validation.NativeBootstrap.PowerShellVersion -ge [version]'7.0') 'The PowerShell 7 validation did not report a supported engine version.'
 Assert-True (-not [string]::IsNullOrWhiteSpace([string]$powerShell7Validation.NativeBootstrap.RuntimeDescription)) 'The PowerShell 7 validation did not report its .NET runtime.'
 Assert-True ($powerShell7Validation.HostControl.VisualCoordinateSpace -eq 'PerMonitorV2PhysicalPixels') 'PowerShell 7 validation did not preserve the DPI-safe physical-pixel visual coordinate contract.'
 Assert-True ($powerShell7Validation.HostControl.InitialWarningSeconds -eq 6 -and $powerShell7Validation.HostControl.InitialInputIgnoreSeconds -eq 3 -and $powerShell7Validation.HostControl.InitialInputPauseEligibleSeconds -eq 3 -and $powerShell7Validation.HostControl.ControlledWindowHighlightBackgroundBehavior -eq 'Hidden') 'PowerShell 7 validation did not preserve the split warning or foreground-only highlight contract.'
+Assert-True ($powerShell7Validation.HostControl.ControlledWindowHighlightTracking -eq 'AtomicBatchedGeometryOnChange' -and $powerShell7Validation.HostControl.ConcurrentControllerBehavior -eq 'FailClosedPerInteractiveSession') 'PowerShell 7 validation did not preserve atomic controlled-window movement or the single-controller lease contract.'
 $scenarios.Add('powershell7-validation-compiles-native-helper-without-launch')
 
 $escapedArtifactDirectory = (Split-Path -Parent $windowsPowerShell).Replace("'", "''")
@@ -273,7 +363,7 @@ $unsafeEvidence = Invoke-WindowsPowerShellEncoded -Script $unsafeEvidenceProbe
 Assert-True ($unsafeEvidence.ExitCode -ne 0 -and $unsafeEvidence.Text -like '*escapes the request output directory*') 'The host runner accepted an evidence path traversal.'
 $scenarios.Add('host-evidence-path-traversal-rejected')
 
-Assert-True ($skillText.Contains('Invoke-HostExecutableTest.ps1') -and $skillText.Contains('six-second') -and $skillText.Contains('first three seconds') -and $skillText.Contains('final three seconds') -and $skillText.Contains('ten seconds') -and $skillText.Contains('Escape') -and $skillText.Contains('violet') -and $skillText.Contains('inward') -and $skillText.Contains('another application owns the foreground')) 'The runtime skill does not document the explicit host-control path and its user-visible behavior.'
+Assert-True ($skillText.Contains('Invoke-HostExecutableTest.ps1') -and $skillText.Contains('six-second') -and $skillText.Contains('first three seconds') -and $skillText.Contains('final three seconds') -and $skillText.Contains('ten seconds') -and $skillText.Contains('Escape') -and $skillText.Contains('violet') -and $skillText.Contains('inward') -and $skillText.Contains('atomic batch') -and $skillText.Contains('Only one host controller') -and $skillText.Contains('another application owns the foreground')) 'The runtime skill does not document the explicit host-control path and its user-visible behavior.'
 $scenarios.Add('runtime-skill-documents-host-control')
 
 [pscustomobject][ordered]@{
