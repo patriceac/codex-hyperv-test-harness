@@ -705,6 +705,7 @@ $contract = [ordered]@{
     ControlledWindowHighlightRendering = 'RoundedInwardNonOverlappingBands'
     ControlledWindowHighlightFrameThicknessPixels = $controlledWindowHighlightFrameThicknessPixels
     ControlledWindowHighlightPauseBehavior = 'Dim'
+    VisualCoordinateSpace = 'PerMonitorV2PhysicalPixels'
     ExecutionTarget = 'PhysicalHost'
 }
 $isValidationOnly = [bool]$ValidateOnly
@@ -928,6 +929,8 @@ $result = [ordered]@{
         ControlledWindowHighlightFrameThicknessPixels = [Codex.HostControl.HostControlContract]::ControlledWindowFrameThicknessPixels
         ControlledWindowHighlightPauseBehavior = 'Dim'
         ControlledWindowHighlightEverShown = if ($effectiveSnapshot) { [bool]$effectiveSnapshot.ControlledWindowHighlightEverShown } else { $false }
+        VisualCoordinateSpace = 'PerMonitorV2PhysicalPixels'
+        UiThreadPerMonitorV2DpiAware = if ($effectiveSnapshot) { [bool]$effectiveSnapshot.UiThreadPerMonitorV2DpiAware } else { $false }
         MonitorCount = if ($effectiveSnapshot) { $effectiveSnapshot.MonitorCount } else { 0 }
         OsCaptureProtectionSucceeded = if ($effectiveSnapshot) { [bool]$effectiveSnapshot.CaptureProtectionSucceeded } else { $false }
         FullCaptureExclusionSucceeded = if ($effectiveSnapshot) { [string]$effectiveSnapshot.CaptureProtectionMode -eq 'ExcludeFromCapture' } else { $false }

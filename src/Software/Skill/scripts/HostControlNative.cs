@@ -31,6 +31,7 @@ namespace Codex.HostControl
         public bool ControlledWindowHighlightVisible { get; internal set; }
         public bool ControlledWindowHighlightEverShown { get; internal set; }
         public long ControlledWindowHandle { get; internal set; }
+        public bool UiThreadPerMonitorV2DpiAware { get; internal set; }
     }
 
     public static class HostControlContract
@@ -127,6 +128,59 @@ namespace Codex.HostControl
         }
     }
 
+    public static class HostDpiAwareness
+    {
+        private static readonly IntPtr PerMonitorAwareV2 = new IntPtr(-4);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetThreadDpiAwarenessContext();
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool AreDpiAwarenessContextsEqual(IntPtr first, IntPtr second);
+
+        public static bool IsCurrentThreadPerMonitorV2()
+        {
+            IntPtr current = GetThreadDpiAwarenessContext();
+            return current != IntPtr.Zero && AreDpiAwarenessContextsEqual(current, PerMonitorAwareV2);
+        }
+
+        public static bool TryEnablePerMonitorV2ForCurrentThread(out int error)
+        {
+            error = 0;
+            if (IsCurrentThreadPerMonitorV2())
+            {
+                return true;
+            }
+
+            IntPtr previous = SetThreadDpiAwarenessContext(PerMonitorAwareV2);
+            if (previous == IntPtr.Zero)
+            {
+                error = Marshal.GetLastWin32Error();
+                return false;
+            }
+            bool enabled = IsCurrentThreadPerMonitorV2();
+            if (!enabled)
+            {
+                error = Marshal.GetLastWin32Error();
+                if (error == 0) error = 87;
+            }
+            return enabled;
+        }
+
+        public static void RequirePerMonitorV2ForCurrentThread()
+        {
+            int error;
+            if (!TryEnablePerMonitorV2ForCurrentThread(out error))
+            {
+                throw new Win32Exception(error, "The host-control visual guard requires a PerMonitorV2 DPI-aware UI thread.");
+            }
+        }
+    }
+
     public sealed class HostControlRuntime : IDisposable
     {
         private readonly ManualResetEvent _started = new ManualResetEvent(false);
@@ -175,7 +229,8 @@ namespace Codex.HostControl
                 MonitorCount = context == null ? 0 : context.MonitorCount,
                 ControlledWindowHighlightVisible = context != null && context.ControlledWindowHighlightVisible,
                 ControlledWindowHighlightEverShown = context != null && context.ControlledWindowHighlightEverShown,
-                ControlledWindowHandle = context == null ? 0 : context.ControlledWindowHandle.ToInt64()
+                ControlledWindowHandle = context == null ? 0 : context.ControlledWindowHandle.ToInt64(),
+                UiThreadPerMonitorV2DpiAware = context != null && context.UiThreadPerMonitorV2DpiAware
             };
         }
 
@@ -236,6 +291,7 @@ namespace Codex.HostControl
         {
             try
             {
+                HostDpiAwareness.RequirePerMonitorV2ForCurrentThread();
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
                 _context = new HaloApplicationContext();
@@ -575,10 +631,16 @@ namespace Codex.HostControl
         private bool _captureProtectionSucceeded = true;
         private string _captureProtectionMode = "ExcludeFromCapture";
         private int _captureProtectionError;
+        private readonly bool _uiThreadPerMonitorV2DpiAware;
         private bool _disposed;
 
         public HaloApplicationContext()
         {
+            _uiThreadPerMonitorV2DpiAware = HostDpiAwareness.IsCurrentThreadPerMonitorV2();
+            if (!_uiThreadPerMonitorV2DpiAware)
+            {
+                throw new InvalidOperationException("The host-control UI thread lost its PerMonitorV2 DPI-awareness context before creating its windows.");
+            }
             _dispatcher = new Control();
             _dispatcher.CreateControl();
             CreateHaloForms();
@@ -597,6 +659,7 @@ namespace Codex.HostControl
         public IntPtr ControlledWindowHandle { get { return _controlledWindow; } }
         public bool ControlledWindowHighlightEverShown { get { return _controlledWindowHighlightEverShown; } }
         public bool ControlledWindowHighlightVisible { get { return _controlledWindowHighlightVisible; } }
+        public bool UiThreadPerMonitorV2DpiAware { get { return _uiThreadPerMonitorV2DpiAware; } }
 
         public void SetState(HaloState state)
         {

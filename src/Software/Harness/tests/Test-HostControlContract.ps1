@@ -120,12 +120,20 @@ Assert-True ($runnerText.Contains('Set-ControlledWindowHighlight') -and $runnerT
 Assert-True ($runnerText.Contains('ControlledWindowHighlightPauseBehavior') -and $runnerText.Contains("'Dim'")) 'The controlled-app highlight does not advertise its dimmed paused behavior.'
 $scenarios.Add('controlled-window-highlight-wiring-and-safety-contract')
 
+$dpiRequirementIndex = $nativeText.IndexOf('HostDpiAwareness.RequirePerMonitorV2ForCurrentThread();', [StringComparison]::Ordinal)
+$visualStylesIndex = $nativeText.IndexOf('Application.EnableVisualStyles();', [StringComparison]::Ordinal)
+Assert-True ($nativeText.Contains('SetThreadDpiAwarenessContext') -and $nativeText.Contains('AreDpiAwarenessContextsEqual') -and $dpiRequirementIndex -ge 0 -and $dpiRequirementIndex -lt $visualStylesIndex) 'The visual-guard UI thread does not require PerMonitorV2 before WinForms creates its first window.'
+Assert-True ($runnerText.Contains("VisualCoordinateSpace = 'PerMonitorV2PhysicalPixels'")) 'The host runner does not advertise the DPI-safe physical-pixel coordinate contract.'
+$scenarios.Add('per-monitor-v2-dpi-coordinate-contract')
+
 $escapedNative = $nativePath.Replace("'", "''")
 $nativeProbe = @"
 `$ErrorActionPreference = 'Stop'
 Add-Type -Path '$escapedNative' -ReferencedAssemblies @('System.dll','System.Core.dll','System.Drawing.dll','System.Windows.Forms.dll')
 `$probeNow = [DateTime]::UtcNow
 `$zeroBounds = New-Object Drawing.Rectangle
+`$dpiError = 0
+`$dpiEnabled = [Codex.HostControl.HostDpiAwareness]::TryEnablePerMonitorV2ForCurrentThread([ref]`$dpiError)
 [pscustomobject][ordered]@{
     Warning = [Codex.HostControl.HostControlContract]::InitialWarningSeconds
     Resume = [Codex.HostControl.HostControlContract]::ResumeIdleSeconds
@@ -155,6 +163,9 @@ Add-Type -Path '$escapedNative' -ReferencedAssemblies @('System.dll','System.Cor
     WindowedCornersAreSquare = [Codex.HostControl.HostControlContract]::ShouldUseSquareControlledWindowCorners([Drawing.Rectangle]::FromLTRB(100,100,900,700), [Drawing.Rectangle]::FromLTRB(0,0,1920,1080))
     MaximizedCornersAreSquare = [Codex.HostControl.HostControlContract]::ShouldUseSquareControlledWindowCorners([Drawing.Rectangle]::FromLTRB(0,0,1920,1080), [Drawing.Rectangle]::FromLTRB(0,0,1920,1080))
     ZeroWindowHasVisibleBounds = [Codex.HostControl.HostWindowControl]::TryGetVisibleBounds([IntPtr]::Zero, [ref]`$zeroBounds)
+    DpiEnabled = `$dpiEnabled
+    DpiError = `$dpiError
+    PerMonitorV2 = [Codex.HostControl.HostDpiAwareness]::IsCurrentThreadPerMonitorV2()
     ResumeAtNineSeconds = [Codex.HostControl.HostControlContract]::GetResumeDelayMilliseconds(`$probeNow, `$probeNow.AddSeconds(-9))
     ResumeAtTenSeconds = [Codex.HostControl.HostControlContract]::GetResumeDelayMilliseconds(`$probeNow, `$probeNow.AddSeconds(-10))
 } | ConvertTo-Json -Compress
@@ -183,6 +194,7 @@ for ($index = 1; $index -lt $controlledWindowOpacity.Count; $index++) {
 }
 Assert-True ($controlledWindowOpacity[-1] -le 0.071 -and -not $nativeContract.ZeroWindowHasVisibleBounds) 'The controlled-app glow is too strong or accepts an invalid window handle.'
 Assert-True (-not $nativeContract.WindowedCornersAreSquare -and $nativeContract.MaximizedCornersAreSquare) 'The controlled-app highlight does not preserve rounded windowed corners and square maximized edges.'
+Assert-True ($nativeContract.DpiEnabled -and $nativeContract.PerMonitorV2 -and $nativeContract.DpiError -eq 0) 'The native helper could not establish a PerMonitorV2 physical-pixel coordinate space.'
 Assert-True ($nativeContract.ResumeAtNineSeconds -ge 900 -and $nativeContract.ResumeAtNineSeconds -le 1100 -and $nativeContract.ResumeAtTenSeconds -eq 0) 'The compiled resume decision does not require ten uninterrupted idle seconds.'
 $scenarios.Add('native-source-compiles-and-input-classification-passes')
 
@@ -201,6 +213,7 @@ Assert-True ($validation.HostControl.InitialWarningSeconds -eq 5 -and $validatio
 Assert-True ($validation.HostControl.InitialGraceInputBehavior -eq 'IgnoreForPause' -and $validation.HostControl.PostGraceInputBehavior -eq 'PauseImmediately') 'The validation result does not distinguish the non-pausing grace period from post-grace user takeover.'
 Assert-True ($validation.HostControl.HaloRendering -eq 'ContinuousNonOverlappingBands' -and $validation.HostControl.HaloFrameThicknessPixels -eq 12) 'The validation result does not advertise the clean continuous halo geometry.'
 Assert-True ($validation.HostControl.ControlledWindowHighlightColor -eq '#B86CFF' -and $validation.HostControl.ControlledWindowHighlightRendering -eq 'RoundedInwardNonOverlappingBands' -and $validation.HostControl.ControlledWindowHighlightFrameThicknessPixels -eq 6 -and $validation.HostControl.ControlledWindowHighlightPauseBehavior -eq 'Dim') 'The validation result does not advertise the approved controlled-app highlight.'
+Assert-True ($validation.HostControl.VisualCoordinateSpace -eq 'PerMonitorV2PhysicalPixels') 'The validation result does not advertise DPI-safe physical-pixel visual coordinates.'
 $scenarios.Add('windows-powershell-validation-compiles-native-helper-without-launch')
 
 $escapedPowerShell7 = $powerShell7.Replace("'", "''")
@@ -215,6 +228,7 @@ Assert-True ($powerShell7Validation.Success -and $powerShell7Validation.Status -
 Assert-True ($powerShell7Validation.NativeBootstrap.TypeLoaded -and $powerShell7Validation.NativeBootstrap.PSEdition -eq 'Core' -and $powerShell7Validation.NativeBootstrap.ReferenceMode -eq 'PowerShellCoreReferencePack') 'PowerShell 7 did not compile and load the host-control native helper through its matching reference pack.'
 Assert-True ([version]$powerShell7Validation.NativeBootstrap.PowerShellVersion -ge [version]'7.0') 'The PowerShell 7 validation did not report a supported engine version.'
 Assert-True (-not [string]::IsNullOrWhiteSpace([string]$powerShell7Validation.NativeBootstrap.RuntimeDescription)) 'The PowerShell 7 validation did not report its .NET runtime.'
+Assert-True ($powerShell7Validation.HostControl.VisualCoordinateSpace -eq 'PerMonitorV2PhysicalPixels') 'PowerShell 7 validation did not preserve the DPI-safe physical-pixel visual coordinate contract.'
 $scenarios.Add('powershell7-validation-compiles-native-helper-without-launch')
 
 $escapedArtifactDirectory = (Split-Path -Parent $windowsPowerShell).Replace("'", "''")

@@ -23,6 +23,7 @@ The host runner accepts `wait_window`, `focus_window`, `click_control`, `click_r
 ## User-visible control lease
 
 - One thin, continuous fuchsia frame with a soft inward glow appears around every attached display for five seconds before the application launches. Its frame bands do not overlap, so the corners cannot accumulate into solid blocks.
+- Before creating either visual guard, the dedicated UI thread must enter Windows `PerMonitorV2` mode. DWM bounds, monitor bounds, and overlay placement therefore share physical-pixel coordinates at scaled settings such as 125%; failure to establish that mode stops the host run.
 - After the verified application window appears, a cooler-violet rounded outline identifies the controlled target. Its crisp two-pixel core and restrained inward fade stay inside the visible window bounds, follow movement and resizing, and remain click-through and non-activating. Maximized or edge-to-edge windows use square inner corners so the outline remains visible without spilling off-screen.
 - During that initial five-second grace period, ordinary mouse and keyboard activity does not pause the countdown or turn the halo amber. Physical `Escape` still cancels immediately.
 - After the grace period expires, physical mouse movement, mouse buttons, wheel input, or keyboard input pauses the action sequence immediately. Controller-generated input is marked and ignored by the physical-input detector.
