@@ -28,6 +28,7 @@ if (-not [bool]$deployPreview.Success -or -not [bool]$deployPreview.NoMutationPe
     throw 'Deployment invocation preflight was not successful and mutation-free.'
 }
 $installInvocation = $deployPreview.InstallInvocation
+$recoveryInvocation = $deployPreview.RecoveryRefreshInvocation
 foreach ($requiredKey in @('NoElevation','NoRestart','SkipSmokeTest','SkipLocalRecoveryBundle','DeferPoolRebuildForGuestBaselineUpdate','ExpectedExistingConfigurationSha256')) {
     if (-not $installInvocation.ContainsKey($requiredKey)) { throw "Deployment install invocation is missing $requiredKey." }
 }
@@ -37,6 +38,11 @@ foreach ($forbiddenKey in @('ForceRebuild','ResetRequestNetworkPolicy','PlanOnly
 if ($deployPreview.GuestBaselineInvocation.ContainsKey('PlanOnly') -or
     [string]$deployPreview.GuestBaselineInvocation.ClientSid -ne 'S-1-5-18') {
     throw 'Apply preflight did not preserve the exact client SID or unexpectedly bound guest PlanOnly.'
+}
+if ([string]$recoveryInvocation.BaselineExportMode -ne 'ReuseCurrent' -or
+    -not $recoveryInvocation.ContainsKey('NoElevation') -or
+    [string]$recoveryInvocation.InstallRoot -ne $probeRoot) {
+    throw 'Apply preflight did not preserve the reviewed recovery baseline-export mode.'
 }
 $scenarios.Add('exact-apply-invocations-defer-duplicate-work-without-expanding-scope')
 
@@ -147,6 +153,9 @@ foreach ($phaseName in $phaseNames) {
 }
 if ([regex]::Matches($deploy, "-Name 'RecoveryRefresh'").Count -ne 1 -or
     $deploy -notmatch "RecoveryRefreshCount\s*=\s*1" -or
+    $deploy -notmatch 'RecoveryBaselineExportMode' -or
+    $deploy -notmatch "'ReuseCurrent'" -or
+    $deploy -notmatch 'NTFS hard links' -or
     $deploy -notmatch 'AutomaticRollback\s*=\s*\$false' -or
     $deploy -notmatch 'LiveShadowPoolAvailable\s*=\s*\$false' -or
     $deploy -notmatch "Status\s*=\s*'NeedsFixForward'" -or
@@ -203,7 +212,9 @@ if ($runner -notmatch '\[switch\]\s*\$ThrowOnFailure' -or $runner -notmatch 'if 
 }
 $recoveryWrapper = Get-Content -LiteralPath $recoveryWrapperPath -Raw
 if ($recoveryWrapper -notmatch '\[string\]\s*\$TargetUserProfile' -or
-    $deploy -notmatch '-TargetUserProfile\s+\$TargetUserProfile\s+-NoElevation') {
+    $recoveryWrapper -notmatch "ValidateSet\('FullExport','ReuseCurrent'\)" -or
+    $recoveryWrapper -notmatch '-BaselineExportMode\s+\$BaselineExportMode' -or
+    $deploy -notmatch 'New-RecoveryRefreshInvocationParameters\s+-Plan\s+\$plan') {
     throw 'The final recovery refresh does not preserve the reviewed target-user profile.'
 }
 $scenarios.Add('component-handoff-and-runner-failure-return-are-fail-closed')

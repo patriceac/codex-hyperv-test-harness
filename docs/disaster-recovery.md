@@ -13,7 +13,7 @@ On a reimaged Windows 11 Pro, Enterprise, or Education host:
 5. Monitor `<chosen-install-root>\Live\Setup\setup-state.json`. A registered SYSTEM task owns post-restart continuation; do not launch a competing installer.
 6. Require `Phase=Ready` and `Success=true` in `<chosen-install-root>\Live\Setup\setup-result.json`. Those terminal states are published only after the internal privileged audit and isolated canary pass. Run `setup\Verify.ps1 -InstallRoot <chosen-install-root>` for a later independent recheck.
 
-The longest steps are the Microsoft ISO download, unattended Windows installation, repeated guest update/reboot passes, .NET SDK verification, base VHDX conversion, and local recovery export. They are resumable at the host-feature boundary, while expensive completed media and baseline work are reused on a normal rerun.
+The longest steps are the Microsoft ISO download, unattended Windows installation, repeated guest update/reboot passes, .NET SDK verification, base VHDX conversion, and a full local recovery export. They are resumable at the host-feature boundary, while expensive completed media and baseline work are reused on a normal rerun. Later ordinary software releases can reuse an unchanged receipt-backed recovery baseline through NTFS hard links; first recovery creation and actual baseline changes still perform the full export.
 
 ## If the fast local bundle survives
 

@@ -287,7 +287,8 @@ try {
         $installSource.IndexOf('[IO.File]::WriteAllText($agentsPath', [StringComparison]::Ordinal) -lt 0) 'Normal installer is not exclusively wired through the shared safe policy helper.'
     Assert-True ($recoveryBuilderSource.IndexOf("'Setup\AGENTS.block.md'", [StringComparison]::Ordinal) -ge 0 -and
         $recoveryBuilderSource.IndexOf('CodexPolicy.md', [StringComparison]::Ordinal) -lt 0 -and
-        $recoveryBuilderSource.IndexOf("Join-Path `$codexRoot 'AGENTS.md'", [StringComparison]::Ordinal) -ge 0) 'Recovery generation does not snapshot the one canonical managed policy block.'
+        $recoveryBuilderSource.IndexOf('Copy-CodexRecoveryFileIncremental', [StringComparison]::Ordinal) -ge 0 -and
+        $recoveryBuilderSource.IndexOf("-RelativePath 'Codex/AGENTS.md'", [StringComparison]::Ordinal) -ge 0) 'Recovery generation does not snapshot the one canonical managed policy block.'
     Assert-True ($recoveryInstallSource.IndexOf("Common\CodexManagedPolicy.ps1", [StringComparison]::Ordinal) -ge 0 -and
         $recoveryInstallSource.IndexOf('Set-CodexManagedPolicyBlock', [StringComparison]::Ordinal) -ge 0 -and
         $recoveryInstallSource.IndexOf('[IO.File]::WriteAllText($agentsDestination', [StringComparison]::Ordinal) -lt 0) 'Recovery installer is not exclusively wired through the shared safe policy helper.'

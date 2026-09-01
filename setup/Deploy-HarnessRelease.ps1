@@ -233,6 +233,95 @@ function New-GuestBaselineInvocationParameters {
     $parameters
 }
 
+function New-RecoveryRefreshInvocationParameters {
+    param([Parameter(Mandatory = $true)] $Plan)
+
+    $mode = [string]$Plan.RecoveryBaselineExportMode
+    if ($mode -notin @('FullExport','ReuseCurrent')) { throw "Unsupported recovery baseline export mode in release plan: $mode" }
+    if ([bool]$Plan.GuestBaselineUpdateRequired -and $mode -ne 'FullExport') {
+        throw 'A release that changes the guest baseline must use a full recovery export.'
+    }
+    @{
+        InstallRoot = [string]$Plan.InstallRoot
+        TargetUserProfile = [string]$Plan.TargetUserProfile
+        BaselineExportMode = $mode
+        NoElevation = $true
+    }
+}
+
+function Get-RecoveryReusePlanReadiness {
+    param([Parameter(Mandatory = $true)] [string] $Root)
+
+    $recoveryRoot = Join-Path $Root 'Recovery'
+    $currentRoot = Join-Path $recoveryRoot 'Current'
+    $manifestPath = Join-Path $currentRoot 'manifest.json'
+    $result = [ordered]@{
+        Ready = $false
+        Reason = $null
+        CurrentBundleId = $null
+        ReceiptKind = $null
+        ManifestSha256 = $null
+    }
+    try {
+        $drive = [IO.DriveInfo]::new([IO.Path]::GetPathRoot([IO.Path]::GetFullPath($currentRoot)))
+        if (-not [string]::Equals($drive.DriveFormat, 'NTFS', [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Recovery reuse requires NTFS; detected $($drive.DriveFormat)."
+        }
+        if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw 'Recovery\Current\manifest.json is missing.' }
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ([int]$manifest.FormatVersion -ne 1 -or [string]::IsNullOrWhiteSpace([string]$manifest.BundleId)) { throw 'Recovery\Current has an unsupported manifest.' }
+        $entries = @($manifest.Files)
+        if ([int]$manifest.FileCount -ne $entries.Count -or [long]$manifest.TotalBytes -ne [long](($entries | Measure-Object -Property Length -Sum).Sum)) {
+            throw 'Recovery\Current manifest counts are inconsistent.'
+        }
+        $baselineEntryCount = 0
+        foreach ($entry in $entries) {
+            $relative = ([string]$entry.RelativePath).Replace('\', '/')
+            if ([string]::IsNullOrWhiteSpace($relative) -or [IO.Path]::IsPathRooted($relative) -or $relative -match '(^|/)\.\.($|/)' -or
+                [long]$entry.Length -lt 0 -or [string]$entry.Sha256 -notmatch '^[A-Fa-f0-9]{64}$') {
+                throw "Recovery\Current contains an invalid manifest entry: $relative"
+            }
+            $path = [IO.Path]::GetFullPath((Join-Path $currentRoot $relative))
+            if (-not ($path + '\').StartsWith(([IO.Path]::GetFullPath($currentRoot).TrimEnd('\') + '\'), [StringComparison]::OrdinalIgnoreCase) -or
+                -not (Test-Path -LiteralPath $path -PathType Leaf) -or [long](Get-Item -LiteralPath $path).Length -ne [long]$entry.Length) {
+                throw "Recovery\Current is structurally incomplete: $relative"
+            }
+            if ($relative -like 'BaselineExport/*') { $baselineEntryCount++ }
+        }
+        if ($baselineEntryCount -eq 0) { throw 'Recovery\Current contains no baseline export files.' }
+        $checksumPath = Join-Path $currentRoot 'checksums.sha256'
+        if (-not (Test-Path -LiteralPath $checksumPath -PathType Leaf) -or
+            -not [string]::Equals((Get-FileHash -LiteralPath $checksumPath -Algorithm SHA256).Hash, [string]$manifest.ChecksumsSha256, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Recovery\Current checksum inventory is missing or changed.'
+        }
+        $manifestSha256 = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash
+        $receiptMatch = $null
+        foreach ($candidate in @(
+            [pscustomobject]@{ Path = (Join-Path $recoveryRoot 'last-successful-refresh.json'); Kind = 'SuccessfulRefresh' },
+            [pscustomobject]@{ Path = (Join-Path $recoveryRoot 'last-refresh.json'); Kind = 'LegacyRefresh' },
+            [pscustomobject]@{ Path = (Join-Path $recoveryRoot 'last-verification.json'); Kind = 'DeepVerification' }
+        )) {
+            if (-not (Test-Path -LiteralPath $candidate.Path -PathType Leaf)) { continue }
+            try { $receipt = Get-Content -LiteralPath $candidate.Path -Raw -Encoding UTF8 | ConvertFrom-Json } catch { continue }
+            if (-not [bool]$receipt.Success -or -not [string]::Equals([string]$receipt.BundleId, [string]$manifest.BundleId, [StringComparison]::Ordinal)) { continue }
+            if ($candidate.Kind -eq 'DeepVerification' -and
+                ([bool]$receipt.ContentHashesSkipped -or [int]$receipt.VerifiedFiles -ne [int]$manifest.FileCount -or [long]$receipt.VerifiedBytes -ne [long]$manifest.TotalBytes)) { continue }
+            if ($candidate.Kind -ne 'DeepVerification' -and $receipt.Details.PSObject.Properties['ManifestSha256'] -and
+                -not [string]::Equals([string]$receipt.Details.ManifestSha256, $manifestSha256, [StringComparison]::OrdinalIgnoreCase)) { continue }
+            $receiptMatch = $candidate
+            break
+        }
+        if ($null -eq $receiptMatch) { throw 'Recovery\Current has no matching successful refresh or deep-verification receipt.' }
+        $result.Ready = $true
+        $result.Reason = 'Receipt-backed structurally complete NTFS generation is available.'
+        $result.CurrentBundleId = [string]$manifest.BundleId
+        $result.ReceiptKind = [string]$receiptMatch.Kind
+        $result.ManifestSha256 = $manifestSha256
+    }
+    catch { $result.Reason = $_.Exception.Message }
+    [pscustomobject]$result
+}
+
 function New-ReleasePlan {
     param(
         [Parameter(Mandatory = $true)] $RepositoryState,
@@ -241,13 +330,20 @@ function New-ReleasePlan {
     )
 
     $guestUpdateRequired = @($GuestInventory | Where-Object { [bool]$_.Changed }).Count -gt 0
+    $recoveryReuseReadiness = Get-RecoveryReusePlanReadiness -Root $InstallRoot
+    $recoveryBaselineExportMode = if ($guestUpdateRequired -or -not [bool]$recoveryReuseReadiness.Ready) { 'FullExport' } else { 'ReuseCurrent' }
     $operations = New-Object Collections.Generic.List[string]
     $operations.Add('Qualify the exact committed source with the complete deterministic suite and public-payload audit.')
     $operations.Add('Stage and publish source through Install.ps1 without creating recovery or running duplicate smoke acceptance.')
     if ($guestUpdateRequired) { $operations.Add('Replace the guest harness in the canonical baseline and rebuild the disposable pool exactly once.') }
     else { $operations.Add('Refresh the disposable pool exactly once from the unchanged canonical baseline.') }
     $operations.Add('Run legacy launch, accented-name UI Automation, bounded keyboard, and expected-guest-power-off acceptance in isolated workers.')
-    $operations.Add('Create and deep-verify local recovery exactly once after acceptance.')
+    if ($recoveryBaselineExportMode -eq 'ReuseCurrent') {
+        $operations.Add('Reuse the receipt-backed unchanged baseline export with NTFS hard links, hash only the recovery delta, and rotate local recovery exactly once after acceptance.')
+    }
+    else {
+        $operations.Add('Create and deep-verify a full local recovery export exactly once after acceptance.')
+    }
     $operations.Add('Revalidate the exact commit and public payload, then publish a terminal release receipt.')
 
     $core = [ordered]@{
@@ -263,6 +359,8 @@ function New-ReleasePlan {
         ExpectedDotNetSdkVersion = $ExpectedDotNetSdkVersion
         AllowLowResources = [bool]$AllowLowResources
         GuestBaselineUpdateRequired = [bool]$guestUpdateRequired
+        RecoveryBaselineExportMode = $recoveryBaselineExportMode
+        RecoveryReuseReadiness = $recoveryReuseReadiness
         GuestSourceInventory = @($GuestInventory)
         SupersedesDeploymentId = if ([string]::IsNullOrWhiteSpace($SupersedesDeploymentId)) { $null } else { $SupersedesDeploymentId }
         Operations = $operations.ToArray()
@@ -414,6 +512,7 @@ if ($InvocationPreflightOnly) {
         GuestUpdateSwitchName = 'Test switch'; DotNetChannel = '10.0'; ExpectedDotNetSdkVersion = '10.0.100'
         TargetUserProfile = 'C:\Users\<TARGET_USER>'; TargetUserSid = 'S-1-5-18'; AllowLowResources = $false
         GuestBaselineUpdateRequired = $true
+        RecoveryBaselineExportMode = 'FullExport'
     }
     $fakeConfiguration = [pscustomobject][ordered]@{
         VmMemoryGiB = 8
@@ -426,6 +525,13 @@ if ($InvocationPreflightOnly) {
     }
     $installInvocation = New-ReleaseInstallInvocationParameters -Plan $fakePlan -Configuration $fakeConfiguration
     $guestInvocation = New-GuestBaselineInvocationParameters -Plan $fakePlan -Configuration $fakeConfiguration -SourceRoot (Join-Path $InstallRoot 'Software\Harness') -StatusPath (Join-Path $InstallRoot 'Live\Setup\guest-update.json')
+    $fakeReusePlan = [pscustomobject][ordered]@{
+        InstallRoot = $InstallRoot
+        TargetUserProfile = 'C:\Users\<TARGET_USER>'
+        GuestBaselineUpdateRequired = $false
+        RecoveryBaselineExportMode = 'ReuseCurrent'
+    }
+    $recoveryInvocation = New-RecoveryRefreshInvocationParameters -Plan $fakeReusePlan
     $roundTripPlan = New-ReleasePlan `
         -RepositoryState ([pscustomobject]@{ RepositoryRoot = 'C:\ReleaseSource'; CandidateCommit = ('c' * 40) }) `
         -Configuration ([pscustomobject]@{ Sha256 = ('b' * 64) }) `
@@ -437,11 +543,12 @@ if ($InvocationPreflightOnly) {
         [StringComparison]::OrdinalIgnoreCase
     )
     [pscustomobject][ordered]@{
-        Success = $installInvocation.ContainsKey('DeferPoolRebuildForGuestBaselineUpdate') -and $installInvocation.ContainsKey('SkipLocalRecoveryBundle') -and $guestInvocation.Count -gt 0 -and $roundTripVerified
+        Success = $installInvocation.ContainsKey('DeferPoolRebuildForGuestBaselineUpdate') -and $installInvocation.ContainsKey('SkipLocalRecoveryBundle') -and $guestInvocation.Count -gt 0 -and [string]$recoveryInvocation.BaselineExportMode -eq 'ReuseCurrent' -and $roundTripVerified
         NoMutationPerformed = $true
         PlanRoundTripVerified = $roundTripVerified
         InstallInvocation = $installInvocation
         GuestBaselineInvocation = $guestInvocation
+        RecoveryRefreshInvocation = $recoveryInvocation
     }
     return
 }
@@ -710,7 +817,8 @@ try {
     } | Out-Null
 
     Invoke-DeploymentPhase -Name 'RecoveryRefresh' -Body {
-        $recoveryOutput = @(& (Join-Path $InstallRoot 'Software\Setup\Refresh-LocalRecovery.ps1') -InstallRoot $InstallRoot -TargetUserProfile $TargetUserProfile -NoElevation)
+        $recoveryParameters = New-RecoveryRefreshInvocationParameters -Plan $plan
+        $recoveryOutput = @(& (Join-Path $InstallRoot 'Software\Setup\Refresh-LocalRecovery.ps1') @recoveryParameters)
         $manifestPath = Join-Path $InstallRoot 'Recovery\Current\manifest.json'
         if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw 'The final recovery refresh did not publish Recovery\Current\manifest.json.' }
         $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json

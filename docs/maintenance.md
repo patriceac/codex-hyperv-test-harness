@@ -2,7 +2,7 @@
 
 ## Publish an ordinary harness software release
 
-Use `setup\Deploy-HarnessRelease.ps1`, documented in [deployment.md](deployment.md), for committed source, broker, runtime-skill, canary, or guest-agent releases to an existing installation. It is the single owner for source qualification, component preflight, promotion, isolated acceptance, and the one final recovery refresh. Do not manually repeat those steps around it. The controller deliberately excludes Windows/.NET image servicing and request-network infrastructure changes.
+Use `setup\Deploy-HarnessRelease.ps1`, documented in [deployment.md](deployment.md), for committed source, broker, runtime-skill, canary, or guest-agent releases to an existing installation. It is the single owner for source qualification, component preflight, promotion, isolated acceptance, and the one final recovery refresh. When the canonical checkpoint is unchanged, its immutable plan selects `RecoveryBaselineExportMode = ReuseCurrent`: the verified baseline export is reused through NTFS hard links and only the small software delta is written and hashed. Do not manually repeat those steps around it. The controller deliberately excludes Windows/.NET image servicing and request-network infrastructure changes.
 
 ## Update Windows and .NET images
 
@@ -41,9 +41,11 @@ For GitHub disaster recovery, the same guest-servicing component runs only when 
 
 ## Refresh the fast local recovery image
 
-Run `REFRESH-LOCAL-RECOVERY.cmd` after an intentional baseline, sizing, guest-agent, broker, or runtime-skill change. The command drains the queue, enters maintenance, stops workers, exports the baseline, snapshots current software and the sanitized Codex policy, computes checksums, verifies staging, rotates `Current` to `Previous`, and resumes the broker.
+Run `REFRESH-LOCAL-RECOVERY.cmd` after an intentional baseline, sizing, guest-agent, broker, or runtime-skill change. The direct command defaults to `FullExport`: it drains the queue, enters maintenance, stops workers, exports and hashes the baseline, snapshots current software and the sanitized Codex policy, verifies staging, rotates `Current` to `Previous`, and resumes the broker. Intentional baseline or checkpoint changes must retain that default.
 
-The recovery directory keeps two generations by default. Stale staging directories are garbage-collected. Payload cache garbage collection remains broker-managed and independent of recovery generation rotation.
+The ordinary release controller may instead pass its reviewed `ReuseCurrent` mode when `GuestBaselineUpdateRequired = false`. That path requires matching VM/checkpoint identity and a matching successful recovery receipt, hard-links every baseline-export file from Current into staging, hashes the non-baseline delta, verifies the shared NTFS file identities, and stops rather than silently falling back to a full export. Unchanged small files are also hard-linked only after their prior content is rehashed. A later standalone deep verification still hashes every logical file.
+
+The recovery directory keeps two generations by default. Software-only generations can share unchanged physical NTFS files, although each directory remains a complete bundle view and copying either generation to another volume materializes a standalone full copy. Shared clusters protect release rollback, not independent bit-rot redundancy; retain periodic deep verification or a separate external copy when that distinction matters. Stale staging directories are garbage-collected. Payload cache garbage collection remains broker-managed and independent of recovery generation rotation.
 
 ## Verify
 

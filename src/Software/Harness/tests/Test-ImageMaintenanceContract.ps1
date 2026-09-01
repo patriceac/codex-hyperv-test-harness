@@ -427,6 +427,10 @@ if ($auditPosition -lt 0 -or $smokePosition -le $auditPosition -or $recoveryPosi
 if ($recovery -notmatch 'ImageServicing' -or $recovery -notmatch 'WindowsUpdatePassCount' -or $recovery -notmatch 'DotNetSdks') {
     throw 'The recovery manifest does not record sanitized image-servicing provenance.'
 }
+if ($recovery -notmatch "BaselineExportMode\s*=\s*'FullExport'" -or
+    $imageUpdate -match "New-CodexHyperVRecovery\.ps1'[^\r\n]*ReuseCurrent") {
+    throw 'Image maintenance can bypass the mandatory full baseline recovery export.'
+}
 $scenarios.Add('recovery-follows-live-verification-and-records-provenance')
 
 if ($maintenanceDoc -notmatch 'Update-Images.ps1 @parameters -PlanOnly' -or $maintenanceDoc -notmatch 'deep-hash' -or $setupSkill -notmatch 'intentional Windows/.NET baseline refresh') {

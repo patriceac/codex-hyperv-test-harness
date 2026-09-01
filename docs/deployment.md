@@ -21,7 +21,7 @@ $release = @{
 & .\setup\Deploy-HarnessRelease.ps1 @release -PlanOnly
 ```
 
-PlanOnly performs no mutation. It binds the candidate to a clean exact Git commit, the installed configuration hash, the target account, the selected SDK metadata, and hashes of the three guest-resident harness files. It also runs the existing component PlanOnly paths and reports queue readiness. Review `DeploymentId`, `PlanSha256`, `Operations`, whether the guest baseline must change, and the approval boundary.
+PlanOnly performs no mutation. It binds the candidate to a clean exact Git commit, the installed configuration hash, the target account, the selected SDK metadata, and hashes of the three guest-resident harness files. It also runs the existing component PlanOnly paths and reports queue readiness. Review `DeploymentId`, `PlanSha256`, `Operations`, `GuestBaselineUpdateRequired`, `RecoveryBaselineExportMode`, `RecoveryReuseReadiness`, and the approval boundary.
 
 After the first successful guest-baseline promotion, a small local provenance receipt under `Live\Setup` records the hashes actually promoted into the baseline. Future plans compare against that receipt, so copying newer source into `Software` cannot incorrectly make an unfinished guest update appear complete.
 
@@ -44,12 +44,16 @@ Ordinary language such as “do it,” “proceed,” or “apply that plan” i
 3. `SourcePromotion` — sanitized source publication with duplicate smoke and recovery work deferred.
 4. `GuestBaselinePromotion` — when required, one baseline update and one disposable-pool rebuild. Otherwise source promotion refreshes the pool once.
 5. `IsolatedAcceptance` — legacy launch, an accented UI Automation Name click with no AutomationId, exact `WIN+LEFT` keyboard evidence with before/after screenshots, and an expected-guest-power-off/no-replay probe.
-6. `RecoveryRefresh` — one final local recovery creation and deep verification, only after acceptance.
+6. `RecoveryRefresh` — one final local recovery creation and integrity verification, only after acceptance. `FullExport` exports and hashes the complete baseline. `ReuseCurrent` keeps the receipt-backed unchanged baseline as NTFS hard links and hashes only the new recovery delta.
 7. `Finalization` — exact-commit and public-payload revalidation plus the terminal receipt.
 
 The strict pre- and post-acceptance pool audits each run inside a short, owned broker-maintenance drain. That boundary stops warm workers, completes payload garbage collection, restores the exact broker ACL after Hyper-V's transient disk grants, captures the audit, and then releases maintenance. The four application tests themselves run with normal pool scheduling between those two drains.
 
 State, logs, and receipts live below `Live\Setup\Deployments\<DeploymentId>`. They are private local deployment evidence and must never be committed.
+
+`ReuseCurrent` is selected only when the plan detects no guest-baseline change and `Recovery\Current\manifest.json` exists. Apply then requires the same baseline VM and canonical checkpoint IDs, a structurally valid Current bundle, and a matching successful refresh or deep-verification receipt. It never falls back silently to a full 50+ GB export; drift stops the immutable plan for review. Unchanged software files are rehashed and hard-linked when possible, while changed files are copied and hashed. A full export remains mandatory for first recovery creation, a missing Current generation, and every intentional Windows/.NET or canonical-checkpoint update.
+
+Hard-linked `Current` and `Previous` directories remain complete namespace views and either one materializes as a standalone full bundle when copied to another volume. On the local NTFS volume they share unchanged physical clusters, so this preserves release rollback but is not a second physical copy against media corruption. Use periodic independent deep verification and an external copy when that additional failure boundary is required.
 
 ## Resume and fix forward
 

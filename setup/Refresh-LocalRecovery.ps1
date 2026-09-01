@@ -2,6 +2,7 @@
 param(
     [string] $InstallRoot = 'D:\Disk\VMs\Codex-Harness',
     [string] $TargetUserProfile,
+    [ValidateSet('FullExport','ReuseCurrent')] [string] $BaselineExportMode = 'FullExport',
     [switch] $NoElevation
 )
 
@@ -13,4 +14,4 @@ $configPath = Join-Path $InstallRoot 'Software\harness-config.json'
 if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { throw "Harness configuration is missing: $configPath" }
 . (Join-Path $InstallRoot 'Software\Harness\HarnessPaths.ps1')
 $layout = Get-CodexHarnessConfig -ConfigPath $configPath
-& (Join-Path ([string]$layout.SoftwareRoot) 'Recovery\New-CodexHyperVRecovery.ps1') -ConfigPath $configPath -ActiveBrokerRoot ([string]$layout.BrokerRoot) -TargetUserProfile $TargetUserProfile -NoElevation:$NoElevation
+& (Join-Path ([string]$layout.SoftwareRoot) 'Recovery\New-CodexHyperVRecovery.ps1') -ConfigPath $configPath -ActiveBrokerRoot ([string]$layout.BrokerRoot) -TargetUserProfile $TargetUserProfile -BaselineExportMode $BaselineExportMode -NoElevation:$NoElevation
