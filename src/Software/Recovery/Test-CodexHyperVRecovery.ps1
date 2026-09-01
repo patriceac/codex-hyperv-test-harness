@@ -49,6 +49,7 @@ try {
         'Codex\AGENTS.md',
         'Software\harness-config.json',
         'Software\Common\CodexManagedPolicy.ps1',
+        'Software\Setup\AGENTS.block.md',
         'Software\Setup\Update-RequestNetworking.ps1',
         'Software\Setup\Prepare-RequestNetworkInfrastructure.ps1',
         'Software\Harness\HostBroker.ps1',
@@ -95,6 +96,11 @@ try {
     )
     $missing = @($required | Where-Object { -not (Test-Path -LiteralPath (Join-Path $BundleRoot $_) -PathType Leaf) })
     if ($missing.Count -gt 0) { throw ('Required recovery files are missing: ' + ($missing -join ', ')) }
+    $recoveryPolicy = [IO.File]::ReadAllBytes((Join-Path $BundleRoot 'Codex\AGENTS.md'))
+    $canonicalPolicy = [IO.File]::ReadAllBytes((Join-Path $BundleRoot 'Software\Setup\AGENTS.block.md'))
+    if ([Convert]::ToBase64String($recoveryPolicy) -cne [Convert]::ToBase64String($canonicalPolicy)) {
+        throw 'The recovery Codex policy is not an exact copy of the canonical managed policy block.'
+    }
     $exportedConfig = Join-Path $BundleRoot ([string]$manifest.ExportedVmConfiguration).Replace('/', '\')
     if (-not (Test-Path -LiteralPath $exportedConfig -PathType Leaf)) { throw 'The exported baseline VM configuration is missing.' }
 

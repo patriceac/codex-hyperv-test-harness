@@ -6,15 +6,18 @@ $harnessRoot = Split-Path -Parent $PSScriptRoot
 $softwareRoot = Split-Path -Parent $harnessRoot
 $repositoryRoot = Split-Path -Parent (Split-Path -Parent $softwareRoot)
 $helperPath = Join-Path $softwareRoot 'Common\CodexManagedPolicy.ps1'
-$normalPolicyPath = Join-Path $repositoryRoot 'setup\AGENTS.block.md'
-$recoveryPolicyPath = Join-Path $softwareRoot 'Recovery\CodexPolicy.md'
+$canonicalPolicyPath = Join-Path $repositoryRoot 'setup\AGENTS.block.md'
+$obsoleteRecoveryPolicyPath = Join-Path $softwareRoot 'Recovery\CodexPolicy.md'
 $installPath = Join-Path $repositoryRoot 'setup\Install.ps1'
+$publicAuditPath = Join-Path $repositoryRoot 'setup\Test-PublicRepository.ps1'
+$recoveryBuilderPath = Join-Path $softwareRoot 'Recovery\New-CodexHyperVRecovery.ps1'
 $recoveryInstallPath = Join-Path $softwareRoot 'Recovery\Install-CodexHyperVHarness.ps1'
 $recoveryVerifierPath = Join-Path $softwareRoot 'Recovery\Test-CodexHyperVRecovery.ps1'
 
-foreach ($requiredPath in @($helperPath, $normalPolicyPath, $recoveryPolicyPath, $installPath, $recoveryInstallPath, $recoveryVerifierPath)) {
+foreach ($requiredPath in @($helperPath, $canonicalPolicyPath, $installPath, $publicAuditPath, $recoveryBuilderPath, $recoveryInstallPath, $recoveryVerifierPath)) {
     if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) { throw "Managed policy test input is missing: $requiredPath" }
 }
+if (Test-Path -LiteralPath $obsoleteRecoveryPolicyPath) { throw "The obsolete duplicate recovery policy still exists: $obsoleteRecoveryPolicyPath" }
 . $helperPath
 
 function Assert-True {
@@ -108,6 +111,17 @@ $startMarker = '<!-- BEGIN CODEX HYPERV TEST HARNESS -->'
 $endMarker = '<!-- END CODEX HYPERV TEST HARNESS -->'
 $iterations = 20
 $scenarios = New-Object Collections.Generic.List[string]
+$canonicalPolicy = Read-CodexStrictUtf8File -Path $canonicalPolicyPath
+$canonicalBlock = $canonicalPolicy.Text.Trim()
+Assert-True ($canonicalBlock.StartsWith($startMarker, [StringComparison]::Ordinal) -and
+    $canonicalBlock.EndsWith($endMarker, [StringComparison]::Ordinal) -and
+    (Get-TestLiteralCount -Text $canonicalBlock -Literal $startMarker) -eq 1 -and
+    (Get-TestLiteralCount -Text $canonicalBlock -Literal $endMarker) -eq 1) 'The canonical public policy is not exactly one complete managed marker block.'
+Assert-True ($canonicalBlock.IndexOf('prefer the guarded host controller provided by `hyperv-test-executables` over general computer-use tools', [StringComparison]::Ordinal) -ge 0) 'The canonical public policy does not resolve host-control routing before general computer use.'
+foreach ($forbiddenPersonalText in @('## Working agreements', 'Always publish sites', 'Release computer use', 'C:\Users\')) {
+    Assert-True ($canonicalBlock.IndexOf($forbiddenPersonalText, [StringComparison]::OrdinalIgnoreCase) -lt 0) "The canonical public policy contains personal/global content: $forbiddenPersonalText"
+}
+$scenarios.Add('one-public-harness-only-policy-fragment')
 $tempParent = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')
 $testRoot = Join-Path $tempParent ('CodexManagedPolicy-' + [Guid]::NewGuid().ToString('N'))
 $resolvedTestRoot = [IO.Path]::GetFullPath($testRoot).TrimEnd('\')
@@ -127,11 +141,11 @@ try {
         'No' + $eGrave + 'l, fa' + $cCedilla + 'ade, ' + $eGrave + 'l' + $eGrave + 've.'
     Write-TestUtf8File -Path $normalAgentsPath -Text $normalPrefix
     [byte[]]$normalPrefixBytes = ConvertTo-TestUtf8Bytes -Text $normalPrefix
-    $expectedNormalBlock = [regex]::Replace((Read-CodexStrictUtf8File -Path $normalPolicyPath).Text.Trim(), "\r\n|\n|\r", "`r`n")
+    $expectedNormalBlock = [regex]::Replace((Read-CodexStrictUtf8File -Path $canonicalPolicyPath).Text.Trim(), "\r\n|\n|\r", "`r`n")
     $expectedNormalText = $normalPrefix + "`r`n`r`n" + $expectedNormalBlock + "`r`n"
     [byte[]]$stableNormalBytes = $null
     for ($iteration = 1; $iteration -le $iterations; $iteration++) {
-        $result = Set-CodexManagedPolicyBlock -PolicyPath $normalPolicyPath -AgentsPath $normalAgentsPath
+        $result = Set-CodexManagedPolicyBlock -PolicyPath $canonicalPolicyPath -AgentsPath $normalAgentsPath
         if ($iteration -eq 1) {
             Assert-True ([bool]$result.Changed -and -not [bool]$result.ReplacedExistingBlock) 'Normal installation did not append its first managed policy block.'
         }
@@ -154,13 +168,13 @@ try {
 
     $newProfile = Join-Path $testRoot 'new-profile'
     $newAgentsPath = Join-Path $newProfile '.codex\AGENTS.md'
-    $newResult = Set-CodexManagedPolicyBlock -PolicyPath $normalPolicyPath -AgentsPath $newAgentsPath
+    $newResult = Set-CodexManagedPolicyBlock -PolicyPath $canonicalPolicyPath -AgentsPath $newAgentsPath
     $newFile = Read-CodexStrictUtf8File -Path $newAgentsPath
     Assert-True ([bool]$newResult.Changed -and -not [bool]$newFile.HasUtf8Bom -and
         (Get-TestLiteralCount -Text $newFile.Text -Literal $startMarker) -eq 1 -and
         (Get-TestLiteralCount -Text $newFile.Text -Literal $endMarker) -eq 1) 'New installation did not atomically create one BOM-less managed policy block.'
     [byte[]]$newStableBytes = $newFile.Bytes
-    $newRepeat = Set-CodexManagedPolicyBlock -PolicyPath $normalPolicyPath -AgentsPath $newAgentsPath
+    $newRepeat = Set-CodexManagedPolicyBlock -PolicyPath $canonicalPolicyPath -AgentsPath $newAgentsPath
     Assert-True (-not [bool]$newRepeat.Changed) 'New installation rewrote its stable managed-only file.'
     Assert-TestBytesEqual -Actual ([IO.File]::ReadAllBytes($newAgentsPath)) -Expected $newStableBytes -Message 'New installation bytes changed on its first repeat.'
     $scenarios.Add('missing-target-is-created-atomically-and-stays-stable')
@@ -174,11 +188,11 @@ try {
     Write-TestUtf8File -Path $recoveryAgentsPath -Text $recoverySeed -IncludeBom
     [byte[]]$recoveryPrefixBytes = ConvertTo-TestUtf8Bytes -Text $recoveryPrefix -IncludeBom
     [byte[]]$recoverySuffixBytes = ConvertTo-TestUtf8Bytes -Text $recoverySuffix
-    $expectedRecoveryBlock = [regex]::Replace((Read-CodexStrictUtf8File -Path $recoveryPolicyPath).Text.Trim(), "\r\n|\n|\r", "`n")
+    $expectedRecoveryBlock = [regex]::Replace((Read-CodexStrictUtf8File -Path $canonicalPolicyPath).Text.Trim(), "\r\n|\n|\r", "`n")
     $expectedRecoveryText = $recoveryPrefix + $expectedRecoveryBlock + $recoverySuffix
     [byte[]]$stableRecoveryBytes = $null
     for ($iteration = 1; $iteration -le $iterations; $iteration++) {
-        $result = Set-CodexManagedPolicyBlock -PolicyPath $recoveryPolicyPath -AgentsPath $recoveryAgentsPath
+        $result = Set-CodexManagedPolicyBlock -PolicyPath $canonicalPolicyPath -AgentsPath $recoveryAgentsPath
         if ($iteration -eq 1) {
             Assert-True ([bool]$result.Changed -and [bool]$result.ReplacedExistingBlock -and [bool]$result.PreservedUtf8Bom) 'Recovery installation did not replace the stale block while preserving its UTF-8 BOM.'
         }
@@ -210,14 +224,14 @@ try {
     [Array]::Copy($invalidSuffix, 0, $invalidUtf8Bytes, $invalidPrefix.Length + 1, $invalidSuffix.Length)
     [IO.File]::WriteAllBytes($invalidUtf8Path, $invalidUtf8Bytes)
     Assert-RejectedWithoutChange -Scenario 'invalid UTF-8 target' -Path $invalidUtf8Path -ExpectedMessage 'not valid UTF-8' -Operation {
-        Set-CodexManagedPolicyBlock -PolicyPath $normalPolicyPath -AgentsPath $invalidUtf8Path
+        Set-CodexManagedPolicyBlock -PolicyPath $canonicalPolicyPath -AgentsPath $invalidUtf8Path
     }
     $scenarios.Add('invalid-legacy-encoding-fails-without-rewrite')
 
     $orphanMarkerPath = Join-Path $testRoot 'orphan-marker-profile\.codex\AGENTS.md'
     Write-TestUtf8File -Path $orphanMarkerPath -Text ('before' + "`r`n" + $startMarker + "`r`nmissing end")
     Assert-RejectedWithoutChange -Scenario 'orphan marker target' -Path $orphanMarkerPath -ExpectedMessage 'invalid or ambiguous' -Operation {
-        Set-CodexManagedPolicyBlock -PolicyPath $normalPolicyPath -AgentsPath $orphanMarkerPath
+        Set-CodexManagedPolicyBlock -PolicyPath $canonicalPolicyPath -AgentsPath $orphanMarkerPath
     }
     $scenarios.Add('orphan-marker-layout-fails-without-rewrite')
 
@@ -225,7 +239,7 @@ try {
     $duplicateText = $startMarker + "`nfirst`n" + $endMarker + "`n" + $startMarker + "`nsecond`n" + $endMarker
     Write-TestUtf8File -Path $duplicateMarkerPath -Text $duplicateText
     Assert-RejectedWithoutChange -Scenario 'duplicate marker target' -Path $duplicateMarkerPath -ExpectedMessage 'invalid or ambiguous' -Operation {
-        Set-CodexManagedPolicyBlock -PolicyPath $normalPolicyPath -AgentsPath $duplicateMarkerPath
+        Set-CodexManagedPolicyBlock -PolicyPath $canonicalPolicyPath -AgentsPath $duplicateMarkerPath
     }
     $scenarios.Add('duplicate-marker-layout-fails-without-rewrite')
 
@@ -234,17 +248,46 @@ try {
     [byte[]]$ambiguousBytes = (New-Object Text.UnicodeEncoding($false, $false, $true)).GetBytes('ambiguous UTF-16 without BOM')
     [IO.File]::WriteAllBytes($ambiguousUtf16Path, $ambiguousBytes)
     Assert-RejectedWithoutChange -Scenario 'ambiguous UTF-16 target' -Path $ambiguousUtf16Path -ExpectedMessage 'NUL characters' -Operation {
-        Set-CodexManagedPolicyBlock -PolicyPath $normalPolicyPath -AgentsPath $ambiguousUtf16Path
+        Set-CodexManagedPolicyBlock -PolicyPath $canonicalPolicyPath -AgentsPath $ambiguousUtf16Path
     }
     $scenarios.Add('ambiguous-null-bearing-encoding-fails-without-rewrite')
 
+    $auditFixtureRoot = Join-Path $testRoot 'public-audit-fixture'
+    $auditFixturePolicyPath = Join-Path $auditFixtureRoot 'setup\AGENTS.block.md'
+    Write-TestUtf8File -Path (Join-Path $auditFixtureRoot 'README.md') -Text '# Public audit fixture'
+    Write-TestUtf8File -Path $auditFixturePolicyPath -Text $canonicalBlock
+    $auditHost = if ($PSVersionTable.PSEdition -eq 'Core') { Join-Path $PSHOME 'pwsh.exe' } else { Join-Path $PSHOME 'powershell.exe' }
+    $cleanAuditOutput = @(& $auditHost -NoLogo -NoProfile -ExecutionPolicy Bypass -File $publicAuditPath -RepositoryRoot $auditFixtureRoot -AsJson 2>&1)
+    $cleanAuditExitCode = $LASTEXITCODE
+    Assert-True ($cleanAuditExitCode -eq 0 -and (($cleanAuditOutput -join "`n") | ConvertFrom-Json).Success) 'The public audit rejected a bounded canonical-only policy fixture.'
+
+    Write-TestUtf8File -Path $auditFixturePolicyPath -Text ("## Working agreements`n`nprivate preference`n`n" + $canonicalBlock)
+    $personalAuditOutput = @(& $auditHost -NoLogo -NoProfile -ExecutionPolicy Bypass -File $publicAuditPath -RepositoryRoot $auditFixtureRoot -AsJson 2>&1)
+    $personalAuditExitCode = $LASTEXITCODE
+    $personalAudit = ($personalAuditOutput -join "`n") | ConvertFrom-Json
+    Assert-True ($personalAuditExitCode -eq 1 -and -not [bool]$personalAudit.Success -and
+        @($personalAudit.Violations | Where-Object Rule -in @('UnboundedManagedPolicy', 'PersonalGlobalPolicyContent')).Count -eq 2) 'The public audit did not reject unbounded personal/global policy content.'
+
+    Write-TestUtf8File -Path $auditFixturePolicyPath -Text $canonicalBlock
+    Write-TestUtf8File -Path (Join-Path $auditFixtureRoot 'src\Software\Recovery\CodexPolicy.md') -Text $canonicalBlock
+    $duplicateAuditOutput = @(& $auditHost -NoLogo -NoProfile -ExecutionPolicy Bypass -File $publicAuditPath -RepositoryRoot $auditFixtureRoot -AsJson 2>&1)
+    $duplicateAuditExitCode = $LASTEXITCODE
+    $duplicateAudit = ($duplicateAuditOutput -join "`n") | ConvertFrom-Json
+    Assert-True ($duplicateAuditExitCode -eq 1 -and -not [bool]$duplicateAudit.Success -and
+        @($duplicateAudit.Violations | Where-Object Rule -eq 'DuplicateManagedPolicySource').Count -eq 1) 'The public audit did not reject a second managed policy source.'
+    $scenarios.Add('public-audit-rejects-personal-content-and-duplicate-policy-source')
+
     $installSource = (Read-CodexStrictUtf8File -Path $installPath).Text
+    $recoveryBuilderSource = (Read-CodexStrictUtf8File -Path $recoveryBuilderPath).Text
     $recoveryInstallSource = (Read-CodexStrictUtf8File -Path $recoveryInstallPath).Text
     $recoveryVerifierSource = (Read-CodexStrictUtf8File -Path $recoveryVerifierPath).Text
     $helperSource = (Read-CodexStrictUtf8File -Path $helperPath).Text
     Assert-True ($installSource.IndexOf("Common\CodexManagedPolicy.ps1", [StringComparison]::Ordinal) -ge 0 -and
         $installSource.IndexOf('Set-CodexManagedPolicyBlock', [StringComparison]::Ordinal) -ge 0 -and
         $installSource.IndexOf('[IO.File]::WriteAllText($agentsPath', [StringComparison]::Ordinal) -lt 0) 'Normal installer is not exclusively wired through the shared safe policy helper.'
+    Assert-True ($recoveryBuilderSource.IndexOf("'Setup\AGENTS.block.md'", [StringComparison]::Ordinal) -ge 0 -and
+        $recoveryBuilderSource.IndexOf('CodexPolicy.md', [StringComparison]::Ordinal) -lt 0 -and
+        $recoveryBuilderSource.IndexOf("Join-Path `$codexRoot 'AGENTS.md'", [StringComparison]::Ordinal) -ge 0) 'Recovery generation does not snapshot the one canonical managed policy block.'
     Assert-True ($recoveryInstallSource.IndexOf("Common\CodexManagedPolicy.ps1", [StringComparison]::Ordinal) -ge 0 -and
         $recoveryInstallSource.IndexOf('Set-CodexManagedPolicyBlock', [StringComparison]::Ordinal) -ge 0 -and
         $recoveryInstallSource.IndexOf('[IO.File]::WriteAllText($agentsDestination', [StringComparison]::Ordinal) -lt 0) 'Recovery installer is not exclusively wired through the shared safe policy helper.'
@@ -256,7 +299,7 @@ try {
         $helperSource.IndexOf('[IO.File]::Move(', [StringComparison]::Ordinal) -gt $flushIndex) 'Shared policy helper does not enforce strict UTF-8 and durable atomic publication.'
     $leftovers = @(Get-ChildItem -LiteralPath $testRoot -Recurse -File -Force | Where-Object { $_.Name -like '*.tmp' -or $_.Name -like '*.bak' })
     Assert-True ($leftovers.Count -eq 0) 'Managed policy tests left atomic staging or backup files behind.'
-    $scenarios.Add('both-production-paths-use-one-self-contained-atomic-helper')
+    $scenarios.Add('both-production-paths-use-one-canonical-policy-and-atomic-helper')
 
     [pscustomobject][ordered]@{
         Success = $true

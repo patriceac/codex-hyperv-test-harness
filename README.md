@@ -148,6 +148,8 @@ Inspect the exact plan without elevation or mutation:
 1. **Cold rebuild from GitHub:** this repository plus Microsoft's current Windows 11 media and update services reconstructs the entire backend, including the reviewed stable .NET SDK policy. It is slower and may not be byte-identical because Microsoft media and updates advance, but it survives loss of every local backup.
 2. **Fast local recovery:** `REFRESH-LOCAL-RECOVERY.cmd` exports the prepared baseline and current software into `Recovery\Current`, retains one previous generation, and verifies checksums. That bundle is intentionally too large and too sensitive for GitHub.
 
+Both paths install the same marker-delimited harness policy fragment from `setup\AGENTS.block.md`. The repository and recovery bundle never capture the user's complete global `AGENTS.md`; installation merges only the harness-owned block and preserves unrelated personal instructions.
+
 Successful installation already includes the privileged audit and isolated canary. `VERIFY.cmd` is an optional independent recheck after meaningful host changes; it pauses before closing and requests its own elevation.
 
 ## Repository map

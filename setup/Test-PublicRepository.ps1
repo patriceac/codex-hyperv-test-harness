@@ -40,6 +40,33 @@ $secretPatterns = [ordered]@{
     'AwsAccessKey' = '\bAKIA[0-9A-Z]{16}\b'
 }
 
+$managedPolicyRelativePath = 'setup/AGENTS.block.md'
+$managedPolicyPath = Join-Path $RepositoryRoot $managedPolicyRelativePath.Replace('/', '\')
+$managedPolicyStart = '<!-- BEGIN CODEX HYPERV TEST HARNESS -->'
+$managedPolicyEnd = '<!-- END CODEX HYPERV TEST HARNESS -->'
+if (-not (Test-Path -LiteralPath $managedPolicyPath -PathType Leaf)) {
+    Add-Violation $managedPolicyRelativePath 'MissingCanonicalManagedPolicy' 'The public harness-owned policy fragment is missing.'
+}
+else {
+    $managedPolicy = (Get-Content -LiteralPath $managedPolicyPath -Raw -ErrorAction Stop).Trim()
+    $startCount = [regex]::Matches($managedPolicy, [regex]::Escape($managedPolicyStart)).Count
+    $endCount = [regex]::Matches($managedPolicy, [regex]::Escape($managedPolicyEnd)).Count
+    if ($startCount -ne 1 -or $endCount -ne 1 -or
+        -not $managedPolicy.StartsWith($managedPolicyStart, [StringComparison]::Ordinal) -or
+        -not $managedPolicy.EndsWith($managedPolicyEnd, [StringComparison]::Ordinal)) {
+        Add-Violation $managedPolicyRelativePath 'UnboundedManagedPolicy' 'The public policy source must contain exactly one complete harness marker block and no other content.'
+    }
+    foreach ($personalText in @('## Working agreements', 'Always publish sites', 'Release computer use', 'C:\Users\')) {
+        if ($managedPolicy.IndexOf($personalText, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            Add-Violation $managedPolicyRelativePath 'PersonalGlobalPolicyContent' "The public managed fragment contains disallowed personal/global content: $personalText"
+        }
+    }
+}
+$obsoletePolicyRelativePath = 'src/Software/Recovery/CodexPolicy.md'
+if (Test-Path -LiteralPath (Join-Path $RepositoryRoot $obsoletePolicyRelativePath.Replace('/', '\')) -PathType Leaf) {
+    Add-Violation $obsoletePolicyRelativePath 'DuplicateManagedPolicySource' 'Local recovery must reuse the one canonical public policy fragment.'
+}
+
 foreach ($file in $files) {
     $relative = $file.FullName.Substring($RepositoryRoot.Length).TrimStart('\').Replace('\','/')
     if ($forbiddenExtensions -contains $file.Extension.ToLowerInvariant()) { Add-Violation $relative 'ForbiddenBinaryOrImage' "Public source must not contain $($file.Extension) files." }

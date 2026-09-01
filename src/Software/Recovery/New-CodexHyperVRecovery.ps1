@@ -126,9 +126,9 @@ try {
 
     $codexRoot = Join-Path $stagingRoot 'Codex'
     New-Item -ItemType Directory -Force -Path $codexRoot | Out-Null
-    $agentsSource = Join-Path $PSScriptRoot 'CodexPolicy.md'
+    $agentsSource = Join-Path $bundleSoftware 'Setup\AGENTS.block.md'
     if (-not (Test-Path -LiteralPath $agentsSource -PathType Leaf)) {
-        throw "The sanitized Codex policy template is missing: $agentsSource"
+        throw "The canonical managed Codex policy block is missing from the software snapshot: $agentsSource"
     }
     Copy-Item -LiteralPath $agentsSource -Destination (Join-Path $codexRoot 'AGENTS.md') -Force
 
