@@ -68,7 +68,7 @@ function Read-PoolWorkerState {
         return $null
     }
     try {
-        Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
+        Get-Content -Raw -LiteralPath $path -Encoding UTF8 | ConvertFrom-Json
     }
     catch {
         $null
@@ -103,7 +103,7 @@ function Update-PoolWorkerState {
         $path = Get-PoolWorkerStatePath -BrokerRoot $BrokerRoot -WorkerId $WorkerId
         $current = $null
         if (Test-Path -LiteralPath $path -PathType Leaf) {
-            try { $current = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json } catch { $current = $null }
+            try { $current = Get-Content -Raw -LiteralPath $path -Encoding UTF8 | ConvertFrom-Json } catch { $current = $null }
         }
         if ($RequireExpectation) {
             if (-not [string]::IsNullOrWhiteSpace($ExpectedOperationId) -and

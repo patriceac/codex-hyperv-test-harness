@@ -74,6 +74,21 @@ function New-HarnessReleaseAcceptanceInvocations {
             }
         },
         [pscustomobject][ordered]@{
+            Name = 'Utf8ActionName'
+            Parameters = @{
+                ArtifactPath = Join-Path $canaryRoot 'HarnessContractCanary.exe'
+                Arguments = '--result "{OUTDIR}\utf8-action-result.json" --require-click true --stay-ms 15000'
+                ActionsPath = Join-Path $canaryRoot 'release-utf8-actions.json'
+                AssertResultFile = '{OUTDIR}\utf8-action-result.json'
+                AssertResultJsonPointer = '/passed'
+                AssertResultEqualsJson = 'true'
+                BrokerRoot = $BrokerRoot
+                QueueTimeoutSeconds = 900
+                ExecutionTimeoutSeconds = 300
+                ThrowOnFailure = $true
+            }
+        },
+        [pscustomobject][ordered]@{
             Name = 'KeyboardInput'
             Parameters = @{
                 ArtifactPath = Join-Path $canaryRoot 'HarnessContractCanary.exe'
@@ -118,7 +133,7 @@ if ($InvocationPreflightOnly) {
         $null -eq (Get-ReleaseOptionalPropertyValue -InputObject $shapeProbe -Name 'Missing') -and
         (Get-ReleaseOptionalPropertyValue -InputObject $shapeProbe -Name 'Present') -is [bool]
     [pscustomobject][ordered]@{
-        Success = $preview.Count -eq 3 -and $maintenanceSnapshotShapeSafe
+        Success = $preview.Count -eq 4 -and $maintenanceSnapshotShapeSafe
         NoMutationPerformed = $true
         MaintenanceSnapshotShapeSafe = [bool]$maintenanceSnapshotShapeSafe
         TestNames = @($preview.Name)
@@ -155,7 +170,7 @@ if (-not ($EvidenceRoot + '\').StartsWith($InstallRoot + '\', [StringComparison]
 }
 New-Item -ItemType Directory -Force -Path $EvidenceRoot | Out-Null
 Import-Module Hyper-V
-$poolDefinition = Get-Content -LiteralPath $definitionPath -Raw | ConvertFrom-Json
+$poolDefinition = Get-Content -LiteralPath $definitionPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $workerVmNames = @($poolDefinition.Workers | ForEach-Object { [string]$_.VmName })
 
 function Invoke-PoolAudit {
@@ -169,7 +184,7 @@ function Invoke-PoolAudit {
         -ExpectedIdleTimeoutSeconds ([int]$layout.PoolIdleTimeoutSeconds) `
         -ConfigPath $configPath `
         -ClientSid $ClientSid
-    $audit = Get-Content -LiteralPath $statusPath -Raw | ConvertFrom-Json
+    $audit = Get-Content -LiteralPath $statusPath -Raw -Encoding UTF8 | ConvertFrom-Json
     if (-not [bool]$audit.Success) { throw "The $Name release audit failed." }
     $statusPath
 }
@@ -178,7 +193,7 @@ function Read-JsonIfPresent {
     param([Parameter(Mandatory = $true)] [string] $Path)
 
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
-    try { Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json } catch { $null }
+    try { Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $null }
 }
 
 function Get-ReleaseAuditMaintenanceSnapshot {
@@ -335,13 +350,35 @@ if (-not (Test-Path -LiteralPath (Join-Path ([string]$legacy.ResultPath) 'recove
     throw 'Legacy launch acceptance did not return its screenshot.'
 }
 
+$utf8 = $results.Utf8ActionName
+foreach ($fileName in @('utf8-before.png', 'utf8-after.png')) {
+    if (-not (Test-Path -LiteralPath (Join-Path ([string]$utf8.ResultPath) $fileName) -PathType Leaf)) {
+        throw "UTF-8 action acceptance did not return $fileName."
+    }
+}
+$accentedControlName = 'Approuver le pilote et d' + [char]0x00E9 + 'bloquer la file'
+$utf8Guest = Get-Content -LiteralPath ([string]$utf8.GuestResultPath) -Raw -Encoding UTF8 | ConvertFrom-Json
+$utf8ClickActions = @($utf8Guest.Actions | Where-Object { [string]$_.Type -eq 'click_control' })
+if ($utf8ClickActions.Count -ne 1 -or
+    -not [bool]$utf8ClickActions[0].Success -or
+    -not [string]::IsNullOrWhiteSpace([string]$utf8ClickActions[0].Details.RequestedAutomationId) -or
+    [string]$utf8ClickActions[0].Details.RequestedName -cne $accentedControlName -or
+    [string]$utf8ClickActions[0].Details.MatchedName -cne $accentedControlName) {
+    throw 'UTF-8 action acceptance did not prove an exact accented UI Automation Name match without AutomationId.'
+}
+$utf8ApplicationResultPath = Join-Path ([string]$utf8.ResultPath) 'utf8-action-result.json'
+$utf8ApplicationResult = Get-Content -LiteralPath $utf8ApplicationResultPath -Raw -Encoding UTF8 | ConvertFrom-Json
+if (-not [bool]$utf8ApplicationResult.passed -or [string]$utf8ApplicationResult.clickedControlName -cne $accentedControlName) {
+    throw 'UTF-8 action acceptance did not prove that the accented named control handled the click.'
+}
+
 $keyboard = $results.KeyboardInput
 foreach ($fileName in @('keyboard-before.png', 'keyboard-after.png')) {
     if (-not (Test-Path -LiteralPath (Join-Path ([string]$keyboard.ResultPath) $fileName) -PathType Leaf)) {
         throw "Keyboard acceptance did not return $fileName."
     }
 }
-$keyboardGuest = Get-Content -LiteralPath ([string]$keyboard.GuestResultPath) -Raw | ConvertFrom-Json
+$keyboardGuest = Get-Content -LiteralPath ([string]$keyboard.GuestResultPath) -Raw -Encoding UTF8 | ConvertFrom-Json
 $keyboardActions = @($keyboardGuest.Actions | Where-Object { [string]$_.Type -eq 'send_keys' })
 if ($keyboardActions.Count -ne 1 -or
     -not [bool]$keyboardActions[0].Success -or

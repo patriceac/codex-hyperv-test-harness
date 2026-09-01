@@ -606,7 +606,7 @@ function Recover-OrphanedHostInputResources {
     $recovered = New-Object Collections.Generic.List[object]
     foreach ($stateFile in @(Get-ChildItem -LiteralPath $stateRoot -Filter '*.json' -File -ErrorAction SilentlyContinue)) {
         try {
-            $state = Get-Content -Raw -LiteralPath $stateFile.FullName | ConvertFrom-Json
+            $state = Get-Content -Raw -LiteralPath $stateFile.FullName -Encoding UTF8 | ConvertFrom-Json
             if (-not [string]::IsNullOrWhiteSpace($ExcludeRequestId) -and [string]::Equals([string]$state.RequestId, $ExcludeRequestId, [StringComparison]::Ordinal)) { continue }
             if (Test-HostInputOwnerAlive -State $state) { continue }
             $runtime = ConvertFrom-HostInputLeaseState -State $state -StatePath $stateFile.FullName

@@ -337,7 +337,7 @@ function Read-RequestStateSafe {
 
     try {
         if (-not (Test-Path -LiteralPath $Path -PathType Leaf -ErrorAction Stop)) { return $null }
-        Get-Content -Raw -LiteralPath $Path -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        Get-Content -Raw -LiteralPath $Path -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
     }
     catch { $null }
 }
@@ -834,7 +834,7 @@ function Get-PreviousPayloadIndex {
         return $null
     }
     try {
-        $candidate = Get-Content -Raw -LiteralPath $indexPath | ConvertFrom-Json
+        $candidate = Get-Content -Raw -LiteralPath $indexPath -Encoding UTF8 | ConvertFrom-Json
         if ([int]$candidate.IndexVersion -eq 1 -and
             [string]$candidate.PayloadId -eq $PayloadId -and
             [string]::Equals([string]$candidate.ArtifactPath, $CanonicalPath, [StringComparison]::OrdinalIgnoreCase) -and
@@ -855,7 +855,7 @@ function Test-PayloadCacheWarm {
     $metadataPath = Join-Path (Join-Path $payloadCacheRoot $PayloadId) 'metadata.json'
     if (-not (Test-Path -LiteralPath $metadataPath -PathType Leaf)) { return $false }
     try {
-        $metadata = Get-Content -Raw -LiteralPath $metadataPath | ConvertFrom-Json
+        $metadata = Get-Content -Raw -LiteralPath $metadataPath -Encoding UTF8 | ConvertFrom-Json
         [string]::Equals([string]$metadata.ArtifactPath, $CanonicalPath, [StringComparison]::OrdinalIgnoreCase) -and
             -not [string]::IsNullOrWhiteSpace([string]$metadata.CurrentVhdxPath) -and
             (Test-Path -LiteralPath ([string]$metadata.CurrentVhdxPath) -PathType Leaf)
@@ -970,7 +970,7 @@ if ($networkEnabled -and $hostInputDeclarations.Count -gt 0) {
 $hostInputTokenNames = @($hostInputDeclarations | ForEach-Object { [string]$_.TokenName })
 
 if (-not [string]::IsNullOrWhiteSpace($ActionsPath)) {
-    $parsedActions = Get-Content -Raw -LiteralPath $ActionsPath | ConvertFrom-Json
+    $parsedActions = Get-Content -Raw -LiteralPath $ActionsPath -Encoding UTF8 | ConvertFrom-Json
     $actions = @()
     foreach ($action in $parsedActions) {
         $actions += $action
@@ -1554,10 +1554,10 @@ try {
         $finalExitCode = if ($queueTimedOutBeforeStart) { 124 } else { 130 }
     }
     else {
-        $brokerResult = Get-Content -Raw -LiteralPath $brokerResultPath | ConvertFrom-Json
+        $brokerResult = Get-Content -Raw -LiteralPath $brokerResultPath -Encoding UTF8 | ConvertFrom-Json
         $guestResultPath = Join-Path $resultPath 'result.json'
         $guestResult = if (Test-Path -LiteralPath $guestResultPath -PathType Leaf) {
-            Get-Content -Raw -LiteralPath $guestResultPath | ConvertFrom-Json
+            Get-Content -Raw -LiteralPath $guestResultPath -Encoding UTF8 | ConvertFrom-Json
         }
         else {
             $null

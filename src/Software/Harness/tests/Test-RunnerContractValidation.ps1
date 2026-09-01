@@ -82,7 +82,7 @@ function Get-QueuedRequest {
         if (-not $queuedFile) {
             throw "$Scenario did not reach the broker queue within 30 seconds."
         }
-        Get-Content -Raw -LiteralPath $queuedFile.FullName | ConvertFrom-Json
+        Get-Content -Raw -LiteralPath $queuedFile.FullName -Encoding UTF8 | ConvertFrom-Json
     }
     finally {
         if ($runnerJob.State -notin @('Completed', 'Failed', 'Stopped')) {

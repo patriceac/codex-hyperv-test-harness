@@ -13,7 +13,7 @@ $global:CodexBrokerStateOverridePath = Join-Path $BrokerRoot ('State\WorkerProgr
 . (Join-Path $PSScriptRoot 'PoolCommon.ps1')
 . (Join-Path $PSScriptRoot 'HostBroker.ps1') -BrokerRoot $BrokerRoot -LibraryOnly
 
-$config = Get-Content -Raw -LiteralPath (Join-Path $BrokerRoot 'Private\config.json') | ConvertFrom-Json
+$config = Get-Content -Raw -LiteralPath (Join-Path $BrokerRoot 'Private\config.json') -Encoding UTF8 | ConvertFrom-Json
 $worker = Get-PoolWorkerDefinition -Config $config -WorkerId $WorkerId
 $processingFile = Join-Path (Join-Path $BrokerRoot 'Processing') ($RequestId + '.json')
 $resultRoot = Join-Path (Join-Path $BrokerRoot 'Results') $RequestId
@@ -106,7 +106,7 @@ try {
         throw "Processing request is missing: $processingFile"
     }
     New-Item -ItemType Directory -Force -Path $resultRoot | Out-Null
-    $request = Get-Content -Raw -LiteralPath $processingFile | ConvertFrom-Json
+    $request = Get-Content -Raw -LiteralPath $processingFile -Encoding UTF8 | ConvertFrom-Json
     if (-not [string]::Equals([string]$request.RequestId, $RequestId, [StringComparison]::Ordinal)) {
         throw 'The processing request ID does not match the worker assignment.'
     }
@@ -141,7 +141,7 @@ try {
         if ($attemptError) { throw $attemptError }
         throw 'The guest request attempt ended without broker-result.json.'
     }
-    $attemptResult = Get-Content -Raw -LiteralPath $attemptBrokerPath | ConvertFrom-Json
+    $attemptResult = Get-Content -Raw -LiteralPath $attemptBrokerPath -Encoding UTF8 | ConvertFrom-Json
     $requestExpectProperty = $request.PSObject.Properties['ExpectGuestPowerOff']
     $requestExpectsGuestPowerOff = $requestExpectProperty -and $requestExpectProperty.Value -is [bool] -and [bool]$requestExpectProperty.Value
     $captureRetryAllowed = Test-WorkerCaptureRetryAllowed -AttemptResult $attemptResult -RetryCount $retryCount -CancellationRequested (Test-Path -LiteralPath (Join-Path (Join-Path $BrokerRoot 'Cancellations') ($RequestId + '.json')) -PathType Leaf) -ExpectGuestPowerOff $requestExpectsGuestPowerOff

@@ -88,7 +88,7 @@ Windows activation and licensing are intentionally outside this project. The gue
 
 ## Deploy an ordinary software release
 
-For an existing installation, use the resumable [harness release controller](docs/deployment.md) instead of manually chaining source refresh, guest-baseline replacement, acceptance, and recovery commands. It binds a clean commit and installed configuration into an immutable PlanOnly result, applies through one elevated state machine, runs three isolated acceptance paths, and refreshes the large local recovery bundle once at the end. Image servicing, networking changes, first installation, and `ForceRebuild` remain separate reviewed workflows.
+For an existing installation, use the resumable [harness release controller](docs/deployment.md) instead of manually chaining source refresh, guest-baseline replacement, acceptance, and recovery commands. It binds a clean commit and installed configuration into an immutable PlanOnly result, applies through one elevated state machine, runs four isolated acceptance paths, and refreshes the large local recovery bundle once at the end. Image servicing, networking changes, first installation, and `ForceRebuild` remain separate reviewed workflows.
 
 ## Reference profile and compatibility defaults
 

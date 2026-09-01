@@ -75,6 +75,9 @@ try {
         'Software\Canaries\NetworkBoundaryCanary.exe',
         'Software\Canaries\LiveEvidenceCanary.exe',
         'Software\Canaries\live-evidence-actions.json',
+        'Software\Canaries\HarnessContractCanary.cs',
+        'Software\Canaries\HarnessContractCanary.exe',
+        'Software\Canaries\release-utf8-actions.json',
         'Software\Harness\tests\Test-AtomicJsonContention.ps1',
         'Software\Harness\tests\Test-EvidenceSnapshotResilience.ps1',
         'Software\Harness\tests\Test-LiveEvidenceProtocol.ps1',
@@ -87,7 +90,8 @@ try {
         'Software\Harness\tests\Test-RequestNetworkingUpdateContract.ps1',
         'Software\Harness\tests\Test-RequestNetworkPropagation.ps1',
         'Software\Harness\tests\Test-RequestNetworkSafety.ps1',
-        'Software\Harness\tests\Test-RunnerContractValidation.ps1'
+        'Software\Harness\tests\Test-RunnerContractValidation.ps1',
+        'Software\Harness\tests\Test-Utf8ActionTransport.ps1'
     )
     $missing = @($required | Where-Object { -not (Test-Path -LiteralPath (Join-Path $BundleRoot $_) -PathType Leaf) })
     if ($missing.Count -gt 0) { throw ('Required recovery files are missing: ' + ($missing -join ', ')) }

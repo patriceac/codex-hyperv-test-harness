@@ -27,7 +27,7 @@ function Read-JsonSafe {
         return $null
     }
     try {
-        Get-Content -Raw -LiteralPath $Path | ConvertFrom-Json
+        Get-Content -Raw -LiteralPath $Path -Encoding UTF8 | ConvertFrom-Json
     }
     catch {
         $null

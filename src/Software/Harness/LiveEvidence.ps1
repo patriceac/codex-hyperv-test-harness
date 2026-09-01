@@ -97,7 +97,7 @@ function Read-LiveEvidenceJsonSafe {
                 $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
                 if ($item.Length -gt 256KB) { return $null }
                 if ($item.Length -gt 0) {
-                    return (Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop)
+                    return (Get-Content -LiteralPath $Path -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop)
                 }
             }
         }
@@ -296,7 +296,7 @@ function Route-LiveEvidenceRequests {
             try {
                 $claimedItem = Get-Item -LiteralPath $claimedPath -Force
                 if ($claimedItem.Length -le 0 -or $claimedItem.Length -gt 256KB) { throw 'Live evidence request JSON must be between 1 byte and 256 KiB.' }
-                $command = Get-Content -LiteralPath $claimedPath -Raw | ConvertFrom-Json -ErrorAction Stop
+                $command = Get-Content -LiteralPath $claimedPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
                 if (-not $command.PSObject.Properties['FormatVersion'] -or [int]$command.FormatVersion -ne $script:LiveEvidenceFormatVersion) { throw 'Unsupported live evidence request format version.' }
                 if (-not $command.PSObject.Properties['CaptureId'] -or -not [string]::Equals([string]$command.CaptureId, $captureId, [StringComparison]::Ordinal)) { throw 'CaptureId must match the request filename.' }
                 if (-not $command.PSObject.Properties['RequestId'] -or -not (Test-LiveEvidenceIdentifier -Value ([string]$command.RequestId))) { throw 'RequestId is invalid.' }

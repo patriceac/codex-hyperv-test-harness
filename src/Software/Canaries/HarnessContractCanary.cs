@@ -8,6 +8,8 @@ using System.Windows.Forms;
 
 internal static class HarnessContractCanary
 {
+    private const string AccentedControlName = "Approuver le pilote et d\u00E9bloquer la file";
+
     [STAThread]
     private static int Main(string[] args)
     {
@@ -17,6 +19,7 @@ internal static class HarnessContractCanary
         int delayMs = Int32.Parse(Get(options, "delay-ms", "1000"), CultureInfo.InvariantCulture);
         int stayMs = Int32.Parse(Get(options, "stay-ms", "3000"), CultureInfo.InvariantCulture);
         int exitCode = Int32.Parse(Get(options, "exit-code", "0"), CultureInfo.InvariantCulture);
+        bool requireClick = Boolean.Parse(Get(options, "require-click", "false"));
 
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
@@ -42,35 +45,52 @@ internal static class HarnessContractCanary
         var status = new Label
         {
             AutoSize = false,
-            Dock = DockStyle.Fill,
+            Location = new Point(80, 135),
+            Size = new Size(560, 90),
             TextAlign = ContentAlignment.MiddleCenter,
             Font = new Font("Segoe UI", 16, FontStyle.Regular),
-            Text = "Waiting to publish the application result..."
+            Text = requireClick ? "Waiting for the named control click..." : "Waiting to publish the application result..."
         };
         form.Controls.Add(status);
         form.Controls.Add(title);
+
+        Button approvalButton = null;
+        if (requireClick)
+        {
+            approvalButton = new Button
+            {
+                Name = "AccentedApprovalButton",
+                AccessibleName = AccentedControlName,
+                Text = AccentedControlName,
+                Font = new Font("Segoe UI Semibold", 12, FontStyle.Regular),
+                Location = new Point(145, 255),
+                Size = new Size(430, 58),
+                BackColor = Color.FromArgb(85, 230, 165),
+                ForeColor = Color.FromArgb(19, 27, 46),
+                FlatStyle = FlatStyle.Flat
+            };
+            approvalButton.FlatAppearance.BorderSize = 0;
+            approvalButton.Click += delegate
+            {
+                WriteResult(resultPath, passed, AccentedControlName);
+                status.Text = passed ? "Accented control click: PASSED" : "Accented control click: FAILED";
+                status.ForeColor = passed ? Color.FromArgb(85, 230, 165) : Color.FromArgb(255, 113, 113);
+                approvalButton.Enabled = false;
+            };
+            form.Controls.Add(approvalButton);
+            approvalButton.BringToFront();
+        }
 
         var publishTimer = new Timer { Interval = Math.Max(1, delayMs) };
         publishTimer.Tick += delegate
         {
             publishTimer.Stop();
-            if (!String.IsNullOrWhiteSpace(resultPath))
-            {
-                string directory = Path.GetDirectoryName(resultPath);
-                if (!String.IsNullOrWhiteSpace(directory)) Directory.CreateDirectory(directory);
-                string json = "{\"passed\":" + (passed ? "true" : "false") +
-                    ",\"processId\":" + System.Diagnostics.Process.GetCurrentProcess().Id.ToString(CultureInfo.InvariantCulture) +
-                    ",\"writtenUtc\":\"" + DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture) + "\"}";
-                string temporaryPath = resultPath + ".tmp";
-                File.WriteAllText(temporaryPath, json, new UTF8Encoding(false));
-                if (File.Exists(resultPath)) File.Delete(resultPath);
-                File.Move(temporaryPath, resultPath);
-            }
+            WriteResult(resultPath, passed, null);
             status.Text = passed ? "Application result: PASSED" : "Application result: FAILED";
             status.ForeColor = passed ? Color.FromArgb(85, 230, 165) : Color.FromArgb(255, 113, 113);
         };
 
-        var closeTimer = new Timer { Interval = Math.Max(1, delayMs + Math.Max(0, stayMs)) };
+        var closeTimer = new Timer { Interval = Math.Max(1, (requireClick ? 0 : delayMs) + Math.Max(0, stayMs)) };
         closeTimer.Tick += delegate
         {
             closeTimer.Stop();
@@ -84,12 +104,35 @@ internal static class HarnessContractCanary
         };
         form.Shown += delegate
         {
-            publishTimer.Start();
+            if (!requireClick) publishTimer.Start();
             closeTimer.Start();
         };
 
         Application.Run(form);
         return exitCode;
+    }
+
+    private static void WriteResult(string resultPath, bool passed, string clickedControlName)
+    {
+        if (String.IsNullOrWhiteSpace(resultPath)) return;
+        string directory = Path.GetDirectoryName(resultPath);
+        if (!String.IsNullOrWhiteSpace(directory)) Directory.CreateDirectory(directory);
+        string clickedProperty = clickedControlName == null
+            ? String.Empty
+            : ",\"clickedControlName\":\"" + EscapeJson(clickedControlName) + "\"";
+        string json = "{\"passed\":" + (passed ? "true" : "false") +
+            ",\"processId\":" + System.Diagnostics.Process.GetCurrentProcess().Id.ToString(CultureInfo.InvariantCulture) +
+            clickedProperty +
+            ",\"writtenUtc\":\"" + DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture) + "\"}";
+        string temporaryPath = resultPath + ".tmp";
+        File.WriteAllText(temporaryPath, json, new UTF8Encoding(false));
+        if (File.Exists(resultPath)) File.Delete(resultPath);
+        File.Move(temporaryPath, resultPath);
+    }
+
+    private static string EscapeJson(string value)
+    {
+        return value.Replace("\\", "\\\\").Replace("\"", "\\\"");
     }
 
     private static Dictionary<string, string> ParseArguments(string[] args)

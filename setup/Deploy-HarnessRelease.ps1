@@ -101,7 +101,7 @@ function Get-InstalledReleaseConfiguration {
     param([Parameter(Mandatory = $true)] [string] $Path)
 
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Harness configuration is missing: $Path" }
-    $configuration = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    $configuration = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
     foreach ($field in @('InstallRoot','PoolSize','PoolIdleTimeoutSeconds','VmMemoryBytes','VmProcessorCount','GuestDisplayWidth','GuestDisplayHeight','BrokerRoot','HarnessSourceRoot')) {
         if (-not $configuration.PSObject.Properties[$field]) { throw "Installed harness configuration is missing $field." }
     }
@@ -126,7 +126,7 @@ function Get-GuestReleaseInventory {
 
     $provenanceByPath = $null
     if (-not [string]::IsNullOrWhiteSpace($ProvenancePath) -and (Test-Path -LiteralPath $ProvenancePath -PathType Leaf)) {
-        try { $provenance = Get-Content -LiteralPath $ProvenancePath -Raw | ConvertFrom-Json -ErrorAction Stop }
+        try { $provenance = Get-Content -LiteralPath $ProvenancePath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop }
         catch { throw "Guest-baseline provenance is malformed: $($_.Exception.Message)" }
         if ([int]$provenance.FormatVersion -ne 1 -or -not $provenance.PSObject.Properties['GuestSourceInventory']) {
             throw 'Guest-baseline provenance has an unsupported schema.'
@@ -268,7 +268,7 @@ function New-ReleasePlan {
         Operations = $operations.ToArray()
         PrePromotionQualification = 'Exact source parse, build, deterministic tests, invocation contracts, and public-payload audit. No live shadow pool is claimed.'
         LiveShadowPoolAvailable = $false
-        Acceptance = @('LegacyLaunch','KeyboardInput','ExpectedGuestPowerOff')
+        Acceptance = @('LegacyLaunch','Utf8ActionName','KeyboardInput','ExpectedGuestPowerOff')
         RecoveryRefreshCount = 1
         AutomaticRollback = $false
         FailurePolicy = 'Stop at the failed checkpoint, preserve valid completed phases, and resume or supersede with a reviewed fix-forward candidate.'
@@ -310,7 +310,7 @@ function Get-ResumableReleasePlan {
     $resumeRoot = Join-Path $InstallRoot ('Live\Setup\Deployments\' + $ResumeDeploymentId)
     $resumeStatePath = Join-Path $resumeRoot 'state.json'
     if (-not (Test-Path -LiteralPath $resumeStatePath -PathType Leaf)) { throw "Deployment state is missing: $resumeStatePath" }
-    $persistedState = Get-Content -LiteralPath $resumeStatePath -Raw | ConvertFrom-Json
+    $persistedState = Get-Content -LiteralPath $resumeStatePath -Raw -Encoding UTF8 | ConvertFrom-Json
     if (-not [string]::Equals([string]$persistedState.DeploymentId, $ResumeDeploymentId, [StringComparison]::Ordinal) -or
         -not [string]::Equals([string]$persistedState.PlanSha256, $ExpectedPlanSha256, [StringComparison]::OrdinalIgnoreCase)) {
         throw 'The persisted deployment identity does not match the requested resume plan.'
@@ -612,7 +612,7 @@ try {
     Enable-ReleaseAwake
 
     if (Test-Path -LiteralPath $statePath -PathType Leaf) {
-        $deploymentState = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+        $deploymentState = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
         if (-not [string]::Equals([string]$deploymentState.PlanSha256, [string]$plan.PlanSha256, [StringComparison]::OrdinalIgnoreCase)) {
             throw 'The persisted deployment state belongs to a different release plan.'
         }
@@ -684,7 +684,7 @@ try {
             $guestParameters = New-GuestBaselineInvocationParameters -Plan $plan -Configuration $configuration -SourceRoot $installedHarnessRoot -StatusPath $guestStatusPath
             & (Join-Path $installedHarnessRoot 'Update-GuestHarnessBaseline.ps1') @guestParameters
             if (-not (Test-Path -LiteralPath $guestStatusPath -PathType Leaf)) { throw 'Guest-baseline promotion did not publish its status file.' }
-            $guestResult = Get-Content -LiteralPath $guestStatusPath -Raw | ConvertFrom-Json
+            $guestResult = Get-Content -LiteralPath $guestStatusPath -Raw -Encoding UTF8 | ConvertFrom-Json
             if (-not [bool]$guestResult.Success) { throw 'The guest-baseline promotion did not report success.' }
             Write-JsonAtomic -Path $baselineProvenancePath -Value ([ordered]@{
                 FormatVersion = 1
@@ -705,7 +705,7 @@ try {
             -InstallRoot $InstallRoot `
             -EvidenceRoot (Join-Path $deploymentRoot 'Acceptance') `
             -ClientSid $TargetUserSid
-        if (-not [bool]$acceptance.Success -or @($acceptance.Tests).Count -ne 3) { throw 'Release acceptance did not pass all three isolated checks.' }
+        if (-not [bool]$acceptance.Success -or @($acceptance.Tests).Count -ne 4) { throw 'Release acceptance did not pass all four isolated checks.' }
         $acceptance
     } | Out-Null
 
@@ -713,7 +713,7 @@ try {
         $recoveryOutput = @(& (Join-Path $InstallRoot 'Software\Setup\Refresh-LocalRecovery.ps1') -InstallRoot $InstallRoot -TargetUserProfile $TargetUserProfile -NoElevation)
         $manifestPath = Join-Path $InstallRoot 'Recovery\Current\manifest.json'
         if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw 'The final recovery refresh did not publish Recovery\Current\manifest.json.' }
-        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
         [pscustomobject][ordered]@{
             ManifestPath = $manifestPath
             ManifestSha256 = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash
@@ -742,7 +742,7 @@ try {
     $terminalResult = [ordered]@{
         Success = $true; Status = 'Ready'; DeploymentId = [string]$plan.DeploymentId; PlanSha256 = [string]$plan.PlanSha256
         CandidateCommit = [string]$plan.CandidateCommit; StatePath = $statePath; RecoveryRefreshCount = 1
-        AcceptanceTests = @('LegacyLaunch','KeyboardInput','ExpectedGuestPowerOff')
+        AcceptanceTests = @('LegacyLaunch','Utf8ActionName','KeyboardInput','ExpectedGuestPowerOff')
         AutomaticRollbackAttempted = $false; ReadyToPush = $true; CompletedUtc = [DateTime]::UtcNow.ToString('o')
     }
     Write-JsonAtomic -Path $resultPath -Value $terminalResult

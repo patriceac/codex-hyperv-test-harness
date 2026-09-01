@@ -144,7 +144,7 @@ function Complete-PoolQueuedTerminalRequests {
             continue
         }
         $request = $null
-        try { $request = Get-Content -Raw -LiteralPath $requestFile.FullName | ConvertFrom-Json } catch { }
+        try { $request = Get-Content -Raw -LiteralPath $requestFile.FullName -Encoding UTF8 | ConvertFrom-Json } catch { }
         if (-not $request) { continue }
         $createdUtc = $requestFile.CreationTimeUtc
         try { $createdUtc = [DateTime]::Parse([string]$request.CreatedUtc).ToUniversalTime() } catch { }
@@ -237,7 +237,7 @@ function Write-PoolQueuePositions {
         New-Item -ItemType Directory -Force -Path $resultRoot | Out-Null
         $createdUtc = $file.CreationTimeUtc
         try {
-            $request = Get-Content -Raw -LiteralPath $file.FullName | ConvertFrom-Json
+            $request = Get-Content -Raw -LiteralPath $file.FullName -Encoding UTF8 | ConvertFrom-Json
             $createdUtc = [DateTime]::Parse([string]$request.CreatedUtc).ToUniversalTime()
         }
         catch { }
@@ -268,7 +268,7 @@ function Start-PoolRequest {
         if (Move-QueuedRequestWithTerminalResult -QueuedFile ([IO.FileInfo]$processingFile) -RequestId $requestId -Reason 'claimed-after-terminal') {
             return $true
         }
-        $request = Get-Content -Raw -LiteralPath $processingFile | ConvertFrom-Json
+        $request = Get-Content -Raw -LiteralPath $processingFile -Encoding UTF8 | ConvertFrom-Json
         if (-not [string]::Equals([string]$request.RequestId, $requestId, [StringComparison]::Ordinal)) {
             throw 'RequestId must match the request filename.'
         }
@@ -758,7 +758,7 @@ function Complete-PoolWorkerRun {
         $retryRequest = $null
         try {
             if (Test-Path -LiteralPath $processingFile -PathType Leaf) {
-                $retryRequest = Get-Content -Raw -LiteralPath $processingFile | ConvertFrom-Json
+                $retryRequest = Get-Content -Raw -LiteralPath $processingFile -Encoding UTF8 | ConvertFrom-Json
             }
         }
         catch {
@@ -1321,7 +1321,7 @@ function Invoke-PoolBrokerLoop {
                 if ($maintenance) {
                     $maintenanceCleanupCompleted = $false
                     try {
-                        $maintenanceGcState = Get-Content -LiteralPath $payloadGcStatePath -Raw | ConvertFrom-Json
+                        $maintenanceGcState = Get-Content -LiteralPath $payloadGcStatePath -Raw -Encoding UTF8 | ConvertFrom-Json
                         $maintenanceGcStartedUtc = [DateTime]::Parse([string]$maintenanceGcState.StartedUtc).ToUniversalTime()
                         $maintenanceCleanupCompleted = [string]$maintenanceGcState.Status -eq 'Completed' -and $maintenanceGcStartedUtc -ge $nowUtc
                     }

@@ -548,7 +548,7 @@ function Test-GuestResultAssertion {
     )
 
     try {
-        $document = Get-Content -Raw -LiteralPath $Path -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $document = Get-Content -Raw -LiteralPath $Path -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
     }
     catch {
         return [pscustomobject][ordered]@{
@@ -754,11 +754,11 @@ function Complete-ExpectedGuestPowerOffJob {
     $bootEvidenceError = $null
 
     if (Test-Path -LiteralPath $leasePath -PathType Leaf) {
-        try { $lease = Get-Content -Raw -LiteralPath $leasePath -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
+        try { $lease = Get-Content -Raw -LiteralPath $leasePath -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
         catch { $leaseReadError = $_.Exception.Message }
     }
     if (Test-Path -LiteralPath $resultFile -PathType Leaf) {
-        try { $existingResult = Get-Content -Raw -LiteralPath $resultFile -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
+        try { $existingResult = Get-Content -Raw -LiteralPath $resultFile -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
         catch { $existingResultReadError = $_.Exception.Message }
     }
     try { $bootEvidence = Get-ExpectedGuestPowerOffBootEvidence -Lease $lease }
@@ -1639,7 +1639,7 @@ function Invoke-GuestJob {
     $leasePath = Join-Path $jobOutputPath 'lease.json'
     if (Test-Path -LiteralPath $leasePath -PathType Leaf) {
         try {
-            $priorLease = Get-Content -Raw -LiteralPath $leasePath | ConvertFrom-Json
+            $priorLease = Get-Content -Raw -LiteralPath $leasePath -Encoding UTF8 | ConvertFrom-Json
             if ([int]$priorLease.ProcessId -gt 0) {
                 $priorCleanup = Stop-GuestProcessTree -RootProcessId ([int]$priorLease.ProcessId)
                 if (-not $priorCleanup.Success) {
@@ -1759,7 +1759,16 @@ function Invoke-GuestJob {
                             -AutomationId ([string]$action.automationId) `
                             -Name ([string]$action.name) `
                             -TimeoutMilliseconds $(if ($action.timeoutMs) { [int]$action.timeoutMs } else { 10000 })
+                        $matchedAutomationId = [string]$element.Current.AutomationId
+                        $matchedName = [string]$element.Current.Name
                         Click-AutomationElement -Element $element
+                        $actionDetails = [ordered]@{
+                            RequestedAutomationId = [string]$action.automationId
+                            RequestedName = [string]$action.name
+                            MatchedAutomationId = $matchedAutomationId
+                            MatchedName = $matchedName
+                            TargetWindowHandle = $windowHandle.ToInt64()
+                        }
                     }
                     'type_text' {
                         if ($windowHandle -eq [IntPtr]::Zero) {
@@ -2177,7 +2186,7 @@ function Repair-InterruptedGuestJobs {
 
     foreach ($orphanedJob in @(Get-ChildItem -LiteralPath $ProcessingRoot -Filter '*.json' -File -ErrorAction SilentlyContinue)) {
         $job = $null
-        try { $job = Get-Content -Raw -LiteralPath $orphanedJob.FullName -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
+        try { $job = Get-Content -Raw -LiteralPath $orphanedJob.FullName -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
         catch { $job = $null }
 
         if (-not (Test-ExpectedGuestPowerOffJob -Job $job)) {
@@ -2222,7 +2231,7 @@ function Repair-InterruptedGuestJobs {
 
     foreach ($completedJob in $completedJobsAtStartup) {
         $job = $null
-        try { $job = Get-Content -Raw -LiteralPath $completedJob.FullName -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
+        try { $job = Get-Content -Raw -LiteralPath $completedJob.FullName -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
         catch { continue }
         if (-not (Test-ExpectedGuestPowerOffJob -Job $job)) { continue }
 
@@ -2278,7 +2287,7 @@ try {
             $processingFile = Join-Path $processingPath $jobFile.Name
             try {
                 Move-Item -LiteralPath $jobFile.FullName -Destination $processingFile -Force
-                $job = Get-Content -Raw -LiteralPath $processingFile | ConvertFrom-Json
+                $job = Get-Content -Raw -LiteralPath $processingFile -Encoding UTF8 | ConvertFrom-Json
                 Invoke-GuestJob -Job $job -JobFile $processingFile
             }
             catch {

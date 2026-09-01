@@ -13,7 +13,7 @@ $global:CodexBrokerStateOverridePath = Join-Path $BrokerRoot ('State\WorkerProgr
 . (Join-Path $PSScriptRoot 'PoolCommon.ps1')
 . (Join-Path $PSScriptRoot 'HostBroker.ps1') -BrokerRoot $BrokerRoot -LibraryOnly
 
-$config = Get-Content -Raw -LiteralPath (Join-Path $BrokerRoot 'Private\config.json') | ConvertFrom-Json
+$config = Get-Content -Raw -LiteralPath (Join-Path $BrokerRoot 'Private\config.json') -Encoding UTF8 | ConvertFrom-Json
 $worker = Get-PoolWorkerDefinition -Config $config -WorkerId $WorkerId
 $vmName = [string]$worker.VmName
 $baseVhdx = [IO.Path]::GetFullPath([string]$config.PoolBaseVhdx)

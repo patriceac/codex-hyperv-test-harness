@@ -1,0 +1,28 @@
+[
+  {
+    "type": "wait_window",
+    "timeoutMs": 30000
+  },
+  {
+    "type": "screenshot",
+    "name": "utf8-before.png",
+    "timeoutMs": 30000,
+    "attempts": 5
+  },
+  {
+    "type": "click_control",
+    "name": "Approuver le pilote et débloquer la file",
+    "timeoutMs": 30000
+  },
+  {
+    "type": "wait_result_file",
+    "path": "{OUTDIR}\\utf8-action-result.json",
+    "timeoutMs": 30000
+  },
+  {
+    "type": "screenshot",
+    "name": "utf8-after.png",
+    "timeoutMs": 30000,
+    "attempts": 5
+  }
+]

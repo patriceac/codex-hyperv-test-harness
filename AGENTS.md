@@ -34,7 +34,7 @@ This repository rebuilds a privileged Hyper-V executable-test backend. Use the r
 - Use `setup\Deploy-HarnessRelease.ps1` as the canonical owner for an ordinary committed source, broker, skill, canary, or guest-agent release to an existing harness. Do not replace it with an ad hoc chain of installer, guest-update, canary, and recovery commands.
 - Run its exact `-PlanOnly` path first and obtain explicit approval before `-Apply`. Clear ordinary wording that refers to the displayed plan is sufficient; do not demand a magic approval phrase.
 - Resume the same immutable plan from its completed checkpoints. Prefer a linked fix-forward plan over rollback for ordinary source defects. Rollback and `ForceRebuild` remain separately approved hard-boundary operations.
-- The controller owns one final broad source suite, three isolated live acceptance paths, and one recovery refresh. Do not repeat the full suite or deep-hash recovery after each successful sub-step.
+- The controller owns one final broad source suite, four isolated live acceptance paths, and one recovery refresh. Do not repeat the full suite or deep-hash recovery after each successful sub-step.
 - Keep the controller and its contract tests current when the deployment topology or acceptance boundary changes. Do not claim a live shadow pool until one is actually implemented and verified.
 
 The installer must resolve the current x64 multi-edition Windows 11 ISO through Microsoft's official download page, validate Microsoft media, enumerate `install.wim` or `install.esd`, and select the sole `EditionId=Professional` image. Never replace this with a fixed release URL, third-party mirror, hard-coded image index, or activation automation.

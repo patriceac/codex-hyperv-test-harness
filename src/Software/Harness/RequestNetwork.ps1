@@ -17,7 +17,7 @@ function Get-RequestNetworkLeaseInventory {
         Get-ChildItem -LiteralPath $leaseRoot -Filter '*.json' -File -ErrorAction Stop | ForEach-Object {
             $leasePath = $_.FullName
             try {
-                $state = Get-Content -Raw -LiteralPath $leasePath -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                $state = Get-Content -Raw -LiteralPath $leasePath -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
                 if ($null -eq $state) { throw 'The lease record is empty.' }
                 foreach ($field in @('RequestId', 'VmName', 'VmId', 'AdapterName', 'Status', 'OwnerProcessId', 'OwnerProcessStartUtc')) {
                     $property = $state.PSObject.Properties[$field]
@@ -2520,7 +2520,7 @@ function Get-RequestNetworkManagedVmNames {
     $configPath = Join-Path $BrokerRoot 'Private\config.json'
     if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { return @() }
     try {
-        $config = Get-Content -Raw -LiteralPath $configPath | ConvertFrom-Json
+        $config = Get-Content -Raw -LiteralPath $configPath -Encoding UTF8 | ConvertFrom-Json
         @((@($config.PoolWorkers | ForEach-Object { [string]$_.VmName }) + @([string]$config.VmName)) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
     }
     catch { throw "Could not read the managed VM inventory for request-network recovery: $($_.Exception.Message)" }
@@ -2532,7 +2532,7 @@ function Get-InstalledRequestNetworkPolicy {
     $configPath = Join-Path $BrokerRoot 'Private\config.json'
     if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { return Get-RequestNetworkDefaultPolicy }
     try {
-        $config = Get-Content -Raw -LiteralPath $configPath | ConvertFrom-Json
+        $config = Get-Content -Raw -LiteralPath $configPath -Encoding UTF8 | ConvertFrom-Json
         Get-RequestNetworkPolicy -Config $config
     }
     catch { throw "Could not read the installed request-network policy for orphan recovery: $($_.Exception.Message)" }

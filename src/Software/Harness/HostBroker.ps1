@@ -50,7 +50,7 @@ function Get-ValidatedKeyChord {
 if ([string]::IsNullOrWhiteSpace($BrokerRoot)) {
     $pointerPath = Join-Path $env:ProgramData 'CodexHyperVBroker\location.json'
     if (-not (Test-Path -LiteralPath $pointerPath -PathType Leaf)) { throw "BrokerRoot was not supplied and the location pointer is missing: $pointerPath" }
-    $pointer = Get-Content -LiteralPath $pointerPath -Raw | ConvertFrom-Json
+    $pointer = Get-Content -LiteralPath $pointerPath -Raw -Encoding UTF8 | ConvertFrom-Json
     if ([string]::IsNullOrWhiteSpace([string]$pointer.BrokerRoot)) { throw "The broker location pointer has no BrokerRoot: $pointerPath" }
     $BrokerRoot = [IO.Path]::GetFullPath([string]$pointer.BrokerRoot)
 }
@@ -196,7 +196,7 @@ function Read-BrokerJsonWithRetry {
             if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
                 throw [IO.FileNotFoundException]::new("JSON file not found: $Path")
             }
-            return Get-Content -Raw -LiteralPath $Path -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            return Get-Content -Raw -LiteralPath $Path -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
         }
         catch {
             $lastError = $_
@@ -646,7 +646,7 @@ function Assert-RequestActive {
     if (Test-Path -LiteralPath $cancelFile -PathType Leaf) {
         $reason = 'Cancellation requested.'
         try {
-            $cancelData = Get-Content -Raw -LiteralPath $cancelFile | ConvertFrom-Json
+            $cancelData = Get-Content -Raw -LiteralPath $cancelFile -Encoding UTF8 | ConvertFrom-Json
             if (-not [string]::IsNullOrWhiteSpace([string]$cancelData.Reason)) {
                 $reason = [string]$cancelData.Reason
             }
@@ -692,7 +692,7 @@ function Remove-StaleQueueArtifacts {
         $stagingLeasePath = Join-Path $directory.FullName '.codex-staging-lease.json'
         if (Test-Path -LiteralPath $stagingLeasePath -PathType Leaf) {
             try {
-                $stagingLease = Get-Content -Raw -LiteralPath $stagingLeasePath | ConvertFrom-Json
+                $stagingLease = Get-Content -Raw -LiteralPath $stagingLeasePath -Encoding UTF8 | ConvertFrom-Json
                 $stagingProcess = Get-Process -Id ([int]$stagingLease.ProcessId) -ErrorAction SilentlyContinue
                 if ($stagingProcess -and $stagingProcess.ProcessName -in @('powershell', 'pwsh')) {
                     $expectedStartUtc = [DateTime]::Parse([string]$stagingLease.ProcessStartUtc).ToUniversalTime()
@@ -1126,7 +1126,7 @@ function Wait-ForHostLock {
 }
 
 function Get-GuestCredential {
-    $credentialData = Get-Content -Raw -LiteralPath $credentialPath | ConvertFrom-Json
+    $credentialData = Get-Content -Raw -LiteralPath $credentialPath -Encoding UTF8 | ConvertFrom-Json
     $securePassword = ConvertTo-SecureString ([string]$credentialData.Password) -AsPlainText -Force
     New-Object Management.Automation.PSCredential([string]$credentialData.UserName, $securePassword)
 }
@@ -1216,7 +1216,7 @@ function Stop-GuestProbeProcess {
 function Recover-OrphanedGuestProbes {
     foreach ($leaseFile in Get-ChildItem -LiteralPath $probePath -Filter '*.process.json' -File -ErrorAction SilentlyContinue) {
         try {
-            $lease = Get-Content -Raw -LiteralPath $leaseFile.FullName | ConvertFrom-Json
+            $lease = Get-Content -Raw -LiteralPath $leaseFile.FullName -Encoding UTF8 | ConvertFrom-Json
             $process = Get-Process -Id ([int]$lease.ProcessId) -ErrorAction SilentlyContinue
             if ($process -and $process.ProcessName -ieq 'powershell') {
                 $expectedStartUtc = [DateTime]::Parse([string]$lease.ProcessStartUtc).ToUniversalTime()
@@ -1252,14 +1252,14 @@ $ErrorActionPreference = 'Stop'
 $outputPath = __OUTPUT_PATH__
 $exitCode = 0
 try {
-    $credentialData = Get-Content -Raw -LiteralPath __CREDENTIAL_PATH__ | ConvertFrom-Json
+    $credentialData = Get-Content -Raw -LiteralPath __CREDENTIAL_PATH__ -Encoding UTF8 | ConvertFrom-Json
     $securePassword = ConvertTo-SecureString ([string]$credentialData.Password) -AsPlainText -Force
     $credential = New-Object Management.Automation.PSCredential([string]$credentialData.UserName, $securePassword)
     $probeData = Invoke-Command -VMName __VM_NAME__ -Credential $credential -ErrorAction Stop -ScriptBlock {
         param($InboxFile, $ProcessingFile, $CompletedFile, $Outbox)
         $statePath = 'C:\CodexGuest\agent-state.json'
         $state = if (Test-Path -LiteralPath $statePath -PathType Leaf) {
-            Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json
+            Get-Content -Raw -LiteralPath $statePath -Encoding UTF8 | ConvertFrom-Json
         }
         else { $null }
         $currentGuestUtc = [DateTime]::UtcNow
@@ -1279,7 +1279,7 @@ try {
             try {
                 $leasePath = Join-Path $Outbox 'lease.json'
                 if (Test-Path -LiteralPath $leasePath -PathType Leaf) {
-                    $applicationLease = Get-Content -Raw -LiteralPath $leasePath | ConvertFrom-Json
+                    $applicationLease = Get-Content -Raw -LiteralPath $leasePath -Encoding UTF8 | ConvertFrom-Json
                 }
             }
             catch { $applicationLease = $null }
@@ -1624,7 +1624,7 @@ function Wait-GuestSession {
                 Start-Sleep -Milliseconds 200
             }
             if (Test-Path -LiteralPath $probeOutputPath -PathType Leaf) {
-                $probeResult = Get-Content -Raw -LiteralPath $probeOutputPath | ConvertFrom-Json
+                $probeResult = Get-Content -Raw -LiteralPath $probeOutputPath -Encoding UTF8 | ConvertFrom-Json
                 $guestState = $probeResult.State
                 if ($probeResult.Success -and $guestState -and $guestState.Ready -and $guestState.UserInteractive) {
                     $heartbeat = [DateTime]::Parse([string]$guestState.HeartbeatUtc).ToUniversalTime()
@@ -1814,7 +1814,7 @@ $session = $null
 $deliveryAttempted = $false
 $deliveryMadeVisible = $false
 try {
-    $credentialData = Get-Content -Raw -LiteralPath __CREDENTIAL_PATH__ | ConvertFrom-Json
+    $credentialData = Get-Content -Raw -LiteralPath __CREDENTIAL_PATH__ -Encoding UTF8 | ConvertFrom-Json
     $securePassword = ConvertTo-SecureString ([string]$credentialData.Password) -AsPlainText -Force
     $credential = New-Object Management.Automation.PSCredential([string]$credentialData.UserName, $securePassword)
     $session = New-PSSession -VMName __VM_NAME__ -Credential $credential -ErrorAction Stop
@@ -2006,7 +2006,7 @@ function Assert-ExpectedPowerOffEvidenceStageMatchesManifest {
     }
 
     & $assertManifestIdentity $Manifest 'The returned guest evidence manifest'
-    try { $hostManifest = Get-Content -Raw -LiteralPath $manifestPath -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
+    try { $hostManifest = Get-Content -Raw -LiteralPath $manifestPath -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
     catch { throw "The copied host evidence manifest is unreadable: $($_.Exception.Message)" }
     & $assertManifestIdentity $hostManifest 'The copied host evidence manifest'
     $copiedManifestSha256 = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256 -ErrorAction Stop).Hash
@@ -3080,7 +3080,7 @@ function Invoke-HostLiveEvidenceService {
             if (-not (Test-Path -LiteralPath $resultPath -PathType Leaf)) { return $null }
             $item = Get-Item -LiteralPath $resultPath -Force
             if ($item.Length -le 0 -or $item.Length -gt 256KB) { throw 'Guest live evidence result exceeded its size bound.' }
-            Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json -ErrorAction Stop
+            Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
         } -ArgumentList $guestResponseRoot
         if (-not $guestResult) {
             if ([DateTime]::UtcNow -ge [DateTime]$Context.CaptureDeadlineUtc) {
@@ -3103,7 +3103,7 @@ function Invoke-HostLiveEvidenceService {
         $publishedRoot = $null
         try {
             $inventory = @(Copy-GuestLiveEvidenceBounded -Session $Session -GuestResponseRoot $guestResponseRoot -HostStageRoot $incomingRoot -GuestResult $guestResult -RequestedGuestPaths @($command.GuestEvidencePaths))
-            $copiedGuestResult = Get-Content -LiteralPath (Join-Path $incomingRoot 'live-evidence-result.json') -Raw | ConvertFrom-Json -ErrorAction Stop
+            $copiedGuestResult = Get-Content -LiteralPath (Join-Path $incomingRoot 'live-evidence-result.json') -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
             if (-not [string]::Equals([string]$copiedGuestResult.CaptureId, [string]$guestResult.CaptureId, [StringComparison]::Ordinal) -or
                 -not [string]::Equals([string]$copiedGuestResult.RequestId, [string]$guestResult.RequestId, [StringComparison]::Ordinal) -or
                 [bool]$copiedGuestResult.Success -ne [bool]$guestResult.Success -or
@@ -3956,7 +3956,7 @@ function Invoke-GuestRequest {
                     try {
                         $agentStatePath = 'C:\CodexGuest\agent-state.json'
                         if (Test-Path -LiteralPath $agentStatePath -PathType Leaf) {
-                            $agentState = Get-Content -Raw -LiteralPath $agentStatePath | ConvertFrom-Json
+                            $agentState = Get-Content -Raw -LiteralPath $agentStatePath -Encoding UTF8 | ConvertFrom-Json
                         }
                     }
                     catch {
@@ -3979,7 +3979,7 @@ function Invoke-GuestRequest {
                     try {
                         $leasePath = Join-Path $Outbox 'lease.json'
                         if (Test-Path -LiteralPath $leasePath -PathType Leaf) {
-                            $applicationLease = Get-Content -Raw -LiteralPath $leasePath | ConvertFrom-Json
+                            $applicationLease = Get-Content -Raw -LiteralPath $leasePath -Encoding UTF8 | ConvertFrom-Json
                         }
                     }
                     catch {
@@ -4489,14 +4489,14 @@ function Invoke-GuestRequest {
         if (-not (Test-Path -LiteralPath $guestResultPath)) {
             $agentErrorPath = Join-Path $ResultRoot 'agent-error.json'
             $agentError = if (Test-Path -LiteralPath $agentErrorPath) {
-                Get-Content -Raw -LiteralPath $agentErrorPath | ConvertFrom-Json
+                Get-Content -Raw -LiteralPath $agentErrorPath -Encoding UTF8 | ConvertFrom-Json
             }
             else {
                 $null
             }
             throw "Guest agent failed before producing result.json: $($agentError.Error)"
         }
-        $guestResult = Get-Content -Raw -LiteralPath $guestResultPath | ConvertFrom-Json
+        $guestResult = Get-Content -Raw -LiteralPath $guestResultPath -Encoding UTF8 | ConvertFrom-Json
         if (-not $guestResult.Success) {
             if (-not [string]::IsNullOrWhiteSpace([string]$guestResult.FailureKind)) {
                 $failureKind = [string]$guestResult.FailureKind
@@ -5135,7 +5135,7 @@ try {
     if (-not (Test-Path -LiteralPath $configPath) -or -not (Test-Path -LiteralPath $credentialPath)) {
         throw 'Broker configuration or guest credential is missing.'
     }
-    $config = Get-Content -Raw -LiteralPath $configPath | ConvertFrom-Json
+    $config = Get-Content -Raw -LiteralPath $configPath -Encoding UTF8 | ConvertFrom-Json
     Recover-OrphanedGuestProbes
     if ([bool]$config.PoolEnabled) {
         $poolCommonPath = Join-Path $PSScriptRoot 'PoolCommon.ps1'
@@ -5206,7 +5206,7 @@ try {
             New-Item -ItemType Directory -Force -Path $queuedResultRoot | Out-Null
             $queuedCreatedUtc = $null
             try {
-                $queuedRequest = Get-Content -Raw -LiteralPath $queuedFile.FullName | ConvertFrom-Json
+                $queuedRequest = Get-Content -Raw -LiteralPath $queuedFile.FullName -Encoding UTF8 | ConvertFrom-Json
                 $parsedCreatedUtc = [DateTime]::MinValue
                 if ([DateTime]::TryParse([string]$queuedRequest.CreatedUtc, [ref]$parsedCreatedUtc)) {
                     $queuedCreatedUtc = $parsedCreatedUtc.ToUniversalTime()
@@ -5248,7 +5248,7 @@ try {
                     continue
                 }
                 $claimedUtc = [DateTime]::UtcNow
-                $request = Get-Content -Raw -LiteralPath $processingFile | ConvertFrom-Json
+                $request = Get-Content -Raw -LiteralPath $processingFile -Encoding UTF8 | ConvertFrom-Json
                 if ([string]$request.RequestId -ne $requestId) {
                     throw 'RequestId must match the request filename.'
                 }

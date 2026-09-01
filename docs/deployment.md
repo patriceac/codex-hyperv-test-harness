@@ -43,11 +43,11 @@ Ordinary language such as “do it,” “proceed,” or “apply that plan” i
 2. `LiveReadiness` — an empty-queue guest-baseline preflight when guest files changed.
 3. `SourcePromotion` — sanitized source publication with duplicate smoke and recovery work deferred.
 4. `GuestBaselinePromotion` — when required, one baseline update and one disposable-pool rebuild. Otherwise source promotion refreshes the pool once.
-5. `IsolatedAcceptance` — legacy launch, exact `WIN+LEFT` keyboard evidence with before/after screenshots, and an expected-guest-power-off/no-replay probe.
+5. `IsolatedAcceptance` — legacy launch, an accented UI Automation Name click with no AutomationId, exact `WIN+LEFT` keyboard evidence with before/after screenshots, and an expected-guest-power-off/no-replay probe.
 6. `RecoveryRefresh` — one final local recovery creation and deep verification, only after acceptance.
 7. `Finalization` — exact-commit and public-payload revalidation plus the terminal receipt.
 
-The strict pre- and post-acceptance pool audits each run inside a short, owned broker-maintenance drain. That boundary stops warm workers, completes payload garbage collection, restores the exact broker ACL after Hyper-V's transient disk grants, captures the audit, and then releases maintenance. The three application tests themselves run with normal pool scheduling between those two drains.
+The strict pre- and post-acceptance pool audits each run inside a short, owned broker-maintenance drain. That boundary stops warm workers, completes payload garbage collection, restores the exact broker ACL after Hyper-V's transient disk grants, captures the audit, and then releases maintenance. The four application tests themselves run with normal pool scheduling between those two drains.
 
 State, logs, and receipts live below `Live\Setup\Deployments\<DeploymentId>`. They are private local deployment evidence and must never be committed.
 

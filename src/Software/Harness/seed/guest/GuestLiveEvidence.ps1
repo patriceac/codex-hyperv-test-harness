@@ -349,7 +349,7 @@ function Invoke-GuestLiveEvidenceHeartbeat {
     $script:GuestLiveEvidenceCaptureInProgress = $true
     try {
         Move-Item -LiteralPath $requestFile[0].FullName -Destination $processingFile -Force
-        $command = Get-Content -LiteralPath $processingFile -Raw | ConvertFrom-Json -ErrorAction Stop
+        $command = Get-Content -LiteralPath $processingFile -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
         if (-not [string]::Equals([string]$command.CaptureId, $captureId, [StringComparison]::Ordinal)) { throw 'CaptureId must match the guest request filename.' }
         if ($null -ne $NotAfterUtc) {
             $remainingMilliseconds = [int][Math]::Floor((([DateTime]$NotAfterUtc) - [DateTime]::UtcNow).TotalMilliseconds)

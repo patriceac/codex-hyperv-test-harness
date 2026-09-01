@@ -81,7 +81,7 @@ function Update-PayloadGenerationLease {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         throw "Payload generation lease is missing: $RequestId"
     }
-    $lease = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
+    $lease = Get-Content -Raw -LiteralPath $path -Encoding UTF8 | ConvertFrom-Json
     if ($PSBoundParameters.ContainsKey('ParentVhdx')) { $lease.ParentVhdx = $ParentVhdx }
     if ($PSBoundParameters.ContainsKey('ChildVhdx')) { $lease.ChildVhdx = $ChildVhdx }
     if ($PSBoundParameters.ContainsKey('Stage')) { $lease.Stage = $Stage }
@@ -106,7 +106,7 @@ function Get-ActivePayloadGenerationLeases {
     @(
         foreach ($leaseFile in Get-ChildItem -LiteralPath $payloadLeasePath -Filter '*.json' -File -ErrorAction SilentlyContinue) {
             try {
-                $lease = Get-Content -Raw -LiteralPath $leaseFile.FullName | ConvertFrom-Json
+                $lease = Get-Content -Raw -LiteralPath $leaseFile.FullName -Encoding UTF8 | ConvertFrom-Json
                 if ([string]$lease.PayloadId -eq $normalizedPayloadId -and
                     ([string]::IsNullOrWhiteSpace($ExcludeRequestId) -or -not [string]::Equals([string]$lease.RequestId, $ExcludeRequestId, [StringComparison]::OrdinalIgnoreCase))) {
                     $lease
@@ -230,7 +230,7 @@ function Read-AndValidatePayloadManifest {
         throw "Payload manifest not found: $resolvedManifest"
     }
 
-    $manifest = Get-Content -Raw -LiteralPath $resolvedManifest | ConvertFrom-Json
+    $manifest = Get-Content -Raw -LiteralPath $resolvedManifest -Encoding UTF8 | ConvertFrom-Json
     if ([int]$manifest.ManifestVersion -ne 2) {
         throw 'Unsupported payload manifest version.'
     }
@@ -617,7 +617,7 @@ function Read-PayloadCacheMetadata {
         return $null
     }
     try {
-        $metadata = Get-Content -Raw -LiteralPath $paths.MetadataPath | ConvertFrom-Json
+        $metadata = Get-Content -Raw -LiteralPath $paths.MetadataPath -Encoding UTF8 | ConvertFrom-Json
         $manifestScope = if ($Manifest.PSObject.Properties.Name -contains 'CacheScope' -and -not [string]::IsNullOrWhiteSpace([string]$Manifest.CacheScope)) { [string]$Manifest.CacheScope } else { 'Application' }
         $metadataScope = if ($metadata.PSObject.Properties.Name -contains 'CacheScope' -and -not [string]::IsNullOrWhiteSpace([string]$metadata.CacheScope)) { [string]$metadata.CacheScope } else { 'Application' }
         if ([int]$metadata.FormatVersion -ne 2 -or
@@ -1004,7 +1004,7 @@ function Resolve-GuestPayloadRoot {
                 $markerPath = "$letter`:\.codex-payload.json"
                 if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) { continue }
                 try {
-                    $marker = Get-Content -Raw -LiteralPath $markerPath | ConvertFrom-Json
+                    $marker = Get-Content -Raw -LiteralPath $markerPath -Encoding UTF8 | ConvertFrom-Json
                     $payloadRoot = "$letter`:\Payload"
                     if ([string]$marker.PayloadId -eq $ExpectedPayloadId -and [string]$marker.ContentKey -eq $ExpectedContentKey -and (Test-Path -LiteralPath $payloadRoot -PathType Container)) {
                         if ($MakeReadOnly -and -not $disk.IsReadOnly) {
@@ -1032,7 +1032,7 @@ function Get-ProtectedPayloadIds {
     foreach ($root in @($requestPath, $processingPath)) {
         foreach ($requestFile in Get-ChildItem -LiteralPath $root -Filter '*.json' -File -ErrorAction SilentlyContinue) {
             try {
-                $queued = Get-Content -Raw -LiteralPath $requestFile.FullName | ConvertFrom-Json
+                $queued = Get-Content -Raw -LiteralPath $requestFile.FullName -Encoding UTF8 | ConvertFrom-Json
                 if ([string]$queued.Payload.PayloadId -match '^[A-Fa-f0-9]{64}$') {
                     [void]$protected.Add(([string]$queued.Payload.PayloadId).ToUpperInvariant())
                 }
@@ -1055,7 +1055,7 @@ function Get-ProtectedPayloadIds {
     }
     foreach ($leaseFile in Get-ChildItem -LiteralPath $payloadLeasePath -Filter '*.json' -File -ErrorAction SilentlyContinue) {
         try {
-            $lease = Get-Content -Raw -LiteralPath $leaseFile.FullName | ConvertFrom-Json
+            $lease = Get-Content -Raw -LiteralPath $leaseFile.FullName -Encoding UTF8 | ConvertFrom-Json
             if ([string]$lease.PayloadId -match '^[A-Fa-f0-9]{64}$') {
                 [void]$protected.Add(([string]$lease.PayloadId).ToUpperInvariant())
             }
@@ -1087,7 +1087,7 @@ function Invoke-PayloadCacheGarbageCollection {
     Recover-OrphanedPayloadChildren -VmName $VmName -ClientSid ([string]$Config.ClientSid)
     foreach ($leaseFile in Get-ChildItem -LiteralPath $payloadLeasePath -Filter '*.json' -File -ErrorAction SilentlyContinue) {
         try {
-            $lease = Get-Content -Raw -LiteralPath $leaseFile.FullName | ConvertFrom-Json
+            $lease = Get-Content -Raw -LiteralPath $leaseFile.FullName -Encoding UTF8 | ConvertFrom-Json
             $requestId = [string]$lease.RequestId
             $requestActive = (Test-Path -LiteralPath (Join-Path $requestPath ($requestId + '.json')) -PathType Leaf) -or
                 (Test-Path -LiteralPath (Join-Path $processingPath ($requestId + '.json')) -PathType Leaf)
@@ -1116,7 +1116,7 @@ function Invoke-PayloadCacheGarbageCollection {
         $lastAccessUtc = $entry.LastWriteTimeUtc
         try {
             if (Test-Path -LiteralPath $metadataPath -PathType Leaf) {
-                $entryMetadata = Get-Content -Raw -LiteralPath $metadataPath | ConvertFrom-Json
+                $entryMetadata = Get-Content -Raw -LiteralPath $metadataPath -Encoding UTF8 | ConvertFrom-Json
                 $lastAccessUtc = [DateTime]::Parse([string]$entryMetadata.LastAccessUtc).ToUniversalTime()
             }
         }

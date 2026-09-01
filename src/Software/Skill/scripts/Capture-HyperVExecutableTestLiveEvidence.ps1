@@ -93,7 +93,7 @@ do {
         try {
             $responseItem = Get-Item -LiteralPath $responsePath -Force
             if ($responseItem.Length -le 0 -or $responseItem.Length -gt 1MB) { throw 'The live-evidence broker response exceeded its size bound.' }
-            $response = Get-Content -LiteralPath $responsePath -Raw | ConvertFrom-Json -ErrorAction Stop
+            $response = Get-Content -LiteralPath $responsePath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
             if (-not [string]::Equals([string]$response.CaptureId, $captureId, [StringComparison]::Ordinal) -or
                 -not [string]::Equals([string]$response.RequestId, $RequestId, [StringComparison]::Ordinal)) {
                 throw 'The live-evidence broker response does not match the submitted capture identity.'

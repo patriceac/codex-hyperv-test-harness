@@ -8,7 +8,7 @@ function Resolve-HyperVBrokerRoot {
     $pointerPath = 'C:\ProgramData\CodexHyperVBroker\location.json'
     if (Test-Path -LiteralPath $pointerPath -PathType Leaf) {
         try {
-            $pointer = Get-Content -LiteralPath $pointerPath -Raw | ConvertFrom-Json
+            $pointer = Get-Content -LiteralPath $pointerPath -Raw -Encoding UTF8 | ConvertFrom-Json
             if (-not [string]::IsNullOrWhiteSpace([string]$pointer.BrokerRoot)) {
                 return [IO.Path]::GetFullPath([string]$pointer.BrokerRoot)
             }

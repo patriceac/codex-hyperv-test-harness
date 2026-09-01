@@ -47,8 +47,16 @@ if (-not [bool]$acceptancePreview.Success -or
     (Test-Path -LiteralPath $probeRoot)) {
     throw 'Acceptance invocation preflight was not successful and mutation-free.'
 }
-if ((@($acceptancePreview.TestNames) -join ',') -ne 'LegacyLaunch,KeyboardInput,ExpectedGuestPowerOff') {
-    throw 'Release acceptance does not contain the exact three required paths in order.'
+if ((@($acceptancePreview.TestNames) -join ',') -ne 'LegacyLaunch,Utf8ActionName,KeyboardInput,ExpectedGuestPowerOff') {
+    throw 'Release acceptance does not contain the exact four required paths in order.'
+}
+$utf8Invocation = @($acceptancePreview.Invocations | Where-Object Name -eq 'Utf8ActionName')[0].Parameters
+if ([string]$utf8Invocation.ActionsPath -notlike '*release-utf8-actions.json' -or
+    [string]$utf8Invocation.AssertResultFile -ne '{OUTDIR}\utf8-action-result.json' -or
+    [string]$utf8Invocation.AssertResultJsonPointer -ne '/passed' -or
+    [string]$utf8Invocation.AssertResultEqualsJson -ne 'true' -or
+    -not $utf8Invocation.ContainsKey('ThrowOnFailure')) {
+    throw 'UTF-8 action acceptance is not bound to its exact named-control assertion and throwable failure.'
 }
 $keyboardInvocation = @($acceptancePreview.Invocations | Where-Object Name -eq 'KeyboardInput')[0].Parameters
 if ([string]$keyboardInvocation.AssertResultJsonPointer -ne '/passed' -or
@@ -70,7 +78,7 @@ if ($acceptanceSource -match '\.Parameters\.ActionsPath' -or
     $acceptanceSource -notmatch "Parameters\['ActionsPath'\]") {
     throw "Release acceptance does not handle the expected-power-off test's absent optional ActionsPath safely."
 }
-$scenarios.Add('three-path-isolated-acceptance-is-exactly-bound')
+$scenarios.Add('four-path-isolated-acceptance-is-exactly-bound')
 
 if ($acceptanceSource -notmatch "Invoke-PoolAuditUnderMaintenance -Name 'pre-acceptance-audit'" -or
     $acceptanceSource -notmatch "Invoke-PoolAuditUnderMaintenance -Name 'post-acceptance-audit'" -or
@@ -98,7 +106,24 @@ if ($poolBrokerSource -notmatch '\$maintenanceGcState\.Status -eq ''Completed'''
 }
 $scenarios.Add('strict-release-audits-use-maintenance-drain-and-immediate-acl-cleanup')
 
-$parsedKeyboardActions = Get-Content -LiteralPath (Join-Path $softwareRoot 'Canaries\release-keyboard-actions.json') -Raw | ConvertFrom-Json
+$parsedUtf8Actions = Get-Content -LiteralPath (Join-Path $softwareRoot 'Canaries\release-utf8-actions.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+$utf8Actions = @()
+foreach ($parsedUtf8Action in $parsedUtf8Actions) { $utf8Actions += $parsedUtf8Action }
+$utf8ClickActions = @($utf8Actions | Where-Object type -eq 'click_control')
+$accentedControlName = 'Approuver le pilote et d' + [char]0x00E9 + 'bloquer la file'
+if ($utf8ClickActions.Count -ne 1 -or
+    [string]$utf8ClickActions[0].name -cne $accentedControlName -or
+    $utf8ClickActions[0].PSObject.Properties.Name -contains 'automationId') {
+    throw 'UTF-8 release actions do not request the exact accented UI Automation Name without AutomationId.'
+}
+if ($acceptanceSource -notmatch 'RequestedAutomationId' -or
+    $acceptanceSource -notmatch 'MatchedName' -or
+    $acceptanceSource -notmatch 'clickedControlName') {
+    throw 'UTF-8 release acceptance does not bind selector evidence to the application click marker.'
+}
+$scenarios.Add('utf8-proof-clicks-exact-accented-name-without-automation-id')
+
+$parsedKeyboardActions = Get-Content -LiteralPath (Join-Path $softwareRoot 'Canaries\release-keyboard-actions.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 $keyboardActions = @($parsedKeyboardActions)
 if ((@($keyboardActions.type) -join ',') -ne 'wait_window,screenshot,send_keys,screenshot,wait_result_file') {
     throw 'Keyboard release actions do not preserve before/input/after/result ordering.'
