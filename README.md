@@ -4,6 +4,19 @@ A source-only, recoverable backend for testing Windows executables in isolated H
 
 The repository contains the broker, guest agent, elastic pool of up to four VMs, immutable payload-VHDX cache, disposable differencing-disk lifecycle, evidence capture, read-only host-input transport, runtime Codex skill, and rebuild automation. It deliberately contains **no Windows image, VM disk, credential, executable build output, or activation material**.
 
+## Capabilities at a glance
+
+| Area | Current contract |
+|---|---|
+| [Isolated native execution](docs/architecture.md) | An ACL-protected SYSTEM broker queues canonical artifacts into an elastic pool of zero to four disposable Windows 11 workers. Immutable payload parents and per-run differencing children preserve the caller's files, support concurrent reuse, and are detached and deleted during cleanup. |
+| [Desktop automation](src/Software/Skill/SKILL.md#run-an-artifact) | Window wait/focus, UI Automation click by `AutomationId` or exact Unicode `Name`, verified relative click, text entry, allowlisted single-key/chord input, result-file and process-exit waits, JSON assertions, and screenshots. Request and action JSON uses explicit UTF-8 across the supported PowerShell 7 client to Windows PowerShell 5.1 broker/guest path. |
+| [Live and terminal evidence](src/Software/Skill/SKILL.md#observe-a-running-request-without-changing-it) | Terminal results separate harness success from application-test success and record action, process-cleanup, payload, VM, network, and evidence state. A running request can provide a fresh screenshot plus explicitly allowlisted small `{OUTDIR}` files without changing its deadline or substituting stale evidence. |
+| [Read-only host inputs](docs/security-model.md#trust-boundaries) | A caller-selected local file or directory can be exposed to one VM request through a scoped read-only Share or immutable VHDX transport. The broker owns teardown; combining host inputs with general networking requires an explicit acknowledgement and VHDX isolation. |
+| [Request networking](docs/request-networking.md) | `None` remains the disconnected default. `IsolatedTestNet`, `InternetOnly`, and `TrustedLan` are explicit broker-authorized profiles with fail-closed versioning, pinned infrastructure, attestation, continuous policy checks, and disconnect-first cleanup; externally connected profiles remain disabled until separately configured and live-verified. |
+| [Guarded physical-host control](src/Software/Skill/references/host-control.md) | Only an explicit override for one named artifact/test enables the unprivileged interactive-host runner. Its fuchsia warning frame, physical-input pause/resume, `Escape` cancellation, focus verification, evidence, and process cleanup reduce accidental interference but provide none of the VM isolation guarantees. |
+| [Intentional guest power-off](docs/testing.md#expected-power-off-contract) | An opt-in request may prove an application-era guest shutdown after an atomic result marker. The broker tears down networking, performs one networkless evidence-recovery boot, rejects post-boot markers, and never resubmits the job or relaunches the application. |
+| [Release, maintenance, and recovery](docs/maintenance.md) | Immutable reviewed plans, resumable checkpoints, deterministic and isolated acceptance, transactional image maintenance, one final recovery refresh, retained previous recovery generation, and a source-only GitHub cold-rebuild path keep expensive work auditable and recoverable. |
+
 ## Choose the faithful test boundary
 
 Use a browser first for a pure web application when browser automation can faithfully exercise the requested behavior. Use this Hyper-V harness for native shells, tray behavior, installers, WebView2, Windows integration, or proof of a VM network boundary. Electron remains a native-shell test even when its content is web-based.
@@ -88,7 +101,7 @@ Windows activation and licensing are intentionally outside this project. The gue
 
 ## Deploy an ordinary software release
 
-For an existing installation, use the resumable [harness release controller](docs/deployment.md) instead of manually chaining source refresh, guest-baseline replacement, acceptance, and recovery commands. It binds a clean commit and installed configuration into an immutable PlanOnly result, applies through one elevated state machine, runs four isolated acceptance paths, and refreshes the large local recovery bundle once at the end. Image servicing, networking changes, first installation, and `ForceRebuild` remain separate reviewed workflows.
+For an existing installation, use the resumable [harness release controller](docs/deployment.md) instead of manually chaining source refresh, guest-baseline replacement, acceptance, and recovery commands. It binds a clean commit and installed configuration into an immutable PlanOnly result, applies through one elevated state machine, and runs four isolated acceptance paths: legacy launch, an accented UI Automation `Name` click without an `AutomationId`, screenshot-backed `WIN+LEFT` keyboard input, and expected guest power-off with no replay. Source qualification also proves that a BOM-less PowerShell 7 request containing accented text is read correctly by Windows PowerShell 5.1. The controller refreshes and verifies the large local recovery bundle once at the end. Image servicing, networking changes, first installation, and `ForceRebuild` remain separate reviewed workflows.
 
 ## Reference profile and compatibility defaults
 
@@ -149,7 +162,7 @@ src/Software/Recovery/                 fast local recovery generator and install
 docs/                                  architecture, security, recovery, maintenance, diagnosis
 ```
 
-Start with [Disaster recovery](docs/disaster-recovery.md), [Software releases](docs/deployment.md), [Architecture](docs/architecture.md), [Payload-cache performance](docs/payload-cache.md), [Security model](docs/security-model.md), and [Testing/provenance](docs/testing.md).
+Start with [Disaster recovery](docs/disaster-recovery.md), [Software releases](docs/deployment.md), [Maintenance](docs/maintenance.md), [Architecture](docs/architecture.md), [Request networking](docs/request-networking.md), [Payload-cache performance](docs/payload-cache.md), [Security model](docs/security-model.md), [Host control](src/Software/Skill/references/host-control.md), and [Testing/provenance](docs/testing.md).
 
 ## Public-release guardrail
 
