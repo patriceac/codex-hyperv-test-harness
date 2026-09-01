@@ -1023,7 +1023,11 @@ for ($actionIndex = 0; $actionIndex -lt $actions.Count; $actionIndex++) {
         'focus_window' {
         }
         'click_control' {
-            if ([string]::IsNullOrWhiteSpace([string]$action.automationId) -and [string]::IsNullOrWhiteSpace([string]$action.name)) {
+            $automationIdProperty = $action.PSObject.Properties['automationId']
+            $nameProperty = $action.PSObject.Properties['name']
+            $requestedAutomationId = if ($automationIdProperty) { [string]$automationIdProperty.Value } else { $null }
+            $requestedName = if ($nameProperty) { [string]$nameProperty.Value } else { $null }
+            if ([string]::IsNullOrWhiteSpace($requestedAutomationId) -and [string]::IsNullOrWhiteSpace($requestedName)) {
                 throw "Action $($actionIndex + 1) click_control requires automationId or name."
             }
             $timeout = if ($action.timeoutMs) { [int]$action.timeoutMs } else { 10000 }

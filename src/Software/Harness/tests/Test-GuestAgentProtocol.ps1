@@ -20,6 +20,7 @@ function Import-GuestFunction {
 }
 
 foreach ($name in @(
+    'Get-GuestOptionalPropertyValue',
     'Write-JsonAtomic',
     'Write-AgentState',
     'Resolve-GuestOutputPath',
@@ -53,6 +54,12 @@ $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('codex-guest-protocol-' + [Gui
 New-Item -ItemType Directory -Force -Path $testRoot | Out-Null
 $scenarios = New-Object Collections.Generic.List[string]
 try {
+    $accentedControlName = 'Approuver le pilote et d' + [char]0x00E9 + 'bloquer la file'
+    $nameOnlyAction = [pscustomobject]@{ name = $accentedControlName }
+    Assert-True ($null -eq (Get-GuestOptionalPropertyValue -InputObject $nameOnlyAction -PropertyName 'automationId')) 'A missing optional AutomationId did not resolve to null.'
+    Assert-True ([string](Get-GuestOptionalPropertyValue -InputObject $nameOnlyAction -PropertyName 'name') -ceq $accentedControlName) 'The accented optional Name selector did not round-trip exactly.'
+    $scenarios.Add('name-only-action-selector-is-missing-safe')
+
     $resultPath = Join-Path $testRoot 'result.json'
     [ordered]@{ passed = $true; nested = [ordered]@{ 'a/b' = @(1, 2, 3) } } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $resultPath -Encoding UTF8
 

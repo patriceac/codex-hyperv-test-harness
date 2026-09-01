@@ -75,8 +75,10 @@ $scenarios.Add('release-fixture-uses-accented-name-without-automation-id')
 
 $guestAgentSource = Get-Content -LiteralPath $guestAgentPath -Raw -Encoding UTF8
 $canarySource = Get-Content -LiteralPath $canaryPath -Raw -Encoding UTF8
-Assert-True ($guestAgentSource.Contains('RequestedAutomationId = [string]$action.automationId') -and
-    $guestAgentSource.Contains('RequestedName = [string]$action.name') -and
+Assert-True ($guestAgentSource.Contains("Get-GuestOptionalPropertyValue -InputObject `$action -PropertyName 'automationId'") -and
+    $guestAgentSource.Contains("Get-GuestOptionalPropertyValue -InputObject `$action -PropertyName 'name'") -and
+    $guestAgentSource.Contains('RequestedAutomationId = $requestedAutomationId') -and
+    $guestAgentSource.Contains('RequestedName = $requestedName') -and
     $guestAgentSource.Contains('MatchedName = $matchedName')) 'Guest click evidence does not record requested and matched UI Automation selectors.'
 Assert-True ($canarySource.Contains('Approuver le pilote et d\u00E9bloquer la file') -and
     $canarySource.Contains('require-click') -and
@@ -85,6 +87,7 @@ $scenarios.Add('guest-and-canary-publish-name-click-evidence')
 
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('codex-utf8-action-' + [Guid]::NewGuid().ToString('N'))
 $producer = $null
+$desktopProducer = $null
 try {
     foreach ($relative in @('Requests', 'Processing', 'Results', 'PayloadManifests', 'PayloadCache', 'Cancellations', 'Cancelled')) {
         New-Item -ItemType Directory -Force -Path (Join-Path $testRoot $relative) | Out-Null
@@ -162,6 +165,42 @@ if (`$clicks.Count -ne 1 -or [string]`$clicks[0].name -cne `$expected -or `$clic
     & $desktopPowerShellPath -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedConsumer
     if ($LASTEXITCODE -ne 0) { throw "Windows PowerShell 5.1 consumer rejected the queued UTF-8 action request with exit code $LASTEXITCODE." }
     $scenarios.Add('bomless-request-roundtrips-through-windows-powershell-51')
+
+    $desktopRoot = Join-Path $testRoot 'windows-powershell-runner'
+    foreach ($relative in @('Requests', 'Processing', 'Results', 'PayloadManifests', 'PayloadCache', 'Cancellations', 'Cancelled')) {
+        New-Item -ItemType Directory -Force -Path (Join-Path $desktopRoot $relative) | Out-Null
+    }
+    $desktopProducerInfo = New-Object Diagnostics.ProcessStartInfo
+    $desktopProducerInfo.FileName = $desktopPowerShellPath
+    $desktopProducerInfo.Arguments = @(
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-File', (Quote-ProcessArgument $runnerPath),
+        '-ArtifactPath', (Quote-ProcessArgument $artifactPath),
+        '-ActionsPath', (Quote-ProcessArgument $bomlessActionsPath),
+        '-BrokerRoot', (Quote-ProcessArgument $desktopRoot),
+        '-QueueTimeoutSeconds', '300',
+        '-ExecutionTimeoutSeconds', '60'
+    ) -join ' '
+    $desktopProducerInfo.UseShellExecute = $false
+    $desktopProducerInfo.CreateNoWindow = $true
+    $desktopProducer = [Diagnostics.Process]::Start($desktopProducerInfo)
+
+    $desktopQueuedFile = $null
+    $desktopDeadline = [DateTime]::UtcNow.AddSeconds(30)
+    while ([DateTime]::UtcNow -lt $desktopDeadline) {
+        $desktopQueuedFile = Get-ChildItem -LiteralPath (Join-Path $desktopRoot 'Requests') -Filter '*.json' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($desktopQueuedFile) { break }
+        $desktopProducer.Refresh()
+        if ($desktopProducer.HasExited) { throw "Windows PowerShell 5.1 runner exited before accepting the name-only action: $($desktopProducer.ExitCode)" }
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not $desktopQueuedFile) { throw 'Windows PowerShell 5.1 runner did not queue the name-only action request.' }
+    $desktopRequest = Get-Content -LiteralPath $desktopQueuedFile.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
+    $desktopClicks = @($desktopRequest.Job.actions | Where-Object { [string]$_.type -eq 'click_control' })
+    Assert-True ($desktopClicks.Count -eq 1 -and
+        [string]$desktopClicks[0].name -ceq $accentedControlName -and
+        $desktopClicks[0].PSObject.Properties.Name -notcontains 'automationId') 'Windows PowerShell 5.1 did not accept the exact name-only click_control action.'
+    $scenarios.Add('windows-powershell-51-runner-accepts-name-only-click-control')
 }
 finally {
     if ($producer) {
@@ -172,6 +211,15 @@ finally {
         }
         catch { }
         $producer.Dispose()
+    }
+    if ($desktopProducer) {
+        try {
+            $desktopProducer.Refresh()
+            if (-not $desktopProducer.HasExited) { $desktopProducer.Kill() }
+            [void]$desktopProducer.WaitForExit(5000)
+        }
+        catch { }
+        $desktopProducer.Dispose()
     }
     if (Test-Path -LiteralPath $testRoot -PathType Container) {
         Remove-Item -LiteralPath $testRoot -Recurse -Force

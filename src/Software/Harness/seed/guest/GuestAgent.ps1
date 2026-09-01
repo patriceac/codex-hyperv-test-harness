@@ -192,6 +192,18 @@ foreach ($path in @($inboxPath, $processingPath, $completedPath, $outboxPath)) {
     New-Item -ItemType Directory -Force -Path $path | Out-Null
 }
 
+function Get-GuestOptionalPropertyValue {
+    param(
+        $InputObject,
+        [Parameter(Mandatory = $true)] [string] $PropertyName
+    )
+
+    if ($null -eq $InputObject) { return $null }
+    $property = $InputObject.PSObject.Properties[$PropertyName]
+    if ($null -eq $property) { return $null }
+    $property.Value
+}
+
 function Write-JsonAtomic {
     param(
         [Parameter(Mandatory = $true)] [string] $Path,
@@ -1754,17 +1766,19 @@ function Invoke-GuestJob {
                             $windowHandle = Wait-MainWindow -Process $process
                         }
                         Focus-Window -WindowHandle $windowHandle
+                        $requestedAutomationId = [string](Get-GuestOptionalPropertyValue -InputObject $action -PropertyName 'automationId')
+                        $requestedName = [string](Get-GuestOptionalPropertyValue -InputObject $action -PropertyName 'name')
                         $element = Find-AutomationElement `
                             -WindowHandle $windowHandle `
-                            -AutomationId ([string]$action.automationId) `
-                            -Name ([string]$action.name) `
+                            -AutomationId $requestedAutomationId `
+                            -Name $requestedName `
                             -TimeoutMilliseconds $(if ($action.timeoutMs) { [int]$action.timeoutMs } else { 10000 })
                         $matchedAutomationId = [string]$element.Current.AutomationId
                         $matchedName = [string]$element.Current.Name
                         Click-AutomationElement -Element $element
                         $actionDetails = [ordered]@{
-                            RequestedAutomationId = [string]$action.automationId
-                            RequestedName = [string]$action.name
+                            RequestedAutomationId = $requestedAutomationId
+                            RequestedName = $requestedName
                             MatchedAutomationId = $matchedAutomationId
                             MatchedName = $matchedName
                             TargetWindowHandle = $windowHandle.ToInt64()
