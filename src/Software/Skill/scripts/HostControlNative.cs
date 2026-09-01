@@ -38,7 +38,9 @@ namespace Codex.HostControl
     {
         private static readonly double[] HaloBandBaseOpacity = new double[] { 0.96, 0.52, 0.30, 0.17, 0.10, 0.05 };
         private static readonly double[] ControlledWindowBandBaseOpacity = new double[] { 0.96, 0.24, 0.07 };
-        public const int InitialWarningSeconds = 5;
+        public const int InitialWarningSeconds = 6;
+        public const int InitialInputIgnoreSeconds = 3;
+        public const int InitialInputPauseEligibleSeconds = InitialWarningSeconds - InitialInputIgnoreSeconds;
         public const int ResumeIdleSeconds = 10;
         public const int CancelVirtualKey = 0x1B;
         public const ulong SyntheticInputMarker64 = 0x434F444558484F53UL;
@@ -88,6 +90,11 @@ namespace Codex.HostControl
         public static bool ShouldPauseForPhysicalInput(bool pauseDetectionArmed, long currentVersion, long observedVersion)
         {
             return pauseDetectionArmed && HasUnobservedPhysicalInput(currentVersion, observedVersion);
+        }
+
+        public static bool ShouldShowControlledWindowHighlight(bool visualGuardsVisible, bool targetWindowUsable, bool targetProcessOwnsForeground)
+        {
+            return visualGuardsVisible && targetWindowUsable && targetProcessOwnsForeground;
         }
 
         public static double GetHaloBandOpacity(int bandIndex, double intensity)
@@ -416,6 +423,17 @@ namespace Codex.HostControl
             return Rectangle.FromLTRB(rectangle.Left, rectangle.Top, rectangle.Right, rectangle.Bottom);
         }
 
+        public static bool DoesWindowProcessOwnForeground(IntPtr window)
+        {
+            if (!IsUsable(window))
+            {
+                return false;
+            }
+            int targetProcessId = GetProcessId(window);
+            int foregroundProcessId = GetForegroundProcessId();
+            return targetProcessId != 0 && targetProcessId == foregroundProcessId;
+        }
+
         public static bool TryGetVisibleBounds(IntPtr window, out Rectangle bounds)
         {
             bounds = Rectangle.Empty;
@@ -687,9 +705,9 @@ namespace Codex.HostControl
             }
             foreach (ControlledWindowBandForm form in _controlledWindowForms)
             {
-                form.Visible = visible && HostWindowControl.IsUsable(_controlledWindow);
+                form.Visible = false;
             }
-            if (!visible) _controlledWindowHighlightVisible = false;
+            _controlledWindowHighlightVisible = false;
             if (visible)
             {
                 UpdateControlledWindowForms();
@@ -804,7 +822,9 @@ namespace Codex.HostControl
         private void UpdateControlledWindowForms()
         {
             Rectangle bounds;
-            if (!_visible || !HostWindowControl.TryGetVisibleBounds(_controlledWindow, out bounds) ||
+            bool targetWindowUsable = HostWindowControl.TryGetVisibleBounds(_controlledWindow, out bounds);
+            bool targetProcessOwnsForeground = targetWindowUsable && HostWindowControl.DoesWindowProcessOwnForeground(_controlledWindow);
+            if (!HostControlContract.ShouldShowControlledWindowHighlight(_visible, targetWindowUsable, targetProcessOwnsForeground) ||
                 bounds.Width <= HostControlContract.ControlledWindowFrameThicknessPixels * 2 ||
                 bounds.Height <= HostControlContract.ControlledWindowFrameThicknessPixels * 2)
             {

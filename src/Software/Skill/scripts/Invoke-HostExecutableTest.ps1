@@ -15,7 +15,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$initialWarningSeconds = 5
+$initialWarningSeconds = 6
+$initialInputIgnoreSeconds = 3
+$initialInputPauseEligibleSeconds = $initialWarningSeconds - $initialInputIgnoreSeconds
 $resumeIdleSeconds = 10
 $haloFrameThicknessPixels = 12
 $controlledWindowHighlightFrameThicknessPixels = 6
@@ -377,7 +379,7 @@ function Restore-ControlledWindowFocus {
 }
 
 function Wait-ForHostControlReady {
-    param([switch] $RefocusAfterResume)
+    param([switch] $RefocusAfterResume, [switch] $ResumeToWarning)
 
     $snapshot = Throw-IfHostControlCancelled
     Update-ControlledWindowHighlight
@@ -400,29 +402,35 @@ function Wait-ForHostControlReady {
     if ($RefocusAfterResume -and $script:rootProcess) {
         if (Restore-ControlledWindowFocus) { $script:focusRestoreCount++ }
     }
-    $script:runtime.SetState([Codex.HostControl.HaloState]::Active)
+    $resumeState = if ($ResumeToWarning) { [Codex.HostControl.HaloState]::Warning } else { [Codex.HostControl.HaloState]::Active }
+    $script:runtime.SetState($resumeState)
     $script:totalPausedMilliseconds += [long]([DateTime]::UtcNow - $pauseStarted).TotalMilliseconds
     $true
 }
 
 function Wait-InitialHostControlWarning {
     $script:runtime.SetState([Codex.HostControl.HaloState]::Warning)
-    $deadline = [DateTime]::UtcNow.AddSeconds($initialWarningSeconds)
-    while ([DateTime]::UtcNow -lt $deadline) {
+    $ignoreDeadline = [DateTime]::UtcNow.AddSeconds($initialInputIgnoreSeconds)
+    while ([DateTime]::UtcNow -lt $ignoreDeadline) {
         $null = Throw-IfHostControlCancelled
         Start-Sleep -Milliseconds 50
     }
     $snapshot = Throw-IfHostControlCancelled
     $script:observedPhysicalInputVersion = [long]$snapshot.PhysicalInputVersion
-    $script:runtime.SetState([Codex.HostControl.HaloState]::Active)
     $script:pauseDetectionArmed = $true
+    Wait-HostControlDelay -Milliseconds ($initialInputPauseEligibleSeconds * 1000) -ResumeToWarning
+    $script:runtime.SetState([Codex.HostControl.HaloState]::Active)
 }
 
 function Wait-HostControlDelay {
-    param([ValidateRange(0, 7200000)] [int64] $Milliseconds, [switch] $RefocusAfterResume)
+    param(
+        [ValidateRange(0, 7200000)] [int64] $Milliseconds,
+        [switch] $RefocusAfterResume,
+        [switch] $ResumeToWarning
+    )
     $remaining = [int64]$Milliseconds
     while ($remaining -gt 0) {
-        $paused = Wait-ForHostControlReady -RefocusAfterResume:$RefocusAfterResume
+        $paused = Wait-ForHostControlReady -RefocusAfterResume:$RefocusAfterResume -ResumeToWarning:$ResumeToWarning
         if ($paused) { continue }
         $before = Throw-IfHostControlCancelled
         $slice = [int][Math]::Min(100, $remaining)
@@ -693,11 +701,13 @@ Assert-HostActions -Actions $actions
 
 $contract = [ordered]@{
     InitialWarningSeconds = $initialWarningSeconds
+    InitialInputIgnoreSeconds = $initialInputIgnoreSeconds
+    InitialInputPauseEligibleSeconds = $initialInputPauseEligibleSeconds
     ResumeIdleSeconds = $resumeIdleSeconds
     CancelKey = 'Escape'
     ActiveHaloColor = '#F000FF'
     ControlledWindowHighlightColor = '#B86CFF'
-    InitialGraceInputBehavior = 'IgnoreForPause'
+    InitialGraceInputBehavior = 'IgnoreThenPauseImmediately'
     PostGraceInputBehavior = 'PauseImmediately'
     ResumeBehavior = 'RefocusThenContinue'
     HaloRendering = 'ContinuousNonOverlappingBands'
@@ -705,6 +715,7 @@ $contract = [ordered]@{
     ControlledWindowHighlightRendering = 'RoundedInwardNonOverlappingBands'
     ControlledWindowHighlightFrameThicknessPixels = $controlledWindowHighlightFrameThicknessPixels
     ControlledWindowHighlightPauseBehavior = 'Dim'
+    ControlledWindowHighlightBackgroundBehavior = 'Hidden'
     VisualCoordinateSpace = 'PerMonitorV2PhysicalPixels'
     ExecutionTarget = 'PhysicalHost'
 }
@@ -712,6 +723,8 @@ $isValidationOnly = [bool]$ValidateOnly
 if (-not $isValidationOnly) { Assert-InteractiveHostSession }
 Import-HostControlNative
 if ([Codex.HostControl.HostControlContract]::InitialWarningSeconds -ne $initialWarningSeconds -or
+    [Codex.HostControl.HostControlContract]::InitialInputIgnoreSeconds -ne $initialInputIgnoreSeconds -or
+    [Codex.HostControl.HostControlContract]::InitialInputPauseEligibleSeconds -ne $initialInputPauseEligibleSeconds -or
     [Codex.HostControl.HostControlContract]::ResumeIdleSeconds -ne $resumeIdleSeconds -or
     [Codex.HostControl.HostControlContract]::HaloFrameThicknessPixels -ne $haloFrameThicknessPixels -or
     [Codex.HostControl.HostControlContract]::ControlledWindowFrameThicknessPixels -ne $controlledWindowHighlightFrameThicknessPixels) {
@@ -760,7 +773,7 @@ try {
     $script:runtime = New-Object Codex.HostControl.HostControlRuntime
     $initialSnapshot = $script:runtime.GetSnapshot()
     $script:observedPhysicalInputVersion = [long]$initialSnapshot.PhysicalInputVersion
-    Write-Host "Host control armed for '$($artifact.Name)'. The fuchsia screen halo is visible; a violet inward outline will identify the controlled app after its window appears. Control begins in five seconds. Mouse and keyboard activity will not pause this grace period; press Escape to cancel."
+    Write-Host "Host control armed for '$($artifact.Name)'. The fuchsia screen halo is visible; a violet inward outline will identify the controlled app after its window appears. Control begins after six seconds of unpaused countdown. Mouse and keyboard activity is ignored for the first three seconds; during the final three seconds it pauses the countdown and turns the screen halo amber. Press Escape to cancel."
     Wait-InitialHostControlWarning
     $null = Wait-ForHostControlReady
 
@@ -917,17 +930,20 @@ $result = [ordered]@{
     ResultPath = $outputRoot
     HostControl = [ordered]@{
         InitialWarningSeconds = $initialWarningSeconds
+        InitialInputIgnoreSeconds = $initialInputIgnoreSeconds
+        InitialInputPauseEligibleSeconds = $initialInputPauseEligibleSeconds
         ResumeIdleSeconds = $resumeIdleSeconds
         CancelKey = 'Escape'
         ActiveHaloColor = '#F000FF'
         ControlledWindowHighlightColor = '#B86CFF'
-        InitialGraceInputBehavior = 'IgnoreForPause'
+        InitialGraceInputBehavior = 'IgnoreThenPauseImmediately'
         PostGraceInputBehavior = 'PauseImmediately'
         HaloRendering = 'ContinuousNonOverlappingBands'
         HaloFrameThicknessPixels = [Codex.HostControl.HostControlContract]::HaloFrameThicknessPixels
         ControlledWindowHighlightRendering = 'RoundedInwardNonOverlappingBands'
         ControlledWindowHighlightFrameThicknessPixels = [Codex.HostControl.HostControlContract]::ControlledWindowFrameThicknessPixels
         ControlledWindowHighlightPauseBehavior = 'Dim'
+        ControlledWindowHighlightBackgroundBehavior = 'Hidden'
         ControlledWindowHighlightEverShown = if ($effectiveSnapshot) { [bool]$effectiveSnapshot.ControlledWindowHighlightEverShown } else { $false }
         VisualCoordinateSpace = 'PerMonitorV2PhysicalPixels'
         UiThreadPerMonitorV2DpiAware = if ($effectiveSnapshot) { [bool]$effectiveSnapshot.UiThreadPerMonitorV2DpiAware } else { $false }
