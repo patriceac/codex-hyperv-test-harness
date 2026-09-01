@@ -227,19 +227,10 @@ function Install-ManagedPolicyBlock {
     if ($SkipGlobalPolicy) { return $null }
     $blockPath = Join-Path $installedSetup 'AGENTS.block.md'
     $agentsPath = Join-Path $TargetUserProfile '.codex\AGENTS.md'
-    $block = (Get-Content -LiteralPath $blockPath -Raw).Trim()
-    $startMarker = '<!-- BEGIN CODEX HYPERV TEST HARNESS -->'
-    $endMarker = '<!-- END CODEX HYPERV TEST HARNESS -->'
-    $existing = if (Test-Path -LiteralPath $agentsPath -PathType Leaf) { Get-Content -LiteralPath $agentsPath -Raw } else { '' }
-    $pattern = [regex]::Escape($startMarker) + '.*?' + [regex]::Escape($endMarker)
-    if ([regex]::IsMatch($existing, $pattern, [Text.RegularExpressions.RegexOptions]::Singleline)) {
-        $updated = [regex]::Replace($existing, $pattern, [Text.RegularExpressions.MatchEvaluator]{ param($match) $block }, [Text.RegularExpressions.RegexOptions]::Singleline)
-    }
-    else {
-        $updated = $existing.TrimEnd() + $(if ([string]::IsNullOrWhiteSpace($existing)) { '' } else { "`r`n`r`n" }) + $block + "`r`n"
-    }
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $agentsPath) | Out-Null
-    [IO.File]::WriteAllText($agentsPath, $updated, (New-Object Text.UTF8Encoding($false)))
+    $policyHelperPath = Join-Path $installedSoftware 'Common\CodexManagedPolicy.ps1'
+    if (-not (Test-Path -LiteralPath $policyHelperPath -PathType Leaf)) { throw "Managed policy helper is missing: $policyHelperPath" }
+    . $policyHelperPath
+    Set-CodexManagedPolicyBlock -PolicyPath $blockPath -AgentsPath $agentsPath | Out-Null
     $agentsPath
 }
 

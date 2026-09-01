@@ -163,20 +163,10 @@ function Install-CodexUserIntegration {
 
     $agentsSource = Join-Path $BundleRoot 'Codex\AGENTS.md'
     $agentsDestination = Join-Path $TargetUserProfile '.codex\AGENTS.md'
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $agentsDestination) | Out-Null
-    $block = (Get-Content -LiteralPath $agentsSource -Raw).Trim()
-    $existing = if (Test-Path -LiteralPath $agentsDestination -PathType Leaf) { Get-Content -LiteralPath $agentsDestination -Raw } else { '' }
-    $startMarker = '<!-- BEGIN CODEX HYPERV TEST HARNESS -->'
-    $endMarker = '<!-- END CODEX HYPERV TEST HARNESS -->'
-    $pattern = [regex]::Escape($startMarker) + '.*?' + [regex]::Escape($endMarker)
-    if ([regex]::IsMatch($existing, $pattern, [Text.RegularExpressions.RegexOptions]::Singleline)) {
-        $updated = [regex]::Replace($existing, $pattern, [Text.RegularExpressions.MatchEvaluator]{ param($match) $block }, [Text.RegularExpressions.RegexOptions]::Singleline)
-    }
-    else {
-        $separator = if ([string]::IsNullOrWhiteSpace($existing)) { '' } else { "`r`n`r`n" }
-        $updated = $existing.TrimEnd() + $separator + $block + "`r`n"
-    }
-    [IO.File]::WriteAllText($agentsDestination, $updated, (New-Object Text.UTF8Encoding($false)))
+    $policyHelperPath = Join-Path $softwareRoot 'Common\CodexManagedPolicy.ps1'
+    if (-not (Test-Path -LiteralPath $policyHelperPath -PathType Leaf)) { throw "Managed policy helper is missing: $policyHelperPath" }
+    . $policyHelperPath
+    Set-CodexManagedPolicyBlock -PolicyPath $agentsSource -AgentsPath $agentsDestination | Out-Null
 }
 
 function Ensure-BaselineVm {

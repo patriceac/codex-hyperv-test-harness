@@ -48,6 +48,7 @@ try {
         'manifest.json',
         'Codex\AGENTS.md',
         'Software\harness-config.json',
+        'Software\Common\CodexManagedPolicy.ps1',
         'Software\Setup\Update-RequestNetworking.ps1',
         'Software\Setup\Prepare-RequestNetworkInfrastructure.ps1',
         'Software\Harness\HostBroker.ps1',
