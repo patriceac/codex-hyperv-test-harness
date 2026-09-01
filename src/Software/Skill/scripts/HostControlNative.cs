@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
@@ -27,11 +28,15 @@ namespace Codex.HostControl
         public string CaptureProtectionMode { get; internal set; }
         public int CaptureProtectionError { get; internal set; }
         public int MonitorCount { get; internal set; }
+        public bool ControlledWindowHighlightVisible { get; internal set; }
+        public bool ControlledWindowHighlightEverShown { get; internal set; }
+        public long ControlledWindowHandle { get; internal set; }
     }
 
     public static class HostControlContract
     {
         private static readonly double[] HaloBandBaseOpacity = new double[] { 0.96, 0.52, 0.30, 0.17, 0.10, 0.05 };
+        private static readonly double[] ControlledWindowBandBaseOpacity = new double[] { 0.96, 0.24, 0.07 };
         public const int InitialWarningSeconds = 5;
         public const int ResumeIdleSeconds = 10;
         public const int CancelVirtualKey = 0x1B;
@@ -39,10 +44,16 @@ namespace Codex.HostControl
         public const uint SyntheticInputMarker32 = 0x58484F53U;
         public const string ActiveHaloHex = "#F000FF";
         public const string PausedHaloHex = "#FFB000";
+        public const string ControlledWindowHighlightHex = "#B86CFF";
         public const int HaloFrameThicknessPixels = 12;
         public const int HaloCoreThicknessPixels = 2;
         public const int HaloBandThicknessPixels = 2;
         public const int HaloBandCount = 6;
+        public const int ControlledWindowFrameThicknessPixels = 6;
+        public const int ControlledWindowCoreThicknessPixels = 2;
+        public const int ControlledWindowBandThicknessPixels = 2;
+        public const int ControlledWindowBandCount = 3;
+        public const int ControlledWindowCornerRadiusPixels = 8;
 
         public static ulong SyntheticInputMarker
         {
@@ -86,6 +97,22 @@ namespace Codex.HostControl
             }
             double clampedIntensity = Math.Max(0.0, Math.Min(1.0, intensity));
             return HaloBandBaseOpacity[bandIndex] * clampedIntensity;
+        }
+
+        public static double GetControlledWindowBandOpacity(int bandIndex, double intensity)
+        {
+            if (bandIndex < 0 || bandIndex >= ControlledWindowBandCount)
+            {
+                throw new ArgumentOutOfRangeException("bandIndex");
+            }
+            double clampedIntensity = Math.Max(0.0, Math.Min(1.0, intensity));
+            return ControlledWindowBandBaseOpacity[bandIndex] * clampedIntensity;
+        }
+
+        public static bool ShouldUseSquareControlledWindowCorners(Rectangle windowBounds, Rectangle screenBounds)
+        {
+            return windowBounds.Left <= screenBounds.Left && windowBounds.Top <= screenBounds.Top &&
+                windowBounds.Right >= screenBounds.Right && windowBounds.Bottom >= screenBounds.Bottom;
         }
 
         public static int GetResumeDelayMilliseconds(DateTime nowUtc, DateTime lastPhysicalInputUtc)
@@ -145,7 +172,10 @@ namespace Codex.HostControl
                 CaptureProtectionSucceeded = context != null && context.CaptureProtectionSucceeded,
                 CaptureProtectionMode = context == null ? "NotStarted" : context.CaptureProtectionMode,
                 CaptureProtectionError = context == null ? 0 : context.CaptureProtectionError,
-                MonitorCount = context == null ? 0 : context.MonitorCount
+                MonitorCount = context == null ? 0 : context.MonitorCount,
+                ControlledWindowHighlightVisible = context != null && context.ControlledWindowHighlightVisible,
+                ControlledWindowHighlightEverShown = context != null && context.ControlledWindowHighlightEverShown,
+                ControlledWindowHandle = context == null ? 0 : context.ControlledWindowHandle.ToInt64()
             };
         }
 
@@ -169,6 +199,17 @@ namespace Codex.HostControl
                 throw new InvalidOperationException("The host-control visual guard is not ready.");
             }
             context.SetVisible(visible);
+        }
+
+        public void SetControlledWindow(IntPtr window)
+        {
+            ThrowIfDisposed();
+            HaloApplicationContext context = _context;
+            if (context == null)
+            {
+                throw new InvalidOperationException("The host-control visual guard is not ready.");
+            }
+            context.SetControlledWindow(window);
         }
 
         public void Dispose()
@@ -253,6 +294,9 @@ namespace Codex.HostControl
         private static extern bool IsWindowVisible(IntPtr window);
 
         [DllImport("user32.dll")]
+        private static extern bool IsIconic(IntPtr window);
+
+        [DllImport("user32.dll")]
         private static extern bool ShowWindowAsync(IntPtr window, int command);
 
         [DllImport("user32.dll")]
@@ -275,6 +319,9 @@ namespace Codex.HostControl
 
         [DllImport("user32.dll")]
         private static extern bool GetWindowRect(IntPtr window, out NativeRectangle rectangle);
+
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmGetWindowAttribute(IntPtr window, int attribute, out NativeRectangle value, int valueSize);
 
         [StructLayout(LayoutKind.Sequential)]
         private struct NativeRectangle
@@ -311,6 +358,28 @@ namespace Codex.HostControl
                 throw new Win32Exception(Marshal.GetLastWin32Error());
             }
             return Rectangle.FromLTRB(rectangle.Left, rectangle.Top, rectangle.Right, rectangle.Bottom);
+        }
+
+        public static bool TryGetVisibleBounds(IntPtr window, out Rectangle bounds)
+        {
+            bounds = Rectangle.Empty;
+            if (!IsUsable(window) || IsIconic(window))
+            {
+                return false;
+            }
+
+            const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
+            NativeRectangle rectangle;
+            int result = DwmGetWindowAttribute(window, DWMWA_EXTENDED_FRAME_BOUNDS, out rectangle, Marshal.SizeOf(typeof(NativeRectangle)));
+            if (result != 0 || rectangle.Right <= rectangle.Left || rectangle.Bottom <= rectangle.Top)
+            {
+                if (!GetWindowRect(window, out rectangle) || rectangle.Right <= rectangle.Left || rectangle.Bottom <= rectangle.Top)
+                {
+                    return false;
+                }
+            }
+            bounds = Rectangle.FromLTRB(rectangle.Left, rectangle.Top, rectangle.Right, rectangle.Bottom);
+            return true;
         }
 
         public static bool Focus(IntPtr window, int[] allowedProcessIds)
@@ -497,7 +566,12 @@ namespace Codex.HostControl
         private readonly System.Windows.Forms.Timer _timer;
         private readonly Stopwatch _animation = Stopwatch.StartNew();
         private readonly List<HaloBandForm> _forms = new List<HaloBandForm>();
+        private readonly List<ControlledWindowBandForm> _controlledWindowForms = new List<ControlledWindowBandForm>();
         private HaloState _state = HaloState.Warning;
+        private IntPtr _controlledWindow = IntPtr.Zero;
+        private bool _controlledWindowHighlightVisible;
+        private bool _controlledWindowHighlightEverShown;
+        private bool _visible = true;
         private bool _captureProtectionSucceeded = true;
         private string _captureProtectionMode = "ExcludeFromCapture";
         private int _captureProtectionError;
@@ -520,6 +594,9 @@ namespace Codex.HostControl
         public string CaptureProtectionMode { get { return _captureProtectionMode; } }
         public int CaptureProtectionError { get { return _captureProtectionError; } }
         public int MonitorCount { get { return Screen.AllScreens.Length; } }
+        public IntPtr ControlledWindowHandle { get { return _controlledWindow; } }
+        public bool ControlledWindowHighlightEverShown { get { return _controlledWindowHighlightEverShown; } }
+        public bool ControlledWindowHighlightVisible { get { return _controlledWindowHighlightVisible; } }
 
         public void SetState(HaloState state)
         {
@@ -540,14 +617,33 @@ namespace Codex.HostControl
                 _dispatcher.Invoke(new Action<bool>(SetVisible), visible);
                 return;
             }
+            _visible = visible;
             foreach (HaloBandForm form in _forms)
             {
                 form.Visible = visible;
             }
+            foreach (ControlledWindowBandForm form in _controlledWindowForms)
+            {
+                form.Visible = visible && HostWindowControl.IsUsable(_controlledWindow);
+            }
+            if (!visible) _controlledWindowHighlightVisible = false;
             if (visible)
             {
+                UpdateControlledWindowForms();
                 ApplyAppearance();
             }
+        }
+
+        public void SetControlledWindow(IntPtr window)
+        {
+            if (_dispatcher.InvokeRequired)
+            {
+                _dispatcher.Invoke(new Action<IntPtr>(SetControlledWindow), window);
+                return;
+            }
+            _controlledWindow = window;
+            UpdateControlledWindowForms();
+            ApplyAppearance();
         }
 
         public void RequestExit()
@@ -604,6 +700,7 @@ namespace Codex.HostControl
             {
                 CloseHaloForms();
                 CreateHaloForms();
+                UpdateControlledWindowForms();
                 ApplyAppearance();
             }));
         }
@@ -641,6 +738,59 @@ namespace Codex.HostControl
             _forms.Add(form);
         }
 
+        private void UpdateControlledWindowForms()
+        {
+            Rectangle bounds;
+            if (!_visible || !HostWindowControl.TryGetVisibleBounds(_controlledWindow, out bounds) ||
+                bounds.Width <= HostControlContract.ControlledWindowFrameThicknessPixels * 2 ||
+                bounds.Height <= HostControlContract.ControlledWindowFrameThicknessPixels * 2)
+            {
+                foreach (ControlledWindowBandForm form in _controlledWindowForms)
+                {
+                    form.Visible = false;
+                }
+                _controlledWindowHighlightVisible = false;
+                return;
+            }
+
+            if (_controlledWindowForms.Count == 0)
+            {
+                for (int bandIndex = 0; bandIndex < HostControlContract.ControlledWindowBandCount; bandIndex++)
+                {
+                    ControlledWindowBandForm form = new ControlledWindowBandForm(bounds, bandIndex);
+                    form.Show();
+                    RegisterCaptureProtection(form.CaptureProtectionSucceeded, form.CaptureProtectionMode, form.CaptureProtectionError);
+                    _controlledWindowForms.Add(form);
+                }
+            }
+
+            Screen targetScreen = Screen.FromRectangle(bounds);
+            Rectangle screenBounds = targetScreen.Bounds;
+            bool squareCorners = HostControlContract.ShouldUseSquareControlledWindowCorners(bounds, screenBounds);
+            foreach (ControlledWindowBandForm form in _controlledWindowForms)
+            {
+                form.SetTargetBounds(bounds, squareCorners);
+                form.Visible = true;
+            }
+            _controlledWindowHighlightVisible = true;
+            _controlledWindowHighlightEverShown = true;
+        }
+
+        private void RegisterCaptureProtection(bool succeeded, string mode, int error)
+        {
+            _captureProtectionSucceeded = _captureProtectionSucceeded && succeeded;
+            if (!succeeded)
+            {
+                _captureProtectionMode = "Failed";
+                if (_captureProtectionError == 0) _captureProtectionError = error;
+            }
+            else if (mode == "MonitorOnlyFallback" && _captureProtectionMode != "Failed")
+            {
+                _captureProtectionMode = "MonitorOnlyFallback";
+                if (_captureProtectionError == 0) _captureProtectionError = error;
+            }
+        }
+
         private void CloseHaloForms()
         {
             foreach (HaloBandForm form in _forms)
@@ -649,10 +799,18 @@ namespace Codex.HostControl
                 form.Dispose();
             }
             _forms.Clear();
+            foreach (ControlledWindowBandForm form in _controlledWindowForms)
+            {
+                form.Close();
+                form.Dispose();
+            }
+            _controlledWindowForms.Clear();
+            _controlledWindowHighlightVisible = false;
         }
 
         private void Animate(object sender, EventArgs args)
         {
+            UpdateControlledWindowForms();
             ApplyAppearance();
         }
 
@@ -660,26 +818,35 @@ namespace Codex.HostControl
         {
             double seconds = _animation.Elapsed.TotalSeconds;
             double intensity;
+            double controlledWindowIntensity;
             Color color;
             if (_state == HaloState.Warning)
             {
                 intensity = 0.70 + (0.30 * ((Math.Sin(seconds * Math.PI * 2.0 / 1.8) + 1.0) / 2.0));
+                controlledWindowIntensity = 0.88;
                 color = ColorTranslator.FromHtml(HostControlContract.ActiveHaloHex);
             }
             else if (_state == HaloState.Active)
             {
                 intensity = 0.78 + (0.22 * ((Math.Sin(seconds * Math.PI * 2.0 / 3.6) + 1.0) / 2.0));
+                controlledWindowIntensity = 0.92 + (0.08 * ((Math.Sin(seconds * Math.PI * 2.0 / 4.8) + 1.0) / 2.0));
                 color = ColorTranslator.FromHtml(HostControlContract.ActiveHaloHex);
             }
             else
             {
                 intensity = 0.58 + (0.12 * ((Math.Sin(seconds * Math.PI * 2.0 / 2.8) + 1.0) / 2.0));
+                controlledWindowIntensity = 0.36;
                 color = ColorTranslator.FromHtml(HostControlContract.PausedHaloHex);
             }
 
             foreach (HaloBandForm form in _forms)
             {
                 form.Apply(color, intensity);
+            }
+            Color controlledWindowColor = ColorTranslator.FromHtml(HostControlContract.ControlledWindowHighlightHex);
+            foreach (ControlledWindowBandForm form in _controlledWindowForms)
+            {
+                form.Apply(controlledWindowColor, controlledWindowIntensity);
             }
         }
     }
@@ -809,6 +976,173 @@ namespace Codex.HostControl
             {
                 previous.Dispose();
             }
+        }
+    }
+
+    internal sealed class ControlledWindowBandForm : Form
+    {
+        private const int WS_EX_TRANSPARENT = 0x00000020;
+        private const int WS_EX_TOOLWINDOW = 0x00000080;
+        private const int WS_EX_NOACTIVATE = 0x08000000;
+        private const int WM_NCHITTEST = 0x0084;
+        private const int HTTRANSPARENT = -1;
+        private const uint WDA_MONITOR = 0x00000001;
+        private const uint WDA_EXCLUDEFROMCAPTURE = 0x00000011;
+        private readonly int _bandIndex;
+        private bool _squareCorners;
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool SetWindowDisplayAffinity(IntPtr window, uint affinity);
+
+        public ControlledWindowBandForm(Rectangle bounds, int bandIndex)
+        {
+            if (bandIndex < 0 || bandIndex >= HostControlContract.ControlledWindowBandCount)
+            {
+                throw new ArgumentOutOfRangeException("bandIndex");
+            }
+            _bandIndex = bandIndex;
+            AutoScaleMode = AutoScaleMode.None;
+            BackColor = ColorTranslator.FromHtml(HostControlContract.ControlledWindowHighlightHex);
+            Bounds = bounds;
+            Enabled = false;
+            FormBorderStyle = FormBorderStyle.None;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            Opacity = HostControlContract.GetControlledWindowBandOpacity(_bandIndex, 0.92);
+            ResizeRedraw = true;
+            ShowIcon = false;
+            ShowInTaskbar = false;
+            StartPosition = FormStartPosition.Manual;
+            TopMost = true;
+            ApplyRoundedBandRegion();
+        }
+
+        public bool CaptureProtectionSucceeded { get; private set; }
+        public string CaptureProtectionMode { get; private set; }
+        public int CaptureProtectionError { get; private set; }
+
+        protected override bool ShowWithoutActivation { get { return true; } }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams parameters = base.CreateParams;
+                parameters.ExStyle |= WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+                return parameters;
+            }
+        }
+
+        protected override void OnShown(EventArgs args)
+        {
+            base.OnShown(args);
+            CaptureProtectionSucceeded = SetWindowDisplayAffinity(Handle, WDA_EXCLUDEFROMCAPTURE);
+            if (CaptureProtectionSucceeded)
+            {
+                CaptureProtectionMode = "ExcludeFromCapture";
+                return;
+            }
+
+            CaptureProtectionError = Marshal.GetLastWin32Error();
+            CaptureProtectionSucceeded = SetWindowDisplayAffinity(Handle, WDA_MONITOR);
+            CaptureProtectionMode = CaptureProtectionSucceeded ? "MonitorOnlyFallback" : "Failed";
+            if (!CaptureProtectionSucceeded && CaptureProtectionError == 0)
+            {
+                CaptureProtectionError = Marshal.GetLastWin32Error();
+            }
+        }
+
+        protected override void OnSizeChanged(EventArgs args)
+        {
+            base.OnSizeChanged(args);
+            ApplyRoundedBandRegion();
+        }
+
+        protected override void WndProc(ref Message message)
+        {
+            if (message.Msg == WM_NCHITTEST)
+            {
+                message.Result = new IntPtr(HTTRANSPARENT);
+                return;
+            }
+            base.WndProc(ref message);
+        }
+
+        public void SetTargetBounds(Rectangle bounds, bool squareCorners)
+        {
+            _squareCorners = squareCorners;
+            if (Bounds != bounds)
+            {
+                Bounds = bounds;
+            }
+            ApplyRoundedBandRegion();
+        }
+
+        public void Apply(Color color, double intensity)
+        {
+            BackColor = color;
+            Opacity = HostControlContract.GetControlledWindowBandOpacity(_bandIndex, intensity);
+        }
+
+        private void ApplyRoundedBandRegion()
+        {
+            if (ClientSize.Width <= 0 || ClientSize.Height <= 0)
+            {
+                return;
+            }
+
+            int outerInset = _bandIndex * HostControlContract.ControlledWindowBandThicknessPixels;
+            int innerInset = Math.Min(
+                outerInset + HostControlContract.ControlledWindowBandThicknessPixels,
+                Math.Min(ClientSize.Width / 2, ClientSize.Height / 2));
+            Rectangle outerBounds = new Rectangle(
+                outerInset,
+                outerInset,
+                ClientSize.Width - (outerInset * 2),
+                ClientSize.Height - (outerInset * 2));
+            int cornerRadius = _squareCorners ? 0 : Math.Max(0, HostControlContract.ControlledWindowCornerRadiusPixels - outerInset);
+            using (GraphicsPath outerPath = CreateRoundedRectanglePath(outerBounds, cornerRadius))
+            {
+                Region band = new Region(outerPath);
+                if (ClientSize.Width > innerInset * 2 && ClientSize.Height > innerInset * 2)
+                {
+                    Rectangle innerBounds = new Rectangle(
+                        innerInset,
+                        innerInset,
+                        ClientSize.Width - (innerInset * 2),
+                        ClientSize.Height - (innerInset * 2));
+                    int innerRadius = _squareCorners ? 0 : Math.Max(0, HostControlContract.ControlledWindowCornerRadiusPixels - innerInset);
+                    using (GraphicsPath innerPath = CreateRoundedRectanglePath(innerBounds, innerRadius))
+                    {
+                        band.Exclude(innerPath);
+                    }
+                }
+                Region previous = Region;
+                Region = band;
+                if (previous != null)
+                {
+                    previous.Dispose();
+                }
+            }
+        }
+
+        private static GraphicsPath CreateRoundedRectanglePath(Rectangle bounds, int radius)
+        {
+            GraphicsPath path = new GraphicsPath();
+            int clampedRadius = Math.Max(0, Math.Min(radius, Math.Min(bounds.Width, bounds.Height) / 2));
+            if (clampedRadius == 0)
+            {
+                path.AddRectangle(bounds);
+                return path;
+            }
+
+            int diameter = clampedRadius * 2;
+            path.AddArc(bounds.Left, bounds.Top, diameter, diameter, 180, 90);
+            path.AddArc(bounds.Right - diameter, bounds.Top, diameter, diameter, 270, 90);
+            path.AddArc(bounds.Right - diameter, bounds.Bottom - diameter, diameter, diameter, 0, 90);
+            path.AddArc(bounds.Left, bounds.Bottom - diameter, diameter, diameter, 90, 90);
+            path.CloseFigure();
+            return path;
         }
     }
 

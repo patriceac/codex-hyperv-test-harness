@@ -18,12 +18,16 @@ $ErrorActionPreference = 'Stop'
 $initialWarningSeconds = 5
 $resumeIdleSeconds = 10
 $haloFrameThicknessPixels = 12
+$controlledWindowHighlightFrameThicknessPixels = 6
 $script:observedPhysicalInputVersion = [long]0
 $script:userPauseCount = 0
 $script:focusRestoreCount = 0
 $script:totalPausedMilliseconds = [long]0
 $script:pauseDetectionArmed = $false
 $script:windowHandle = [IntPtr]::Zero
+$script:highlightedWindowHandle = [IntPtr]::Zero
+$script:nextHighlightProbeUtc = [DateTime]::MinValue
+$script:highlightProbeDeadlineUtc = [DateTime]::MinValue
 $script:runtime = $null
 $script:rootProcess = $null
 $script:rootProcessStartedUtc = $null
@@ -319,11 +323,23 @@ function Get-TrackedHostProcessIds {
     @($accepted)
 }
 
+function Set-ControlledWindowHighlight {
+    param([Parameter(Mandatory = $true)] [IntPtr] $Window)
+
+    if (-not $script:runtime -or $script:highlightedWindowHandle -eq $Window) { return }
+    $script:runtime.SetControlledWindow($Window)
+    $script:highlightedWindowHandle = $Window
+}
+
 function Get-ControlledWindow {
     $processIds = @(Get-TrackedHostProcessIds)
-    if ($processIds.Count -eq 0) { return [IntPtr]::Zero }
+    if ($processIds.Count -eq 0) {
+        Set-ControlledWindowHighlight -Window ([IntPtr]::Zero)
+        return [IntPtr]::Zero
+    }
     if ([Codex.HostControl.HostWindowControl]::IsUsable($script:windowHandle) -and
         [Codex.HostControl.HostWindowControl]::GetProcessId($script:windowHandle) -in $processIds) {
+        Set-ControlledWindowHighlight -Window $script:windowHandle
         return $script:windowHandle
     }
     foreach ($processId in $processIds) {
@@ -332,10 +348,21 @@ function Get-ControlledWindow {
         $candidate.Refresh()
         if ($candidate.MainWindowHandle -ne [IntPtr]::Zero -and [Codex.HostControl.HostWindowControl]::IsUsable($candidate.MainWindowHandle)) {
             $script:windowHandle = $candidate.MainWindowHandle
+            Set-ControlledWindowHighlight -Window $script:windowHandle
             return $script:windowHandle
         }
     }
+    Set-ControlledWindowHighlight -Window ([IntPtr]::Zero)
     [IntPtr]::Zero
+}
+
+function Update-ControlledWindowHighlight {
+    if (-not $script:runtime -or -not $script:rootProcess -or $script:highlightedWindowHandle -ne [IntPtr]::Zero) { return }
+    $now = [DateTime]::UtcNow
+    if ($now -gt $script:highlightProbeDeadlineUtc) { return }
+    if ($now -lt $script:nextHighlightProbeUtc) { return }
+    $script:nextHighlightProbeUtc = $now.AddMilliseconds(500)
+    $null = Get-ControlledWindow
 }
 
 function Restore-ControlledWindowFocus {
@@ -353,6 +380,7 @@ function Wait-ForHostControlReady {
     param([switch] $RefocusAfterResume)
 
     $snapshot = Throw-IfHostControlCancelled
+    Update-ControlledWindowHighlight
     if (-not [Codex.HostControl.HostControlContract]::ShouldPauseForPhysicalInput(
         $script:pauseDetectionArmed,
         $snapshot.PhysicalInputVersion,
@@ -668,11 +696,15 @@ $contract = [ordered]@{
     ResumeIdleSeconds = $resumeIdleSeconds
     CancelKey = 'Escape'
     ActiveHaloColor = '#F000FF'
+    ControlledWindowHighlightColor = '#B86CFF'
     InitialGraceInputBehavior = 'IgnoreForPause'
     PostGraceInputBehavior = 'PauseImmediately'
     ResumeBehavior = 'RefocusThenContinue'
     HaloRendering = 'ContinuousNonOverlappingBands'
     HaloFrameThicknessPixels = $haloFrameThicknessPixels
+    ControlledWindowHighlightRendering = 'RoundedInwardNonOverlappingBands'
+    ControlledWindowHighlightFrameThicknessPixels = $controlledWindowHighlightFrameThicknessPixels
+    ControlledWindowHighlightPauseBehavior = 'Dim'
     ExecutionTarget = 'PhysicalHost'
 }
 $isValidationOnly = [bool]$ValidateOnly
@@ -680,7 +712,8 @@ if (-not $isValidationOnly) { Assert-InteractiveHostSession }
 Import-HostControlNative
 if ([Codex.HostControl.HostControlContract]::InitialWarningSeconds -ne $initialWarningSeconds -or
     [Codex.HostControl.HostControlContract]::ResumeIdleSeconds -ne $resumeIdleSeconds -or
-    [Codex.HostControl.HostControlContract]::HaloFrameThicknessPixels -ne $haloFrameThicknessPixels) {
+    [Codex.HostControl.HostControlContract]::HaloFrameThicknessPixels -ne $haloFrameThicknessPixels -or
+    [Codex.HostControl.HostControlContract]::ControlledWindowFrameThicknessPixels -ne $controlledWindowHighlightFrameThicknessPixels) {
     throw 'The PowerShell and native host-control timing or visual contracts disagree.'
 }
 $nativeBootstrap = [ordered]@{
@@ -719,12 +752,14 @@ $failureKind = $null
 $errorMessage = $null
 $processCleanup = $null
 $assertion = $null
+$initialSnapshot = $null
+$finalSnapshot = $null
 
 try {
     $script:runtime = New-Object Codex.HostControl.HostControlRuntime
     $initialSnapshot = $script:runtime.GetSnapshot()
     $script:observedPhysicalInputVersion = [long]$initialSnapshot.PhysicalInputVersion
-    Write-Host "Host control armed for '$($artifact.Name)'. Fuchsia halo visible; control begins in five seconds. Mouse and keyboard activity will not pause this grace period; press Escape to cancel."
+    Write-Host "Host control armed for '$($artifact.Name)'. The fuchsia screen halo is visible; a violet inward outline will identify the controlled app after its window appears. Control begins in five seconds. Mouse and keyboard activity will not pause this grace period; press Escape to cancel."
     Wait-InitialHostControlWarning
     $null = Wait-ForHostControlReady
 
@@ -736,6 +771,7 @@ try {
     if (-not [string]::IsNullOrWhiteSpace($expandedArguments)) { $startParameters.ArgumentList = $expandedArguments }
     $script:rootProcess = Start-Process @startParameters
     $script:rootProcessStartedUtc = try { $script:rootProcess.StartTime.ToUniversalTime() } catch { [DateTime]::UtcNow }
+    $script:highlightProbeDeadlineUtc = [DateTime]::UtcNow.AddSeconds(30)
     $script:trackedProcessStarts[[int]$script:rootProcess.Id] = $script:rootProcessStartedUtc
 
     for ($index = 0; $index -lt $actions.Count; $index++) {
@@ -857,10 +893,13 @@ finally {
         else { $errorMessage += " $cleanupMessage" }
     }
     if ($script:runtime) {
+        try { $finalSnapshot = $script:runtime.GetSnapshot() } catch { }
         $script:runtime.Dispose()
         $script:runtime = $null
     }
 }
+
+$effectiveSnapshot = if ($finalSnapshot) { $finalSnapshot } else { $initialSnapshot }
 
 $result = [ordered]@{
     Success = [bool]$success
@@ -880,15 +919,20 @@ $result = [ordered]@{
         ResumeIdleSeconds = $resumeIdleSeconds
         CancelKey = 'Escape'
         ActiveHaloColor = '#F000FF'
+        ControlledWindowHighlightColor = '#B86CFF'
         InitialGraceInputBehavior = 'IgnoreForPause'
         PostGraceInputBehavior = 'PauseImmediately'
         HaloRendering = 'ContinuousNonOverlappingBands'
         HaloFrameThicknessPixels = [Codex.HostControl.HostControlContract]::HaloFrameThicknessPixels
-        MonitorCount = if ($initialSnapshot) { $initialSnapshot.MonitorCount } else { 0 }
-        OsCaptureProtectionSucceeded = if ($initialSnapshot) { [bool]$initialSnapshot.CaptureProtectionSucceeded } else { $false }
-        FullCaptureExclusionSucceeded = if ($initialSnapshot) { [string]$initialSnapshot.CaptureProtectionMode -eq 'ExcludeFromCapture' } else { $false }
-        CaptureProtectionMode = if ($initialSnapshot) { [string]$initialSnapshot.CaptureProtectionMode } else { 'NotStarted' }
-        CaptureProtectionError = if ($initialSnapshot) { [int]$initialSnapshot.CaptureProtectionError } else { 0 }
+        ControlledWindowHighlightRendering = 'RoundedInwardNonOverlappingBands'
+        ControlledWindowHighlightFrameThicknessPixels = [Codex.HostControl.HostControlContract]::ControlledWindowFrameThicknessPixels
+        ControlledWindowHighlightPauseBehavior = 'Dim'
+        ControlledWindowHighlightEverShown = if ($effectiveSnapshot) { [bool]$effectiveSnapshot.ControlledWindowHighlightEverShown } else { $false }
+        MonitorCount = if ($effectiveSnapshot) { $effectiveSnapshot.MonitorCount } else { 0 }
+        OsCaptureProtectionSucceeded = if ($effectiveSnapshot) { [bool]$effectiveSnapshot.CaptureProtectionSucceeded } else { $false }
+        FullCaptureExclusionSucceeded = if ($effectiveSnapshot) { [string]$effectiveSnapshot.CaptureProtectionMode -eq 'ExcludeFromCapture' } else { $false }
+        CaptureProtectionMode = if ($effectiveSnapshot) { [string]$effectiveSnapshot.CaptureProtectionMode } else { 'NotStarted' }
+        CaptureProtectionError = if ($effectiveSnapshot) { [int]$effectiveSnapshot.CaptureProtectionError } else { 0 }
         UserPauseCount = $script:userPauseCount
         FocusRestoreCount = $script:focusRestoreCount
         TotalPausedMilliseconds = $script:totalPausedMilliseconds

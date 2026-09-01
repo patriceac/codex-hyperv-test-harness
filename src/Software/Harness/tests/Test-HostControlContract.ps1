@@ -114,16 +114,24 @@ Assert-True ($nativeText.Contains('WDA_EXCLUDEFROMCAPTURE') -and $nativeText.Con
 Assert-True ($nativeText.Contains('MOUSEEVENTF_VIRTUALDESK') -and $nativeText.Contains('MOUSEEVENTF_ABSOLUTE')) 'Synthetic mouse input does not support the complete multi-monitor virtual desktop.'
 $scenarios.Add('native-input-halo-and-capture-safety-contract')
 
+Assert-True ($nativeText.Contains('ControlledWindowBandForm') -and $nativeText.Contains('ApplyRoundedBandRegion') -and $nativeText.Contains('TryGetVisibleBounds')) 'The controlled app does not have a rounded inward highlight bound to its visible window bounds.'
+Assert-True ($nativeText.Contains('ControlledWindowHighlightHex = "#B86CFF"') -and $nativeText.Contains('ControlledWindowFrameThicknessPixels = 6')) 'The controlled-app violet highlight contract is missing or has drifted.'
+Assert-True ($runnerText.Contains('Set-ControlledWindowHighlight') -and $runnerText.Contains('$script:runtime.SetControlledWindow($Window)') -and $runnerText.Contains('$script:highlightProbeDeadlineUtc = [DateTime]::UtcNow.AddSeconds(30)')) 'The verified controlled window is not connected to the native highlight runtime through bounded discovery.'
+Assert-True ($runnerText.Contains('ControlledWindowHighlightPauseBehavior') -and $runnerText.Contains("'Dim'")) 'The controlled-app highlight does not advertise its dimmed paused behavior.'
+$scenarios.Add('controlled-window-highlight-wiring-and-safety-contract')
+
 $escapedNative = $nativePath.Replace("'", "''")
 $nativeProbe = @"
 `$ErrorActionPreference = 'Stop'
 Add-Type -Path '$escapedNative' -ReferencedAssemblies @('System.dll','System.Core.dll','System.Drawing.dll','System.Windows.Forms.dll')
 `$probeNow = [DateTime]::UtcNow
+`$zeroBounds = New-Object Drawing.Rectangle
 [pscustomobject][ordered]@{
     Warning = [Codex.HostControl.HostControlContract]::InitialWarningSeconds
     Resume = [Codex.HostControl.HostControlContract]::ResumeIdleSeconds
     CancelKey = [Codex.HostControl.HostControlContract]::CancelVirtualKey
     Fuchsia = [Codex.HostControl.HostControlContract]::ActiveHaloHex
+    Violet = [Codex.HostControl.HostControlContract]::ControlledWindowHighlightHex
     PhysicalKeyboard = [Codex.HostControl.HostControlContract]::IsPhysicalKeyboardInput(0, 0)
     InjectedKeyboard = [Codex.HostControl.HostControlContract]::IsPhysicalKeyboardInput(0x10, 0)
     MarkedKeyboard = [Codex.HostControl.HostControlContract]::IsPhysicalKeyboardInput(0, [Codex.HostControl.HostControlContract]::SyntheticInputMarker)
@@ -139,6 +147,14 @@ Add-Type -Path '$escapedNative' -ReferencedAssemblies @('System.dll','System.Cor
     CoreThickness = [Codex.HostControl.HostControlContract]::HaloCoreThicknessPixels
     BandThickness = [Codex.HostControl.HostControlContract]::HaloBandThicknessPixels
     HaloOpacity = @(0..5 | ForEach-Object { [Codex.HostControl.HostControlContract]::GetHaloBandOpacity(`$_, 1.0) })
+    ControlledWindowFrameThickness = [Codex.HostControl.HostControlContract]::ControlledWindowFrameThicknessPixels
+    ControlledWindowCoreThickness = [Codex.HostControl.HostControlContract]::ControlledWindowCoreThicknessPixels
+    ControlledWindowBandThickness = [Codex.HostControl.HostControlContract]::ControlledWindowBandThicknessPixels
+    ControlledWindowCornerRadius = [Codex.HostControl.HostControlContract]::ControlledWindowCornerRadiusPixels
+    ControlledWindowOpacity = @(0..2 | ForEach-Object { [Codex.HostControl.HostControlContract]::GetControlledWindowBandOpacity(`$_, 1.0) })
+    WindowedCornersAreSquare = [Codex.HostControl.HostControlContract]::ShouldUseSquareControlledWindowCorners([Drawing.Rectangle]::FromLTRB(100,100,900,700), [Drawing.Rectangle]::FromLTRB(0,0,1920,1080))
+    MaximizedCornersAreSquare = [Codex.HostControl.HostControlContract]::ShouldUseSquareControlledWindowCorners([Drawing.Rectangle]::FromLTRB(0,0,1920,1080), [Drawing.Rectangle]::FromLTRB(0,0,1920,1080))
+    ZeroWindowHasVisibleBounds = [Codex.HostControl.HostWindowControl]::TryGetVisibleBounds([IntPtr]::Zero, [ref]`$zeroBounds)
     ResumeAtNineSeconds = [Codex.HostControl.HostControlContract]::GetResumeDelayMilliseconds(`$probeNow, `$probeNow.AddSeconds(-9))
     ResumeAtTenSeconds = [Codex.HostControl.HostControlContract]::GetResumeDelayMilliseconds(`$probeNow, `$probeNow.AddSeconds(-10))
 } | ConvertTo-Json -Compress
@@ -147,6 +163,7 @@ $nativeResult = Invoke-WindowsPowerShellEncoded -Script $nativeProbe
 Assert-True ($nativeResult.ExitCode -eq 0) "The native host-control source did not compile under Windows PowerShell 5.1: $($nativeResult.Text)"
 $nativeContract = ($nativeResult.Output | Select-Object -Last 1) | ConvertFrom-Json
 Assert-True ($nativeContract.Warning -eq 5 -and $nativeContract.Resume -eq 10 -and $nativeContract.CancelKey -eq 27 -and $nativeContract.Fuchsia -eq '#F000FF') 'The compiled native timing, Escape, or fuchsia contract is incorrect.'
+Assert-True ($nativeContract.Violet -eq '#B86CFF') 'The compiled controlled-app highlight color is incorrect.'
 Assert-True ($nativeContract.PhysicalKeyboard -and $nativeContract.PhysicalMouse) 'Physical input was not classified as user activity.'
 Assert-True (-not $nativeContract.InjectedKeyboard -and -not $nativeContract.MarkedKeyboard -and -not $nativeContract.InjectedMouse -and -not $nativeContract.MarkedMouse) 'Controller-generated input would incorrectly pause its own host-control run.'
 Assert-True ($nativeContract.NewActivity -and -not $nativeContract.SameActivity) 'The compiled pause decision does not distinguish new physical input.'
@@ -158,6 +175,14 @@ for ($index = 1; $index -lt $haloOpacity.Count; $index++) {
     Assert-True ($haloOpacity[$index] -lt $haloOpacity[$index - 1]) 'The halo glow opacity does not fade smoothly inward.'
 }
 Assert-True ($haloOpacity[-1] -le 0.051) 'The inner halo edge does not fade to a restrained glow.'
+$controlledWindowOpacity = @($nativeContract.ControlledWindowOpacity | ForEach-Object { [double]$_ })
+Assert-True ($nativeContract.ControlledWindowFrameThickness -eq 6 -and $nativeContract.ControlledWindowCoreThickness -eq 2 -and $nativeContract.ControlledWindowBandThickness -eq 2 -and $nativeContract.ControlledWindowCornerRadius -eq 8) 'The controlled-app highlight does not keep the approved inward geometry.'
+Assert-True ($controlledWindowOpacity.Count -eq 3 -and $controlledWindowOpacity[0] -ge 0.95) 'The controlled-app highlight does not keep a crisp two-pixel violet core.'
+for ($index = 1; $index -lt $controlledWindowOpacity.Count; $index++) {
+    Assert-True ($controlledWindowOpacity[$index] -lt $controlledWindowOpacity[$index - 1]) 'The controlled-app highlight does not fade smoothly inward.'
+}
+Assert-True ($controlledWindowOpacity[-1] -le 0.071 -and -not $nativeContract.ZeroWindowHasVisibleBounds) 'The controlled-app glow is too strong or accepts an invalid window handle.'
+Assert-True (-not $nativeContract.WindowedCornersAreSquare -and $nativeContract.MaximizedCornersAreSquare) 'The controlled-app highlight does not preserve rounded windowed corners and square maximized edges.'
 Assert-True ($nativeContract.ResumeAtNineSeconds -ge 900 -and $nativeContract.ResumeAtNineSeconds -le 1100 -and $nativeContract.ResumeAtTenSeconds -eq 0) 'The compiled resume decision does not require ten uninterrupted idle seconds.'
 $scenarios.Add('native-source-compiles-and-input-classification-passes')
 
@@ -175,6 +200,7 @@ Assert-True ($validation.NativeBootstrap.TypeLoaded -and $validation.NativeBoots
 Assert-True ($validation.HostControl.InitialWarningSeconds -eq 5 -and $validation.HostControl.ResumeIdleSeconds -eq 10 -and $validation.HostControl.CancelKey -eq 'Escape') 'The validation result did not advertise the exact requested interaction policy.'
 Assert-True ($validation.HostControl.InitialGraceInputBehavior -eq 'IgnoreForPause' -and $validation.HostControl.PostGraceInputBehavior -eq 'PauseImmediately') 'The validation result does not distinguish the non-pausing grace period from post-grace user takeover.'
 Assert-True ($validation.HostControl.HaloRendering -eq 'ContinuousNonOverlappingBands' -and $validation.HostControl.HaloFrameThicknessPixels -eq 12) 'The validation result does not advertise the clean continuous halo geometry.'
+Assert-True ($validation.HostControl.ControlledWindowHighlightColor -eq '#B86CFF' -and $validation.HostControl.ControlledWindowHighlightRendering -eq 'RoundedInwardNonOverlappingBands' -and $validation.HostControl.ControlledWindowHighlightFrameThicknessPixels -eq 6 -and $validation.HostControl.ControlledWindowHighlightPauseBehavior -eq 'Dim') 'The validation result does not advertise the approved controlled-app highlight.'
 $scenarios.Add('windows-powershell-validation-compiles-native-helper-without-launch')
 
 $escapedPowerShell7 = $powerShell7.Replace("'", "''")
@@ -223,7 +249,7 @@ $unsafeEvidence = Invoke-WindowsPowerShellEncoded -Script $unsafeEvidenceProbe
 Assert-True ($unsafeEvidence.ExitCode -ne 0 -and $unsafeEvidence.Text -like '*escapes the request output directory*') 'The host runner accepted an evidence path traversal.'
 $scenarios.Add('host-evidence-path-traversal-rejected')
 
-Assert-True ($skillText.Contains('Invoke-HostExecutableTest.ps1') -and $skillText.Contains('five-second') -and $skillText.Contains('does not pause') -and $skillText.Contains('ten seconds') -and $skillText.Contains('Escape')) 'The runtime skill does not document the explicit host-control path and its user-visible behavior.'
+Assert-True ($skillText.Contains('Invoke-HostExecutableTest.ps1') -and $skillText.Contains('five-second') -and $skillText.Contains('does not pause') -and $skillText.Contains('ten seconds') -and $skillText.Contains('Escape') -and $skillText.Contains('violet') -and $skillText.Contains('inward')) 'The runtime skill does not document the explicit host-control path and its user-visible behavior.'
 $scenarios.Add('runtime-skill-documents-host-control')
 
 [pscustomobject][ordered]@{
