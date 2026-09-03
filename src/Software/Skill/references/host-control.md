@@ -6,7 +6,7 @@ The controller is an on-demand process in the current interactive user session; 
 
 ## Run
 
-Use the same action shapes documented in the main skill:
+Use the same action shapes documented in [artifact invocation and actions](artifact-and-actions.md):
 
 ```powershell
 & "$env:USERPROFILE\.agents\skills\hyperv-test-executables\scripts\Invoke-HostExecutableTest.ps1" `

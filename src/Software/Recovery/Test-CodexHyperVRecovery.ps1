@@ -61,7 +61,13 @@ try {
         'Software\Harness\Install-PoolHostBroker.ps1',
         'Software\Harness\private\guest-credential.json',
         'Software\Skill\SKILL.md',
+        'Software\Skill\references\artifact-and-actions.md',
+        'Software\Skill\references\broker-pool-and-cache.md',
+        'Software\Skill\references\expected-guest-power-off.md',
         'Software\Skill\references\host-control.md',
+        'Software\Skill\references\network-and-host-inputs.md',
+        'Software\Skill\references\queue-observation-and-cancellation.md',
+        'Software\Skill\references\verification-and-reporting.md',
         'Software\Skill\scripts\HostControlNative.cs',
         'Software\Skill\scripts\Invoke-HostExecutableTest.ps1',
         'Software\Skill\scripts\Invoke-HyperVExecutableTest.ps1',
@@ -92,6 +98,7 @@ try {
         'Software\Harness\tests\Test-RequestNetworkPropagation.ps1',
         'Software\Harness\tests\Test-RequestNetworkSafety.ps1',
         'Software\Harness\tests\Test-RunnerContractValidation.ps1',
+        'Software\Harness\tests\Test-SkillDocumentationContract.ps1',
         'Software\Harness\tests\Test-Utf8ActionTransport.ps1'
     )
     $missing = @($required | Where-Object { -not (Test-Path -LiteralPath (Join-Path $BundleRoot $_) -PathType Leaf) })

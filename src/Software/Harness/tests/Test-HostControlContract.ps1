@@ -10,6 +10,7 @@ if ([string]::IsNullOrWhiteSpace($SkillRoot)) {
 $runnerPath = Join-Path $SkillRoot 'scripts\Invoke-HostExecutableTest.ps1'
 $nativePath = Join-Path $SkillRoot 'scripts\HostControlNative.cs'
 $skillPath = Join-Path $SkillRoot 'SKILL.md'
+$hostControlReferencePath = Join-Path $SkillRoot 'references\host-control.md'
 $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 $scenarios = New-Object Collections.Generic.List[string]
 
@@ -93,6 +94,7 @@ function Resolve-PowerShell7Path {
 Assert-True (Test-Path -LiteralPath $runnerPath -PathType Leaf) 'The host-control runner is missing.'
 Assert-True (Test-Path -LiteralPath $nativePath -PathType Leaf) 'The host-control native source is missing.'
 Assert-True (Test-Path -LiteralPath $skillPath -PathType Leaf) 'The runtime skill documentation is missing.'
+Assert-True (Test-Path -LiteralPath $hostControlReferencePath -PathType Leaf) 'The host-control reference is missing.'
 Assert-True (Test-Path -LiteralPath $windowsPowerShell -PathType Leaf) 'Windows PowerShell 5.1 is required for the installed host-control runtime contract.'
 $powerShell7 = Resolve-PowerShell7Path
 Assert-True (-not [string]::IsNullOrWhiteSpace($powerShell7)) 'PowerShell 7 is required to validate the current host-control native bootstrap.'
@@ -101,6 +103,7 @@ $scenarios.Add('host-control-files-present')
 $runnerText = Get-Content -LiteralPath $runnerPath -Raw
 $nativeText = Get-Content -LiteralPath $nativePath -Raw
 $skillText = Get-Content -LiteralPath $skillPath -Raw
+$hostControlReferenceText = Get-Content -LiteralPath $hostControlReferencePath -Raw
 
 Assert-True ($runnerText.Contains('$initialWarningSeconds = 6') -and $runnerText.Contains('$initialInputIgnoreSeconds = 3') -and $runnerText.Contains('$initialInputPauseEligibleSeconds = $initialWarningSeconds - $initialInputIgnoreSeconds') -and $runnerText.Contains('$resumeIdleSeconds = 10')) 'The host runner does not pin the requested six-second split warning and ten-second idle resume.'
 Assert-True ($runnerText.Contains('Wait-InitialHostControlWarning') -and $runnerText.Contains('Wait-ForHostControlReady') -and $runnerText.Contains('Restore-ControlledWindowFocus')) 'The host runner is missing warning, pause/resume, or refocus integration.'
@@ -363,7 +366,7 @@ $unsafeEvidence = Invoke-WindowsPowerShellEncoded -Script $unsafeEvidenceProbe
 Assert-True ($unsafeEvidence.ExitCode -ne 0 -and $unsafeEvidence.Text -like '*escapes the request output directory*') 'The host runner accepted an evidence path traversal.'
 $scenarios.Add('host-evidence-path-traversal-rejected')
 
-Assert-True ($skillText.Contains('Invoke-HostExecutableTest.ps1') -and $skillText.Contains('six-second') -and $skillText.Contains('first three seconds') -and $skillText.Contains('final three seconds') -and $skillText.Contains('ten seconds') -and $skillText.Contains('Escape') -and $skillText.Contains('violet') -and $skillText.Contains('inward') -and $skillText.Contains('atomic batch') -and $skillText.Contains('Only one host controller') -and $skillText.Contains('another application owns the foreground')) 'The runtime skill does not document the explicit host-control path and its user-visible behavior.'
+Assert-True ($skillText.Contains('host control](references/host-control.md)') -and $hostControlReferenceText.Contains('Invoke-HostExecutableTest.ps1') -and $hostControlReferenceText.Contains('six-second') -and $hostControlReferenceText.Contains('first three seconds') -and $hostControlReferenceText.Contains('final three seconds') -and $hostControlReferenceText.Contains('ten uninterrupted seconds') -and $hostControlReferenceText.Contains('Escape') -and $hostControlReferenceText.Contains('violet') -and $hostControlReferenceText.Contains('inward') -and $hostControlReferenceText.Contains('atomic batch') -and $hostControlReferenceText.Contains('per-interactive-session lease') -and $hostControlReferenceText.Contains('another application owns the foreground')) 'The runtime skill does not route to documentation for the explicit host-control path and its user-visible behavior.'
 $scenarios.Add('runtime-skill-documents-host-control')
 
 [pscustomobject][ordered]@{
