@@ -21,6 +21,10 @@ Assert-True $descriptionMatch.Success 'The runtime skill description is missing.
 Assert-True ($descriptionMatch.Groups[1].Value.Length -le 360) 'The runtime skill discovery description exceeded its 360-character budget.'
 Assert-True ($skillText.Length -le 7000) 'The always-loaded runtime skill exceeded its 7,000-character budget; move mode-specific detail to references.'
 
+foreach ($retiredPath in @('scripts\Invoke-HostExecutableTest.ps1', 'scripts\HostControlNative.cs', 'references\host-control.md')) {
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $skillRoot $retiredPath))) "Retired desktop-control component must not ship: $retiredPath"
+}
+
 $requiredReferences = [ordered]@{
     'artifact-and-actions.md' = @('wait_result_file', 'AssertResultJsonPointer', 'send_keys')
     'network-and-host-inputs.md' = @('InternetOnly', 'AllowNetworkWithHostInputs', 'SelectedTransport')
@@ -28,7 +32,6 @@ $requiredReferences = [ordered]@{
     'queue-observation-and-cancellation.md' = @('Capture-HyperVExecutableTestLiveEvidence.ps1', 'Cancel-HyperVExecutableTest.ps1', 'QueueTimedOut')
     'broker-pool-and-cache.md' = @('immutable VHDX generations', 'PayloadFilesHashed', 'ProcessCleanup')
     'verification-and-reporting.md' = @('HarnessSucceeded', 'TestEvaluated', 'TestPassed')
-    'host-control.md' = @('Invoke-HostExecutableTest.ps1', 'HostExecutionAuthorized', 'per-interactive-session lease')
 }
 
 foreach ($referenceName in $requiredReferences.Keys) {

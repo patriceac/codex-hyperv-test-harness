@@ -40,4 +40,4 @@ State:
 5. Relevant screenshot and application-evidence locations and what visual inspection established.
 6. Cleanup outcome, warnings, skipped evidence, retries, or remaining limitations.
 
-Do not claim a network boundary without current positive and negative evidence for the selected profile. Do not claim physical-host isolation for guarded host control. Stop and explain when the VM cannot faithfully exercise required hardware, drivers, host services, or another host-only capability.
+Do not claim a network boundary without current positive and negative evidence for the selected profile. Stop and explain when the VM cannot faithfully exercise required hardware, drivers, host services, or another host-only capability.

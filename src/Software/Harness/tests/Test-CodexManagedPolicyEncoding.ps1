@@ -117,7 +117,7 @@ Assert-True ($canonicalBlock.StartsWith($startMarker, [StringComparison]::Ordina
     $canonicalBlock.EndsWith($endMarker, [StringComparison]::Ordinal) -and
     (Get-TestLiteralCount -Text $canonicalBlock -Literal $startMarker) -eq 1 -and
     (Get-TestLiteralCount -Text $canonicalBlock -Literal $endMarker) -eq 1) 'The canonical public policy is not exactly one complete managed marker block.'
-Assert-True ($canonicalBlock.IndexOf('prefer the guarded host controller provided by `hyperv-test-executables` over general computer-use tools', [StringComparison]::Ordinal) -ge 0) 'The canonical public policy does not resolve host-control routing before general computer use.'
+Assert-True ($canonicalBlock.IndexOf('give precedence to computer-use tools; never use the harness or its host controller on the physical host', [StringComparison]::Ordinal) -ge 0) 'The canonical policy must route host tests to computer use and prohibit the harness host controller.'
 foreach ($forbiddenPersonalText in @('## Working agreements', 'Always publish sites', 'Release computer use', 'C:\Users\')) {
     Assert-True ($canonicalBlock.IndexOf($forbiddenPersonalText, [StringComparison]::OrdinalIgnoreCase) -lt 0) "The canonical public policy contains personal/global content: $forbiddenPersonalText"
 }

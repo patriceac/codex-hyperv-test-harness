@@ -7,7 +7,7 @@ This repository rebuilds a privileged Hyper-V executable-test backend. Use the r
 - Never commit or upload a Windows ISO, seed ISO, VHD/VHDX/AVHDX, exported VM, VM state, executable build output, guest credential, broker request/result/evidence, screenshot, or host-input content.
 - Run `setup\Test-PublicRepository.ps1` before any public push. Treat a failed rule as a release blocker.
 - Do not activate Windows, enter a product key, sign into a Microsoft account, or make licensing claims. Installation selects Windows 11 Pro; activation and licensing belong to the user.
-- Do not run application-under-test executables on the physical host. Once installed, use the `hyperv-test-executables` skill. Browser-faithful tests may use a browser.
+- Use the harness only for isolated VM tests. For an explicitly requested named physical-host test, give precedence to computer use; never use the harness host controller. Browser-faithful tests may use a browser.
 - Do not directly manipulate pool VMs for ordinary tests. Submit the canonical `ArtifactPath` to the broker and let it manage payload VHDX caching, differencing children, worker leases, recycling, evidence, and cleanup.
 - Treat `-ForceRebuild` as destructive. Use it only when the user explicitly authorizes replacing this harness's named VMs.
 - Preserve unrelated user files, Hyper-V VMs, virtual switches, Codex instructions, and skills. The installer updates only its managed policy block.

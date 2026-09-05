@@ -1,6 +1,6 @@
 ---
 name: hyperv-test-executables
-description: Test Windows application artifacts in the isolated Hyper-V harness. Use automatically for .exe/.msi, Electron, packaged desktop or CLI apps, installers, Windows integration, or native UI testing when a browser is not faithful. Use guarded host control only for an explicit named host-test request; never fall back to host execution.
+description: Test Windows application artifacts in the isolated Hyper-V harness. Use automatically for .exe/.msi, Electron, packaged desktop or CLI apps, installers, Windows integration, or native UI testing when a browser is not faithful. For explicit named host tests, use computer use instead; never use this harness on the physical host.
 ---
 
 # Hyper-V executable testing
@@ -10,7 +10,7 @@ Keep applications-under-test off the physical host by default. Build on the host
 ## Route the test
 
 1. Use browser automation for a pure web application only when it can faithfully test the requested behavior.
-2. Honor an explicit user request to run or control a named artifact on the physical host. Natural wording such as "run this on the host" or "test it locally, not in Hyper-V" is sufficient; scope the override to that artifact and test. Do not infer it from generic wording such as "run it." Before host execution, read [host control](references/host-control.md) and use its guarded controller. Those protections do not make host execution isolated.
+2. Honor an explicit user request to run or control a named artifact on the physical host. Natural wording such as "run this on the host" or "test it locally, not in Hyper-V" is sufficient; scope the override to that artifact and test. Do not infer it from generic wording such as "run it." For that test, give precedence to the computer-use skill and its tools. Never use this harness on the physical host. If computer use is unavailable, report that limitation.
 3. Otherwise use this skill for every application-under-test, including `.exe` and `.msi` files, packaged CLI/desktop apps, Electron, WebView2, tray behavior, installers, Windows integration, and VM network-boundary testing. Electron is native testing, not the browser exception.
 4. Never silently fall back to physical-host execution. Stop and report a broker, VM, or capability failure.
 
@@ -26,7 +26,6 @@ Do not preload every reference.
 - For shared queue use, a long request, live evidence, cancellation, or deadline behavior, read [queue, observation, and cancellation](references/queue-observation-and-cancellation.md).
 - For payload-cache behavior, pool internals, lifecycle recovery, or performance diagnosis, read [broker, pool, and cache internals](references/broker-pool-and-cache.md).
 - Before claiming any test result, read [verification and reporting](references/verification-and-reporting.md) and apply the sections relevant to the request.
-- Read [host control](references/host-control.md) only after an explicit named physical-host override.
 
 ## Run the artifact
 
