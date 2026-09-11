@@ -198,7 +198,8 @@ function Invoke-RemoteDebuggerProvisionV1 {
             [string] $GuestOutputRoot,
             [string] $EvidenceFileName,
             [string] $RequestId,
-            [int] $TimeoutSeconds
+            [int] $TimeoutSeconds,
+            [string] $GuestPayloadRoot
         )
 
         $ErrorActionPreference = 'Stop'
@@ -742,6 +743,17 @@ public static class CodexRemoteDebuggerAuthenticode
             if ([string]$service.Status -ne 'Running') {
                 throw "RemoteDebuggerProvisionV1 support service is '$($service.Status)' instead of Running."
             }
+            # The acceptance coordinator receives UDP announcements separately
+            # from the product. Scope its exception to this disposable payload;
+            # product firewall preparation remains the product service's job.
+            $labPath = Join-Path $GuestPayloadRoot 'lab\RemoteDebugger.Lab.exe'
+            if (-not (Test-Path -LiteralPath $labPath -PathType Leaf)) {
+                throw 'The dedicated acceptance payload is missing its fixed Lab executable.'
+            }
+            Assert-PathWithoutReparseAncestor -Path $labPath -StopAt $GuestPayloadRoot
+            New-NetFirewallRule -Name 'CodexRdAcceptanceLabUdp' -DisplayName 'Codex RD acceptance coordination' `
+                -Program $labPath -Direction Inbound -Action Allow -Protocol UDP -LocalPort 45835 `
+                -Profile Private -RemoteAddress LocalSubnet -ErrorAction Stop | Out-Null
             $evidence = [pscustomobject][ordered]@{
                 FormatVersion = 1
                 Profile = 'RemoteDebuggerProvisionV1'
@@ -792,7 +804,8 @@ public static class CodexRemoteDebuggerAuthenticode
             $outputRoot,
             [string]$definition.EvidenceFileName,
             $RequestId,
-            $guestTimeoutSeconds
+            $guestTimeoutSeconds,
+            [IO.Path]::GetFullPath($GuestPayloadRoot)
         ) -AsJob -ErrorAction Stop
 
         while ([string]$remoteJob.State -in @('NotStarted', 'Running')) {
