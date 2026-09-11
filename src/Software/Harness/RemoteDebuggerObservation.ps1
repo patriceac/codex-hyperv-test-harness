@@ -63,7 +63,7 @@ function Start-RemoteDebuggerObservationV1 {
             $temporaryPath = $outputPath + '.tmp'
             try {
                 $snapshot | ConvertTo-Json -Depth 7 | Set-Content -LiteralPath $temporaryPath -Encoding UTF8
-                if ([IO.File]::Exists($outputPath)) { [IO.File]::Replace($temporaryPath, $outputPath, $null, $true) }
+                if ([IO.File]::Exists($outputPath)) { [IO.File]::Replace($temporaryPath, $outputPath, [NullString]::Value, $true) }
                 else { [IO.File]::Move($temporaryPath, $outputPath) }
             }
             finally { if (Test-Path -LiteralPath $temporaryPath -PathType Leaf) { Remove-Item -LiteralPath $temporaryPath -Force } }
