@@ -78,6 +78,32 @@ $hostInputStatePath = Join-Path $BrokerRoot 'State\HostInputs'
 $requestNetworkStatePath = Join-Path $BrokerRoot 'State\NetworkLeases'
 $fatalStatePath = Join-Path $BrokerRoot 'State\broker-fatal.json'
 
+function Get-ValidatedBrokerInstanceId {
+    param([AllowNull()] $Config)
+
+    if ($null -eq $Config) { return $null }
+    $property = $Config.PSObject.Properties['BrokerInstanceId']
+    if ($null -eq $property) { return $null }
+    if ($property.Value -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+        throw 'BrokerInstanceId must be a non-empty safe identifier.'
+    }
+    $instanceId = [string]$property.Value
+    if ($instanceId -cnotmatch '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}\z') {
+        throw 'BrokerInstanceId must contain only ASCII letters, digits, hyphens, and underscores, and start with a letter or digit.'
+    }
+    $instanceId
+}
+
+function Get-BrokerMutexName {
+    param([AllowNull()] $Config)
+
+    $instanceId = Get-ValidatedBrokerInstanceId -Config $Config
+    if ([string]::IsNullOrWhiteSpace($instanceId)) {
+        return 'Global\CodexHyperVBroker'
+    }
+    'Global\CodexHyperVBroker-' + $instanceId
+}
+
 foreach ($path in @($requestPath, $processingPath, $archivePath, $resultsPath, $stagingPath, $payloadManifestPath, $payloadCachePath, $payloadCacheTempPath, $payloadMountPath, $payloadChildrenPath, $cancellationPath, $cancelledPath, (Split-Path -Parent $statePath), $probePath, $payloadLeasePath, $hostInputStatePath, $requestNetworkStatePath)) {
     New-Item -ItemType Directory -Force -Path $path | Out-Null
 }
@@ -5123,8 +5149,33 @@ if ($LibraryOnly) {
     return
 }
 
+$startupConfig = $null
+try {
+    $configItem = Get-Item -LiteralPath $configPath -Force -ErrorAction Stop
+}
+catch [Management.Automation.ItemNotFoundException] {
+    $configItem = $null
+}
+catch {
+    throw "Broker configuration could not be accessed before startup: $($_.Exception.Message)"
+}
+if ($null -ne $configItem) {
+    if ($configItem.PSIsContainer) {
+        throw 'Broker configuration path is not a file before startup.'
+    }
+    try {
+        $startupConfig = Get-Content -Raw -LiteralPath $configPath -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        throw "Broker configuration could not be read before startup: $($_.Exception.Message)"
+    }
+    if ($null -eq $startupConfig -or $startupConfig -is [array] -or $startupConfig -is [string] -or $startupConfig -is [ValueType]) {
+        throw 'Broker configuration must be a JSON object before startup.'
+    }
+}
+$brokerMutexName = Get-BrokerMutexName -Config $startupConfig
 $createdNew = $false
-$mutex = New-Object Threading.Mutex($true, 'Global\CodexHyperVBroker', [ref]$createdNew)
+$mutex = New-Object Threading.Mutex($true, $brokerMutexName, [ref]$createdNew)
 if (-not $createdNew) {
     exit 0
 }
@@ -5135,7 +5186,7 @@ try {
     if (-not (Test-Path -LiteralPath $configPath) -or -not (Test-Path -LiteralPath $credentialPath)) {
         throw 'Broker configuration or guest credential is missing.'
     }
-    $config = Get-Content -Raw -LiteralPath $configPath -Encoding UTF8 | ConvertFrom-Json
+    $config = if ($null -ne $startupConfig) { $startupConfig } else { Get-Content -Raw -LiteralPath $configPath -Encoding UTF8 | ConvertFrom-Json }
     Recover-OrphanedGuestProbes
     if ([bool]$config.PoolEnabled) {
         $poolCommonPath = Join-Path $PSScriptRoot 'PoolCommon.ps1'

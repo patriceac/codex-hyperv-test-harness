@@ -11,6 +11,25 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'HarnessPaths.ps1')
 $layout = Get-CodexHarnessConfig -ConfigPath $ConfigPath
+
+function Get-OptionalBrokerInstanceId {
+    param([Parameter(Mandatory = $true)] $Layout)
+
+    $property = $Layout.PSObject.Properties['BrokerInstanceId']
+    if ($null -eq $property) {
+        return $null
+    }
+    if ($property.Value -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+        throw 'BrokerInstanceId must be a non-empty safe identifier.'
+    }
+    $instanceId = [string]$property.Value
+    if ($instanceId -cnotmatch '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}\z') {
+        throw 'BrokerInstanceId must contain only ASCII letters, digits, hyphens, and underscores, and start with a letter or digit.'
+    }
+    $instanceId
+}
+
+$brokerInstanceId = Get-OptionalBrokerInstanceId -Layout $layout
 if ([string]::IsNullOrWhiteSpace($SourceRoot)) { $SourceRoot = [string]$layout.HarnessSourceRoot }
 if ([string]::IsNullOrWhiteSpace($BrokerRoot)) { $BrokerRoot = [string]$layout.BrokerRoot }
 if ([string]::IsNullOrWhiteSpace($PoolDefinitionPath)) { $PoolDefinitionPath = Join-Path $SourceRoot 'pool-definition.json' }
@@ -333,6 +352,9 @@ try {
         RequestNetworkPolicy = $requestNetworkPolicy
         ClientSid = $ClientSid
         InstalledUtc = [DateTime]::UtcNow.ToString('o')
+    }
+    if ($null -ne $brokerInstanceId) {
+        $config['BrokerInstanceId'] = $brokerInstanceId
     }
     $config | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $configPath -Encoding UTF8
     Set-BrokerAcl -Path $configPath -ClientMode None
