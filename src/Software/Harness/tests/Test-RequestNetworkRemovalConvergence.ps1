@@ -4,7 +4,7 @@ $script:rdReads = 0
 $script:rdStaleReads = 2
 function Get-VM { param($ErrorAction) [pscustomobject]@{ Name = 'test-only' } }
 function Get-VMNetworkAdapter {
-    param([Parameter(ValueFromPipeline = $true)] $VM, $ErrorAction)
+    param([Parameter(ValueFromPipeline = $true)] $VM)
     process {
         $script:rdReads++
         # A peer may use the same adapter name and must not block cleanup.
