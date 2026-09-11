@@ -1751,8 +1751,20 @@ function Assert-RequestNetworkLeasedAttachments {
 function Assert-RequestNetworkHostPolicyCurrent {
     param(
         [Parameter(Mandatory = $true)] $Runtime,
-        [Parameter(Mandatory = $true)] [string] $BrokerRoot
+        [Parameter(Mandatory = $true)] [string] $BrokerRoot,
+        [switch] $LifecycleMutexHeld
     )
+
+    # Lease inventory and Hyper-V adapter topology are one ownership view. All
+    # lifecycle mutations use this broker-root mutex, so periodic assertions
+    # must take the same lock before reading either side of that view. The
+    # connect path is already inside the lock and opts out below to avoid
+    # recursively acquiring a non-reentrant mutex.
+    if (-not $LifecycleMutexHeld) {
+        return Invoke-WithRequestNetworkLifecycleMutex -BrokerRoot $BrokerRoot -Operation {
+            Assert-RequestNetworkHostPolicyCurrent -Runtime $Runtime -BrokerRoot $BrokerRoot -LifecycleMutexHeld
+        }
+    }
 
     $vm = @(Get-VM -ErrorAction Stop | Where-Object {
         [string]::Equals([string]$_.Name, [string]$Runtime.VmName, [StringComparison]::Ordinal)
@@ -1901,7 +1913,7 @@ function Connect-RequestVmNetwork {
         throw 'The request network adapter did not connect to the approved switch.'
     }
     Write-RequestNetworkLeaseState -Runtime $Runtime -Status 'Connected'
-    $hostPolicyCheck = Assert-RequestNetworkHostPolicyCurrent -Runtime $Runtime -BrokerRoot $BrokerRoot
+    $hostPolicyCheck = Assert-RequestNetworkHostPolicyCurrent -Runtime $Runtime -BrokerRoot $BrokerRoot -LifecycleMutexHeld
     [pscustomobject][ordered]@{
         AdapterName = [string]$connected.Name
         MacAddress = [string]$connected.MacAddress
