@@ -796,6 +796,12 @@ function Resolve-RequestNetworkProfile {
         throw "Unsupported request network profile: $profile"
     }
 
+    $provisionProfile = Get-RequestNetworkObjectPropertyValue -Value $Request -Name 'RemoteDebuggerProvisionV1'
+    $hasProvisionProfile = @(Get-RequestNetworkObjectPropertyNames -Value $Request) -contains 'RemoteDebuggerProvisionV1'
+    if ($operation -ne 'RunGuestJobProvisionedV1' -and $hasProvisionProfile) {
+        throw 'RemoteDebuggerProvisionV1 requires the versioned RunGuestJobProvisionedV1 operation.'
+    }
+
     if ($operation -eq 'RunGuestJob') {
         if ($profile -ne 'None') {
             throw 'RunGuestJob cannot request network access; use RunGuestJobNetworkV1.'
@@ -805,6 +811,30 @@ function Resolve-RequestNetworkProfile {
         if (-not $network -or $profile -eq 'None') {
             throw 'RunGuestJobNetworkV1 requires an explicit non-None Network profile.'
         }
+    }
+    elseif ($operation -eq 'RunGuestJobProvisionedV1') {
+        if (-not $hasProvisionProfile -or -not $provisionProfile) { throw 'RunGuestJobProvisionedV1 requires RemoteDebuggerProvisionV1.' }
+        if ($profile -notin @('None', 'IsolatedTestNet')) { throw 'Provisioned guest jobs permit only None or IsolatedTestNet.' }
+        foreach ($requiredFlag in @('ResetToBaseline', 'StopAfter')) {
+            $flag = Get-RequestNetworkObjectPropertyValue -Value $Request -Name $requiredFlag
+            if ($flag -isnot [bool] -or -not $flag) { throw 'Provisioned guest jobs require exact Boolean ResetToBaseline=true and StopAfter=true.' }
+        }
+        if (@(Get-RequestNetworkObjectPropertyValue -Value $Request -Name 'HostInputs' | Where-Object { $null -ne $_ }).Count -gt 0 -or
+            (Get-RequestNetworkObjectPropertyValue -Value $network -Name 'AllowHostInputs') -eq $true -or
+            (Get-RequestNetworkObjectPropertyValue -Value $Request -Name 'ExpectGuestPowerOff') -eq $true -or
+            (Get-RequestNetworkObjectPropertyValue -Value (Get-RequestNetworkObjectPropertyValue -Value $Request -Name 'Job') -Name 'expectGuestPowerOff') -eq $true) {
+            throw 'Provisioned guest jobs cannot include host inputs or expected power-off.'
+        }
+        $protectedProfile = Get-RequestNetworkObjectPropertyValue -Value $Config -Name 'RemoteDebuggerProvisionV1'
+        if (-not $protectedProfile -or (Get-RequestNetworkObjectPropertyValue -Value $protectedProfile -Name 'Enabled') -isnot [bool] -or
+            -not $protectedProfile.Enabled) { throw 'RemoteDebuggerProvisionV1 is disabled by the protected broker configuration.' }
+        $instanceId = Get-RequestNetworkObjectPropertyValue -Value $Config -Name 'BrokerInstanceId'
+        if ($instanceId -isnot [string] -or $instanceId -cnotmatch '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}\z') { throw 'Provisioned guest jobs require a dedicated broker instance.' }
+        if (-not (Get-Command Resolve-RemoteDebuggerProvisionRequestV1 -CommandType Function -ErrorAction SilentlyContinue)) {
+            throw 'The provisioned guest job validator is unavailable.'
+        }
+        # Pure validation runs before any VM allocation; the module revalidates the actual mounted root before execution.
+        $null = Resolve-RemoteDebuggerProvisionRequestV1 -RequestProfile $provisionProfile -ConfigProfile $protectedProfile -RequestId ([string](Get-RequestNetworkObjectPropertyValue -Value $Request -Name 'RequestId'))
     }
     else {
         throw "Unsupported operation: $operation"

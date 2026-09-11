@@ -49,7 +49,15 @@ $installationMutationStarted = $false
 $credentialExistedBefore = $false
 $installCommitted = $false
 $rollbackSucceeded = $false
-$installedFiles = @('HostBroker.ps1', 'PayloadCache.ps1', 'HostInputShare.ps1', 'RequestNetwork.ps1', 'LiveEvidence.ps1', 'PoolCommon.ps1', 'PoolBroker.ps1', 'PoolLifecycle.ps1', 'HostWorker.ps1')
+$installedFiles = @('HostBroker.ps1', 'PayloadCache.ps1', 'HostInputShare.ps1', 'RequestNetwork.ps1', 'RemoteDebuggerProvisioning.ps1', 'RemoteDebuggerObservation.ps1', 'LiveEvidence.ps1', 'PoolCommon.ps1', 'PoolBroker.ps1', 'PoolLifecycle.ps1', 'HostWorker.ps1')
+$remoteDebuggerProvisionProfile = $null
+if ($layout.PSObject.Properties['RemoteDebuggerProvisionV1']) {
+    if ($null -eq $brokerInstanceId) { throw 'RemoteDebuggerProvisionV1 requires a dedicated BrokerInstanceId.' }
+    . (Join-Path $SourceRoot 'RemoteDebuggerProvisioning.ps1')
+    $remoteDebuggerProvisionProfile = $layout.RemoteDebuggerProvisionV1
+    $firstApprovedHash = @($remoteDebuggerProvisionProfile.ApprovedExecutableSha256) | Select-Object -First 1
+    $null = Resolve-RemoteDebuggerProvisionRequestV1 -RequestProfile ([pscustomobject]@{ FixtureRelativePath = 'RemoteDebugger.exe'; ExpectedSha256 = $firstApprovedHash }) -ConfigProfile $remoteDebuggerProvisionProfile -RequestId 'installer-policy-validation'
+}
 $backedUpNames = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
 
 function New-FailClosedRequestNetworkPolicy {
@@ -355,6 +363,9 @@ try {
     }
     if ($null -ne $brokerInstanceId) {
         $config['BrokerInstanceId'] = $brokerInstanceId
+    }
+    if ($null -ne $remoteDebuggerProvisionProfile) {
+        $config['RemoteDebuggerProvisionV1'] = $remoteDebuggerProvisionProfile
     }
     $config | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $configPath -Encoding UTF8
     Set-BrokerAcl -Path $configPath -ClientMode None
