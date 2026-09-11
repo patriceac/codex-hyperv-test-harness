@@ -1115,6 +1115,26 @@ if (-not (
 $scenarios.Add('continuous-boundary-and-guest-attestation')
 $scenarios.Add('guest-init-cancellation-and-periodic-host-policy-checks')
 
+$hostPolicyStart = $moduleText.IndexOf('function Assert-RequestNetworkHostPolicyCurrent', [StringComparison]::Ordinal)
+$hostPolicyEnd = $moduleText.IndexOf('function Connect-RequestVmNetwork', $hostPolicyStart, [StringComparison]::Ordinal)
+$hostPolicyText = if ($hostPolicyStart -ge 0 -and $hostPolicyEnd -gt $hostPolicyStart) {
+    $moduleText.Substring($hostPolicyStart, $hostPolicyEnd - $hostPolicyStart)
+}
+else { '' }
+$connectStart = $hostPolicyEnd
+$connectEnd = $moduleText.IndexOf('function Reset-GuestRequestNetworkResidue', $connectStart, [StringComparison]::Ordinal)
+$connectText = if ($connectStart -ge 0 -and $connectEnd -gt $connectStart) {
+    $moduleText.Substring($connectStart, $connectEnd - $connectStart)
+}
+else { '' }
+Assert-True (
+    $hostPolicyText.Contains('[switch] $LifecycleMutexHeld') -and
+    $hostPolicyText.Contains('Invoke-WithRequestNetworkLifecycleMutex -BrokerRoot $BrokerRoot -Operation') -and
+    $hostPolicyText.Contains('Assert-RequestNetworkHostPolicyCurrent -Runtime $Runtime -BrokerRoot $BrokerRoot -LifecycleMutexHeld') -and
+    $connectText.Contains('Assert-RequestNetworkHostPolicyCurrent -Runtime $Runtime -BrokerRoot $BrokerRoot -LifecycleMutexHeld')
+) 'Periodic request-network policy checks are not serialized with peer cleanup, or the already-locked connect path does not avoid recursive mutex acquisition.'
+$scenarios.Add('host-policy-revalidation-serializes-with-peer-cleanup')
+
 [pscustomobject][ordered]@{
     Success = $true
     ScenarioCount = $scenarios.Count
