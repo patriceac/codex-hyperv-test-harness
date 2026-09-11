@@ -1733,7 +1733,10 @@ function Assert-RequestNetworkLeasedAttachments {
             [string]::Equals([string]$_.AdapterName, [string]$attachment.Name, [StringComparison]::Ordinal)
         })
         if ([string]$attachment.Name -notlike 'CodexRequestNet-*' -or $matchingLeases.Count -ne 1) {
-            throw "The $($Runtime.Profile) switch has an adapter that is not bound to one active broker lease."
+            $matchingLeaseSummary = @($matchingLeases | ForEach-Object {
+                "RequestId=$([string]$_.RequestId);Status=$([string]$_.Status);VmName=$([string]$_.VmName);VmId=$([string]$_.VmId);AdapterName=$([string]$_.AdapterName);SwitchId=$([string]$_.SwitchId)"
+            }) -join ' | '
+            throw "The $($Runtime.Profile) switch has an adapter that is not bound to one active broker lease. AdapterVmName=$([string]$attachment.VMName);AdapterName=$([string]$attachment.Name);AdapterSwitchName=$([string]$attachment.SwitchName);RuntimeVmName=$([string]$Runtime.VmName);RuntimeVmId=$([string]$Runtime.VmId);RuntimeAdapterName=$([string]$Runtime.AdapterName);RuntimeSwitchId=$([string]$Runtime.SwitchId);MatchingLeases=$matchingLeaseSummary"
         }
         if ([string]$matchingLeases[0].Status -notin @('Connected', 'GuestNetworkReady') -or -not (Test-RequestNetworkOwnerAlive -State $matchingLeases[0])) {
             throw "The $($Runtime.Profile) switch has an adapter whose broker lease is stale or not in a connected state."
@@ -2385,6 +2388,33 @@ function Get-RequestNetworkAdapterLeaseOwnership {
     $matches[0]
 }
 
+function Wait-RequestNetworkAdapterAbsent {
+    param(
+        [Parameter(Mandatory = $true)] [string] $VmName,
+        [Parameter(Mandatory = $true)] [string] $AdapterName,
+        [int] $TimeoutSeconds = 5
+    )
+
+    if ([string]::IsNullOrWhiteSpace($VmName)) { throw 'The request-network VM name is required for removal convergence.' }
+    if ([string]::IsNullOrWhiteSpace($AdapterName)) { throw 'The request-network adapter name is required for removal convergence.' }
+    if ($TimeoutSeconds -lt 1 -or $TimeoutSeconds -gt 30) { throw 'The request-network adapter removal convergence timeout is outside its bounded range.' }
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $visible = @()
+    do {
+        $visible = @(Get-VM -ErrorAction Stop | Get-VMNetworkAdapter -ErrorAction Stop | Where-Object {
+            [string]::Equals([string]$_.VMName, $VmName, [StringComparison]::Ordinal) -and
+            [string]::Equals([string]$_.Name, $AdapterName, [StringComparison]::Ordinal)
+        })
+        if ($visible.Count -eq 0) { return $true }
+        if ([DateTime]::UtcNow -ge $deadline) { break }
+        Start-Sleep -Milliseconds 250
+    } while ($true)
+    $visibleSummary = @($visible | ForEach-Object {
+        "VmName=$([string]$_.VMName);AdapterName=$([string]$_.Name);SwitchName=$([string]$_.SwitchName)"
+    }) -join ' | '
+    throw "The request-network adapter '$AdapterName' on VM '$VmName' remained visible in Hyper-V inventory after bounded removal convergence. VisibleAdapters=$visibleSummary"
+}
+
 function Remove-ManagedRequestNetworkAdapters {
     param(
         [Parameter(Mandatory = $true)] [string] $VmName,
@@ -2428,6 +2458,7 @@ function Remove-ManagedRequestNetworkAdapters {
             if (@(Get-VMNetworkAdapter -VMName $VmName -ErrorAction Stop | Where-Object { [string]::Equals([string]$_.Name, [string]$adapter.Name, [StringComparison]::Ordinal) }).Count -ne 0) {
                 throw "Managed adapter '$($adapter.Name)' still exists after removal."
             }
+            Wait-RequestNetworkAdapterAbsent -VmName $VmName -AdapterName ([string]$adapter.Name) | Out-Null
             $removed.Add([string]$adapter.Name)
         }
         catch { $errors.Add($_.Exception.Message) }
@@ -2502,6 +2533,17 @@ function Remove-RequestNetworkRuntime {
             if (-not $adapterRemoved) { throw 'The disconnected request adapter still exists.' }
         }
         catch { $errors.Add("Adapter removal: $($_.Exception.Message)") }
+    }
+
+    if ($errors.Count -eq 0 -and $disconnected -and $adapterRemoved) {
+        try {
+            # A VM-scoped query can report removal before the global Hyper-V
+            # inventory converges. Keep the lease authoritative until this
+            # exact VM/adapter identity is absent globally; peer adapters on
+            # the same switch remain visible and continue to be validated.
+            Wait-RequestNetworkAdapterAbsent -VmName ([string]$Runtime.VmName) -AdapterName ([string]$Runtime.AdapterName) | Out-Null
+        }
+        catch { $errors.Add("Adapter removal convergence: $($_.Exception.Message)") }
     }
 
     if ($errors.Count -eq 0 -and [bool]$Runtime.SwitchOwned) {
