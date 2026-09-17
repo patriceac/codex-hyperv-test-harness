@@ -85,6 +85,32 @@ try {
     Assert-True (-not $missingWait.Found -and $missingWait.ElapsedMilliseconds -ge 250 -and $missingWait.ElapsedMilliseconds -lt 1500) 'wait_result_file did not honor its bounded timeout.'
     $scenarios.Add('wait-result-file-bounded')
 
+    # Optional live evidence belongs to the running agent. Looking for its
+    # heartbeat must not import an unrelated module or spend the wait budget
+    # discovering every module installed on a hosted Windows runner.
+    $moduleSearchRoot = Join-Path $testRoot 'optional-modules'
+    $moduleName = 'CodexGuestHeartbeatProbe'
+    $moduleRoot = Join-Path $moduleSearchRoot $moduleName
+    New-Item -ItemType Directory -Force -Path $moduleRoot | Out-Null
+    @'
+[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'autoloaded.txt'), 'loaded')
+function Invoke-GuestLiveEvidenceHeartbeat { param([DateTime] $NotAfterUtc) }
+Export-ModuleMember -Function Invoke-GuestLiveEvidenceHeartbeat
+'@ | Set-Content -LiteralPath (Join-Path $moduleRoot ($moduleName + '.psm1')) -Encoding UTF8
+    New-ModuleManifest -Path (Join-Path $moduleRoot ($moduleName + '.psd1')) -RootModule ($moduleName + '.psm1') -FunctionsToExport @('Invoke-GuestLiveEvidenceHeartbeat')
+    $originalModulePath = $env:PSModulePath
+    try {
+        $env:PSModulePath = $moduleSearchRoot + [IO.Path]::PathSeparator + $originalModulePath
+        $presentWithoutAutoload = Wait-GuestResultFile -Path $resultPath -TimeoutMilliseconds 5000
+        Assert-True ($presentWithoutAutoload.Found -and $presentWithoutAutoload.Length -gt 0) 'Existing evidence was not recognized with an optional heartbeat module available.'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $moduleRoot 'autoloaded.txt'))) 'Result-file polling imported an optional heartbeat module.'
+        $scenarios.Add('wait-result-file-does-not-autoload-heartbeat')
+    }
+    finally {
+        $env:PSModulePath = $originalModulePath
+        Remove-Module -Name $moduleName -Force -ErrorAction SilentlyContinue
+    }
+
     Assert-True (Test-ExpectedGuestPowerOffJob -Job ([pscustomobject]@{ expectGuestPowerOff = $true })) 'An exact Boolean expected-power-off contract was not recognized.'
     Assert-True (-not (Test-ExpectedGuestPowerOffJob -Job ([pscustomobject]@{ expectGuestPowerOff = 'true' }))) 'A string expected-power-off value was treated as an exact Boolean.'
     Assert-True (-not (Test-ExpectedGuestPowerOffJob -Job ([pscustomobject]@{ expectGuestPowerOff = 1 }))) 'A numeric expected-power-off value was treated as an exact Boolean.'

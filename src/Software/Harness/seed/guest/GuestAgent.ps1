@@ -436,7 +436,8 @@ function Wait-GuestResultFile {
     $watch = [Diagnostics.Stopwatch]::StartNew()
     $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
     do {
-        if (Get-Command -Name Invoke-GuestLiveEvidenceHeartbeat -CommandType Function -ErrorAction SilentlyContinue) {
+        # Inspect the current function scope without triggering module discovery.
+        if (Test-Path -LiteralPath 'Function:\Invoke-GuestLiveEvidenceHeartbeat') {
             Invoke-GuestLiveEvidenceHeartbeat -NotAfterUtc $deadline
         }
         if ([DateTime]::UtcNow -ge $deadline) { break }
