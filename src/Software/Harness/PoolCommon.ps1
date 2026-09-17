@@ -51,10 +51,56 @@ function Get-PoolWorkerStatePath {
     Join-Path (Get-PoolWorkerStateRoot -BrokerRoot $BrokerRoot) ('worker-{0:D2}.json' -f $WorkerId)
 }
 
-function Get-PoolWorkerMutexName {
-    param([Parameter(Mandatory = $true)] [ValidateRange(1, 64)] [int] $WorkerId)
+function Get-PoolBrokerInstanceId {
+    param([Parameter(Mandatory = $true)] [string] $BrokerRoot)
 
-    'Global\CodexHyperVPoolWorker-{0:D2}' -f $WorkerId
+    $configPath = Join-Path $BrokerRoot 'Private\config.json'
+    try {
+        $configItem = Get-Item -LiteralPath $configPath -Force -ErrorAction Stop
+    }
+    catch [Management.Automation.ItemNotFoundException] {
+        return $null
+    }
+    catch {
+        throw "Broker configuration could not be accessed before taking the worker state lock: $($_.Exception.Message)"
+    }
+    if ($configItem.PSIsContainer) {
+        throw 'Broker configuration path is not a file before taking the worker state lock.'
+    }
+    try {
+        $config = Get-Content -Raw -LiteralPath $configPath -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        throw "Broker configuration could not be read before taking the worker state lock: $($_.Exception.Message)"
+    }
+    if ($null -eq $config -or $config -is [array] -or $config -is [string] -or $config -is [ValueType]) {
+        throw 'Broker configuration must be a JSON object before taking the worker state lock.'
+    }
+    $property = $config.PSObject.Properties['BrokerInstanceId']
+    if ($null -eq $property) {
+        return $null
+    }
+    if ($property.Value -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+        throw 'BrokerInstanceId must be a non-empty safe identifier.'
+    }
+    $instanceId = [string]$property.Value
+    if ($instanceId -cnotmatch '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}\z') {
+        throw 'BrokerInstanceId must contain only ASCII letters, digits, hyphens, and underscores, and start with a letter or digit.'
+    }
+    $instanceId
+}
+
+function Get-PoolWorkerMutexName {
+    param(
+        [Parameter(Mandatory = $true)] [ValidateRange(1, 64)] [int] $WorkerId,
+        [string] $BrokerRoot
+    )
+
+    $instanceId = if ([string]::IsNullOrWhiteSpace($BrokerRoot)) { $null } else { Get-PoolBrokerInstanceId -BrokerRoot $BrokerRoot }
+    if ([string]::IsNullOrWhiteSpace($instanceId)) {
+        return 'Global\CodexHyperVPoolWorker-{0:D2}' -f $WorkerId
+    }
+    'Global\CodexHyperVPoolWorker-{0:D2}-{1}' -f $WorkerId, $instanceId
 }
 
 function Read-PoolWorkerState {
@@ -87,7 +133,7 @@ function Update-PoolWorkerState {
         [switch] $RequireExpectation
     )
 
-    $mutex = New-Object Threading.Mutex($false, (Get-PoolWorkerMutexName -WorkerId $WorkerId))
+    $mutex = New-Object Threading.Mutex($false, (Get-PoolWorkerMutexName -WorkerId $WorkerId -BrokerRoot $BrokerRoot))
     $lockTaken = $false
     try {
         try {

@@ -78,6 +78,32 @@ $hostInputStatePath = Join-Path $BrokerRoot 'State\HostInputs'
 $requestNetworkStatePath = Join-Path $BrokerRoot 'State\NetworkLeases'
 $fatalStatePath = Join-Path $BrokerRoot 'State\broker-fatal.json'
 
+function Get-ValidatedBrokerInstanceId {
+    param([AllowNull()] $Config)
+
+    if ($null -eq $Config) { return $null }
+    $property = $Config.PSObject.Properties['BrokerInstanceId']
+    if ($null -eq $property) { return $null }
+    if ($property.Value -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+        throw 'BrokerInstanceId must be a non-empty safe identifier.'
+    }
+    $instanceId = [string]$property.Value
+    if ($instanceId -cnotmatch '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}\z') {
+        throw 'BrokerInstanceId must contain only ASCII letters, digits, hyphens, and underscores, and start with a letter or digit.'
+    }
+    $instanceId
+}
+
+function Get-BrokerMutexName {
+    param([AllowNull()] $Config)
+
+    $instanceId = Get-ValidatedBrokerInstanceId -Config $Config
+    if ([string]::IsNullOrWhiteSpace($instanceId)) {
+        return 'Global\CodexHyperVBroker'
+    }
+    'Global\CodexHyperVBroker-' + $instanceId
+}
+
 foreach ($path in @($requestPath, $processingPath, $archivePath, $resultsPath, $stagingPath, $payloadManifestPath, $payloadCachePath, $payloadCacheTempPath, $payloadMountPath, $payloadChildrenPath, $cancellationPath, $cancelledPath, (Split-Path -Parent $statePath), $probePath, $payloadLeasePath, $hostInputStatePath, $requestNetworkStatePath)) {
     New-Item -ItemType Directory -Force -Path $path | Out-Null
 }
@@ -238,6 +264,14 @@ if (-not (Test-Path -LiteralPath $requestNetworkModulePath -PathType Leaf)) {
     throw "Request-network module not found: $requestNetworkModulePath"
 }
 . $requestNetworkModulePath
+$remoteDebuggerProvisionModulePath = Join-Path $PSScriptRoot 'RemoteDebuggerProvisioning.ps1'
+if (Test-Path -LiteralPath $remoteDebuggerProvisionModulePath -PathType Leaf) {
+    . $remoteDebuggerProvisionModulePath
+}
+$remoteDebuggerObservationModulePath = Join-Path $PSScriptRoot 'RemoteDebuggerObservation.ps1'
+if (Test-Path -LiteralPath $remoteDebuggerObservationModulePath -PathType Leaf) {
+    . $remoteDebuggerObservationModulePath
+}
 $liveEvidenceModulePath = Join-Path $PSScriptRoot 'LiveEvidence.ps1'
 if (-not (Test-Path -LiteralPath $liveEvidenceModulePath -PathType Leaf)) {
     throw "Live-evidence module not found: $liveEvidenceModulePath"
@@ -3305,6 +3339,8 @@ function Invoke-GuestRequest {
     $applicationRelaunchedByHarnessAfterGuestPowerOff = $null
     $expectedGuestPowerOffContractSatisfied = $null
     $brokerCleanupStartedUtc = $null
+    $remoteDebuggerObservationSession = $null
+    $remoteDebuggerObservationJob = $null
     $poolMode = [bool]$Config.PoolEnabled
     $workerId = if ($poolMode) { [Nullable[int]]([int]$Config.PoolWorkerId) } else { $null }
     $guestSessionReconnects = 0
@@ -3756,6 +3792,21 @@ function Invoke-GuestRequest {
             $requestNetworkLastHostEvidence = Assert-RequestNetworkHostPolicyCurrent -Runtime $requestNetworkRuntime -BrokerRoot $BrokerRoot
             Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
             $requestNetworkHostPolicyCheckCount++
+        }
+        if ([string]$Request.Operation -eq 'RunGuestJobProvisionedV1') {
+            $failureStage = 'ProvisioningGuest'
+            Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
+            Write-RequestState -ResultRoot $RequestStateRoot -RequestId $requestId -Status 'PreparingGuest' -Message 'Provisioning the approved Remote Debugger fixture inside the disposable guest.' -CreatedUtc $createdUtc -ClaimedUtc $ClaimedUtc -ExecutionDeadlineUtc $executionDeadlineUtc -WorkerId $workerId
+            # GuestAgent recreates Outbox at launch. Store the protected bootstrap receipt separately;
+            # the medium-user Lab reads it and includes a copy with its collected evidence.
+            $guestProvisioningRoot = 'C:\CodexGuest\Provisioning\' + $requestId
+            $provisioningEvidence = Invoke-RemoteDebuggerProvisionV1 -Session $session -RequestProfile $Request.RemoteDebuggerProvisionV1 -ConfigProfile $Config.RemoteDebuggerProvisionV1 -GuestPayloadRoot $guestPayloadRoot -GuestOutputRoot $guestProvisioningRoot -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc -ActivityCheck {
+                Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
+            }
+            Write-JsonAtomic -Path (Join-Path $ResultRoot 'broker-provisioning.json') -Value $provisioningEvidence
+            Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
+            $remoteDebuggerObservationSession = Open-GuestSessionReliable -VmName $vmName -Credential $credential -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
+            $remoteDebuggerObservationJob = Start-RemoteDebuggerObservationV1 -Session $remoteDebuggerObservationSession -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
         }
         $failureStage = 'SubmittingGuestJob'
         $guestJobPath = Join-Path $ResultRoot ($requestId + '.json')
@@ -4604,6 +4655,10 @@ function Invoke-GuestRequest {
     }
     finally {
         $brokerCleanupStartedUtc = [DateTime]::UtcNow.ToString('o')
+        if ($remoteDebuggerObservationJob -or $remoteDebuggerObservationSession) {
+            try { Stop-RemoteDebuggerObservationV1 -Job $remoteDebuggerObservationJob -Session $remoteDebuggerObservationSession }
+            catch { $evidenceWarnings.Add('Fixed Remote Debugger observation cleanup failed: ' + $_.Exception.Message) }
+        }
         if ($liveEvidenceContext) {
             try {
                 Complete-HostLiveEvidenceFailure -Context $liveEvidenceContext -Status 'RequestAlreadyTerminal' -FailureKind 'RequestAlreadyTerminal' -Message 'The request left its live application stage before capture publication completed.' -LifecycleStage 'StoppingVm' -ApplicationProcessId ([int]$liveEvidenceContext.Command.ExpectedApplicationProcessId)
@@ -4920,7 +4975,7 @@ function Invoke-GuestRequest {
             HostInputSetupMilliseconds = [Math]::Round($hostInputSetupWatch.Elapsed.TotalMilliseconds, 3)
             HostInputCleanup = $hostInputCleanup
             Network = [ordered]@{
-                ContractVersion = if ([string]$Request.Operation -eq 'RunGuestJobNetworkV1') { 1 } else { 0 }
+                ContractVersion = if ([string]$Request.Operation -eq 'RunGuestJobNetworkV1' -or ([string]$Request.Operation -eq 'RunGuestJobProvisionedV1' -and [string]$requestNetworkDefinition.EffectiveProfile -ne 'None')) { 1 } else { 0 }
                 RequestedProfile = if ($requestNetworkDefinition) { [string]$requestNetworkDefinition.RequestedProfile } else { 'None' }
                 EffectiveProfile = if ($requestNetworkDefinition) { [string]$requestNetworkDefinition.EffectiveProfile } else { 'None' }
                 Cohort = if ($requestNetworkDefinition -and [string]$requestNetworkDefinition.EffectiveProfile -eq 'IsolatedTestNet') { [string]$requestNetworkDefinition.Cohort } else { $null }
@@ -5123,8 +5178,33 @@ if ($LibraryOnly) {
     return
 }
 
+$startupConfig = $null
+try {
+    $configItem = Get-Item -LiteralPath $configPath -Force -ErrorAction Stop
+}
+catch [Management.Automation.ItemNotFoundException] {
+    $configItem = $null
+}
+catch {
+    throw "Broker configuration could not be accessed before startup: $($_.Exception.Message)"
+}
+if ($null -ne $configItem) {
+    if ($configItem.PSIsContainer) {
+        throw 'Broker configuration path is not a file before startup.'
+    }
+    try {
+        $startupConfig = Get-Content -Raw -LiteralPath $configPath -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        throw "Broker configuration could not be read before startup: $($_.Exception.Message)"
+    }
+    if ($null -eq $startupConfig -or $startupConfig -is [array] -or $startupConfig -is [string] -or $startupConfig -is [ValueType]) {
+        throw 'Broker configuration must be a JSON object before startup.'
+    }
+}
+$brokerMutexName = Get-BrokerMutexName -Config $startupConfig
 $createdNew = $false
-$mutex = New-Object Threading.Mutex($true, 'Global\CodexHyperVBroker', [ref]$createdNew)
+$mutex = New-Object Threading.Mutex($true, $brokerMutexName, [ref]$createdNew)
 if (-not $createdNew) {
     exit 0
 }
@@ -5135,7 +5215,7 @@ try {
     if (-not (Test-Path -LiteralPath $configPath) -or -not (Test-Path -LiteralPath $credentialPath)) {
         throw 'Broker configuration or guest credential is missing.'
     }
-    $config = Get-Content -Raw -LiteralPath $configPath -Encoding UTF8 | ConvertFrom-Json
+    $config = if ($null -ne $startupConfig) { $startupConfig } else { Get-Content -Raw -LiteralPath $configPath -Encoding UTF8 | ConvertFrom-Json }
     Recover-OrphanedGuestProbes
     if ([bool]$config.PoolEnabled) {
         $poolCommonPath = Join-Path $PSScriptRoot 'PoolCommon.ps1'

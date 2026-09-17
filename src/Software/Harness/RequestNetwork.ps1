@@ -796,6 +796,12 @@ function Resolve-RequestNetworkProfile {
         throw "Unsupported request network profile: $profile"
     }
 
+    $provisionProfile = Get-RequestNetworkObjectPropertyValue -Value $Request -Name 'RemoteDebuggerProvisionV1'
+    $hasProvisionProfile = @(Get-RequestNetworkObjectPropertyNames -Value $Request) -contains 'RemoteDebuggerProvisionV1'
+    if ($operation -ne 'RunGuestJobProvisionedV1' -and $hasProvisionProfile) {
+        throw 'RemoteDebuggerProvisionV1 requires the versioned RunGuestJobProvisionedV1 operation.'
+    }
+
     if ($operation -eq 'RunGuestJob') {
         if ($profile -ne 'None') {
             throw 'RunGuestJob cannot request network access; use RunGuestJobNetworkV1.'
@@ -805,6 +811,30 @@ function Resolve-RequestNetworkProfile {
         if (-not $network -or $profile -eq 'None') {
             throw 'RunGuestJobNetworkV1 requires an explicit non-None Network profile.'
         }
+    }
+    elseif ($operation -eq 'RunGuestJobProvisionedV1') {
+        if (-not $hasProvisionProfile -or -not $provisionProfile) { throw 'RunGuestJobProvisionedV1 requires RemoteDebuggerProvisionV1.' }
+        if ($profile -notin @('None', 'IsolatedTestNet')) { throw 'Provisioned guest jobs permit only None or IsolatedTestNet.' }
+        foreach ($requiredFlag in @('ResetToBaseline', 'StopAfter')) {
+            $flag = Get-RequestNetworkObjectPropertyValue -Value $Request -Name $requiredFlag
+            if ($flag -isnot [bool] -or -not $flag) { throw 'Provisioned guest jobs require exact Boolean ResetToBaseline=true and StopAfter=true.' }
+        }
+        if (@(Get-RequestNetworkObjectPropertyValue -Value $Request -Name 'HostInputs' | Where-Object { $null -ne $_ }).Count -gt 0 -or
+            (Get-RequestNetworkObjectPropertyValue -Value $network -Name 'AllowHostInputs') -eq $true -or
+            (Get-RequestNetworkObjectPropertyValue -Value $Request -Name 'ExpectGuestPowerOff') -eq $true -or
+            (Get-RequestNetworkObjectPropertyValue -Value (Get-RequestNetworkObjectPropertyValue -Value $Request -Name 'Job') -Name 'expectGuestPowerOff') -eq $true) {
+            throw 'Provisioned guest jobs cannot include host inputs or expected power-off.'
+        }
+        $protectedProfile = Get-RequestNetworkObjectPropertyValue -Value $Config -Name 'RemoteDebuggerProvisionV1'
+        if (-not $protectedProfile -or (Get-RequestNetworkObjectPropertyValue -Value $protectedProfile -Name 'Enabled') -isnot [bool] -or
+            -not $protectedProfile.Enabled) { throw 'RemoteDebuggerProvisionV1 is disabled by the protected broker configuration.' }
+        $instanceId = Get-RequestNetworkObjectPropertyValue -Value $Config -Name 'BrokerInstanceId'
+        if ($instanceId -isnot [string] -or $instanceId -cnotmatch '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}\z') { throw 'Provisioned guest jobs require a dedicated broker instance.' }
+        if (-not (Get-Command Resolve-RemoteDebuggerProvisionRequestV1 -CommandType Function -ErrorAction SilentlyContinue)) {
+            throw 'The provisioned guest job validator is unavailable.'
+        }
+        # Pure validation runs before any VM allocation; the module revalidates the actual mounted root before execution.
+        $null = Resolve-RemoteDebuggerProvisionRequestV1 -RequestProfile $provisionProfile -ConfigProfile $protectedProfile -RequestId ([string](Get-RequestNetworkObjectPropertyValue -Value $Request -Name 'RequestId'))
     }
     else {
         throw "Unsupported operation: $operation"
@@ -1703,7 +1733,10 @@ function Assert-RequestNetworkLeasedAttachments {
             [string]::Equals([string]$_.AdapterName, [string]$attachment.Name, [StringComparison]::Ordinal)
         })
         if ([string]$attachment.Name -notlike 'CodexRequestNet-*' -or $matchingLeases.Count -ne 1) {
-            throw "The $($Runtime.Profile) switch has an adapter that is not bound to one active broker lease."
+            $matchingLeaseSummary = @($matchingLeases | ForEach-Object {
+                "RequestId=$([string]$_.RequestId);Status=$([string]$_.Status);VmName=$([string]$_.VmName);VmId=$([string]$_.VmId);AdapterName=$([string]$_.AdapterName);SwitchId=$([string]$_.SwitchId)"
+            }) -join ' | '
+            throw "The $($Runtime.Profile) switch has an adapter that is not bound to one active broker lease. AdapterVmName=$([string]$attachment.VMName);AdapterName=$([string]$attachment.Name);AdapterSwitchName=$([string]$attachment.SwitchName);RuntimeVmName=$([string]$Runtime.VmName);RuntimeVmId=$([string]$Runtime.VmId);RuntimeAdapterName=$([string]$Runtime.AdapterName);RuntimeSwitchId=$([string]$Runtime.SwitchId);MatchingLeases=$matchingLeaseSummary"
         }
         if ([string]$matchingLeases[0].Status -notin @('Connected', 'GuestNetworkReady') -or -not (Test-RequestNetworkOwnerAlive -State $matchingLeases[0])) {
             throw "The $($Runtime.Profile) switch has an adapter whose broker lease is stale or not in a connected state."
@@ -1721,8 +1754,20 @@ function Assert-RequestNetworkLeasedAttachments {
 function Assert-RequestNetworkHostPolicyCurrent {
     param(
         [Parameter(Mandatory = $true)] $Runtime,
-        [Parameter(Mandatory = $true)] [string] $BrokerRoot
+        [Parameter(Mandatory = $true)] [string] $BrokerRoot,
+        [switch] $LifecycleMutexHeld
     )
+
+    # Lease inventory and Hyper-V adapter topology are one ownership view. All
+    # lifecycle mutations use this broker-root mutex, so periodic assertions
+    # must take the same lock before reading either side of that view. The
+    # connect path is already inside the lock and opts out below to avoid
+    # recursively acquiring a non-reentrant mutex.
+    if (-not $LifecycleMutexHeld) {
+        return Invoke-WithRequestNetworkLifecycleMutex -BrokerRoot $BrokerRoot -Operation {
+            Assert-RequestNetworkHostPolicyCurrent -Runtime $Runtime -BrokerRoot $BrokerRoot -LifecycleMutexHeld
+        }
+    }
 
     $vm = @(Get-VM -ErrorAction Stop | Where-Object {
         [string]::Equals([string]$_.Name, [string]$Runtime.VmName, [StringComparison]::Ordinal)
@@ -1871,7 +1916,7 @@ function Connect-RequestVmNetwork {
         throw 'The request network adapter did not connect to the approved switch.'
     }
     Write-RequestNetworkLeaseState -Runtime $Runtime -Status 'Connected'
-    $hostPolicyCheck = Assert-RequestNetworkHostPolicyCurrent -Runtime $Runtime -BrokerRoot $BrokerRoot
+    $hostPolicyCheck = Assert-RequestNetworkHostPolicyCurrent -Runtime $Runtime -BrokerRoot $BrokerRoot -LifecycleMutexHeld
     [pscustomobject][ordered]@{
         AdapterName = [string]$connected.Name
         MacAddress = [string]$connected.MacAddress
@@ -2343,6 +2388,33 @@ function Get-RequestNetworkAdapterLeaseOwnership {
     $matches[0]
 }
 
+function Wait-RequestNetworkAdapterAbsent {
+    param(
+        [Parameter(Mandatory = $true)] [string] $VmName,
+        [Parameter(Mandatory = $true)] [string] $AdapterName,
+        [int] $TimeoutSeconds = 5
+    )
+
+    if ([string]::IsNullOrWhiteSpace($VmName)) { throw 'The request-network VM name is required for removal convergence.' }
+    if ([string]::IsNullOrWhiteSpace($AdapterName)) { throw 'The request-network adapter name is required for removal convergence.' }
+    if ($TimeoutSeconds -lt 1 -or $TimeoutSeconds -gt 30) { throw 'The request-network adapter removal convergence timeout is outside its bounded range.' }
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $visible = @()
+    do {
+        $visible = @(Get-VM -ErrorAction Stop | Get-VMNetworkAdapter -ErrorAction Stop | Where-Object {
+            [string]::Equals([string]$_.VMName, $VmName, [StringComparison]::Ordinal) -and
+            [string]::Equals([string]$_.Name, $AdapterName, [StringComparison]::Ordinal)
+        })
+        if ($visible.Count -eq 0) { return $true }
+        if ([DateTime]::UtcNow -ge $deadline) { break }
+        Start-Sleep -Milliseconds 250
+    } while ($true)
+    $visibleSummary = @($visible | ForEach-Object {
+        "VmName=$([string]$_.VMName);AdapterName=$([string]$_.Name);SwitchName=$([string]$_.SwitchName)"
+    }) -join ' | '
+    throw "The request-network adapter '$AdapterName' on VM '$VmName' remained visible in Hyper-V inventory after bounded removal convergence. VisibleAdapters=$visibleSummary"
+}
+
 function Remove-ManagedRequestNetworkAdapters {
     param(
         [Parameter(Mandatory = $true)] [string] $VmName,
@@ -2386,6 +2458,7 @@ function Remove-ManagedRequestNetworkAdapters {
             if (@(Get-VMNetworkAdapter -VMName $VmName -ErrorAction Stop | Where-Object { [string]::Equals([string]$_.Name, [string]$adapter.Name, [StringComparison]::Ordinal) }).Count -ne 0) {
                 throw "Managed adapter '$($adapter.Name)' still exists after removal."
             }
+            Wait-RequestNetworkAdapterAbsent -VmName $VmName -AdapterName ([string]$adapter.Name) | Out-Null
             $removed.Add([string]$adapter.Name)
         }
         catch { $errors.Add($_.Exception.Message) }
@@ -2460,6 +2533,17 @@ function Remove-RequestNetworkRuntime {
             if (-not $adapterRemoved) { throw 'The disconnected request adapter still exists.' }
         }
         catch { $errors.Add("Adapter removal: $($_.Exception.Message)") }
+    }
+
+    if ($errors.Count -eq 0 -and $disconnected -and $adapterRemoved) {
+        try {
+            # A VM-scoped query can report removal before the global Hyper-V
+            # inventory converges. Keep the lease authoritative until this
+            # exact VM/adapter identity is absent globally; peer adapters on
+            # the same switch remain visible and continue to be validated.
+            Wait-RequestNetworkAdapterAbsent -VmName ([string]$Runtime.VmName) -AdapterName ([string]$Runtime.AdapterName) | Out-Null
+        }
+        catch { $errors.Add("Adapter removal convergence: $($_.Exception.Message)") }
     }
 
     if ($errors.Count -eq 0 -and [bool]$Runtime.SwitchOwned) {

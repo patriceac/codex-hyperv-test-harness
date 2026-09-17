@@ -15,6 +15,9 @@ param(
     [ValidateSet('None', 'IsolatedTestNet', 'InternetOnly', 'TrustedLan')] [string] $NetworkProfile = 'None',
     [string] $NetworkCohort,
     [switch] $AllowNetworkWithHostInputs,
+    [ValidateSet('None', 'RemoteDebuggerProvisionV1')] [string] $GuestSetupProfile = 'None',
+    [string] $GuestSetupExecutableRelativePath,
+    [string] $GuestSetupExecutableSha256,
     [switch] $RequireHostLocked,
     [ValidateRange(5, 86400)] [int] $QueueTimeoutSeconds = 1800,
     [Alias('TimeoutSeconds')] [ValidateRange(10, 7200)] [int] $ExecutionTimeoutSeconds = 900,
@@ -36,6 +39,44 @@ if (-not $ExpectGuestPowerOff -and $PSBoundParameters.ContainsKey('GuestPowerOff
 }
 if ($ExpectGuestPowerOff -and [string]::IsNullOrWhiteSpace($AssertResultFile)) {
     throw 'AssertResultFile is required when ExpectGuestPowerOff is specified.'
+}
+if ($GuestSetupProfile -eq 'None') {
+    if ($PSBoundParameters.ContainsKey('GuestSetupExecutableRelativePath') -or $PSBoundParameters.ContainsKey('GuestSetupExecutableSha256')) {
+        throw 'Guest setup executable fields require GuestSetupProfile RemoteDebuggerProvisionV1.'
+    }
+}
+elseif ($NetworkProfile -notin @('None', 'IsolatedTestNet') -or $ReadOnlyHostInput.Count -gt 0 -or $AllowNetworkWithHostInputs -or $ExpectGuestPowerOff) {
+    throw 'RemoteDebuggerProvisionV1 permits only None or IsolatedTestNet, without host inputs or expected power-off.'
+}
+
+function Resolve-RemoteDebuggerClientFixture {
+    param(
+        [Parameter(Mandatory = $true)] $Artifact,
+        [Parameter(Mandatory = $true)] [string] $RelativePath,
+        [Parameter(Mandatory = $true)] [string] $ExpectedSha256
+    )
+
+    if (-not $Artifact.PSIsContainer) { throw 'RemoteDebuggerProvisionV1 requires a directory artifact containing Lab and the signed fixture.' }
+    if ($ExpectedSha256 -cnotmatch '^[A-Fa-f0-9]{64}$') { throw 'GuestSetupExecutableSha256 must be an exact SHA-256 hash.' }
+    $relative = $RelativePath.Replace('/', '\')
+    if ([string]::IsNullOrWhiteSpace($relative) -or $relative.Length -gt 240 -or [IO.Path]::IsPathRooted($relative) -or
+        $relative.IndexOfAny([char[]](':*?"<>|' + [string][char]0)) -ge 0 -or $relative -match '[\x00-\x1F]' -or
+        @($relative.Split('\') | Where-Object { $_ -in @('', '.', '..') -or $_.EndsWith('.') -or $_.EndsWith(' ') }).Count -gt 0 -or
+        [IO.Path]::GetFileName($relative) -cne 'RemoteDebugger.exe') {
+        throw 'The guest setup fixture must be a traversal-free relative path ending in RemoteDebugger.exe.'
+    }
+    $root = [IO.Path]::GetFullPath($Artifact.FullName).TrimEnd('\')
+    $candidate = [IO.Path]::GetFullPath((Join-Path $root $relative))
+    if (-not $candidate.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'The guest setup fixture escapes the artifact.' }
+    $part = Get-Item -LiteralPath $candidate -Force -ErrorAction Stop
+    if ($part.PSIsContainer) { throw 'The guest setup fixture must be a file.' }
+    while ($part) {
+        if (($part.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'The guest setup fixture cannot traverse a reparse point.' }
+        $part = if ($part -is [IO.DirectoryInfo]) { $part.Parent } else { $part.Directory }
+    }
+    $actual = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash
+    if (-not [string]::Equals($actual, $ExpectedSha256, [StringComparison]::OrdinalIgnoreCase)) { throw 'The guest setup fixture hash differs from the requested exact bytes.' }
+    [pscustomobject][ordered]@{ FixtureRelativePath = $relative; ExpectedSha256 = $actual }
 }
 
 function Get-ValidatedKeyChord {
@@ -148,6 +189,10 @@ $networkContract = [ordered]@{
 }
 
 $artifact = Get-Item -LiteralPath $ArtifactPath -ErrorAction Stop
+$guestSetupRequest = $null
+if ($GuestSetupProfile -eq 'RemoteDebuggerProvisionV1') {
+    $guestSetupRequest = Resolve-RemoteDebuggerClientFixture -Artifact $artifact -RelativePath $GuestSetupExecutableRelativePath -ExpectedSha256 $GuestSetupExecutableSha256
+}
 $requestsRoot = Join-Path $BrokerRoot 'Requests'
 $processingRoot = Join-Path $BrokerRoot 'Processing'
 $resultsRoot = Join-Path $BrokerRoot 'Results'
@@ -1330,7 +1375,7 @@ try {
     $queueDeadlineUtc = $createdUtc.AddSeconds($QueueTimeoutSeconds)
     $request = [ordered]@{
         RequestId = $requestId
-        Operation = if ($networkEnabled) { 'RunGuestJobNetworkV1' } else { 'RunGuestJob' }
+        Operation = if ($guestSetupRequest) { 'RunGuestJobProvisionedV1' } elseif ($networkEnabled) { 'RunGuestJobNetworkV1' } else { 'RunGuestJob' }
         CreatedUtc = $createdUtc.ToString('o')
         QueueTimeoutSeconds = $QueueTimeoutSeconds
         ExecutionTimeoutSeconds = $ExecutionTimeoutSeconds
@@ -1356,6 +1401,7 @@ try {
         Network = $networkContract
         Job = $job
     }
+    if ($guestSetupRequest) { $request['RemoteDebuggerProvisionV1'] = $guestSetupRequest }
     if ($ExpectGuestPowerOff) {
         $request['ExpectGuestPowerOff'] = $true
         $request['GuestPowerOffRecoveryTimeoutSeconds'] = [int]$GuestPowerOffRecoveryTimeoutSeconds

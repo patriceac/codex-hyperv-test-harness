@@ -11,6 +11,25 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'HarnessPaths.ps1')
 $layout = Get-CodexHarnessConfig -ConfigPath $ConfigPath
+
+function Get-OptionalBrokerInstanceId {
+    param([Parameter(Mandatory = $true)] $Layout)
+
+    $property = $Layout.PSObject.Properties['BrokerInstanceId']
+    if ($null -eq $property) {
+        return $null
+    }
+    if ($property.Value -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+        throw 'BrokerInstanceId must be a non-empty safe identifier.'
+    }
+    $instanceId = [string]$property.Value
+    if ($instanceId -cnotmatch '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}\z') {
+        throw 'BrokerInstanceId must contain only ASCII letters, digits, hyphens, and underscores, and start with a letter or digit.'
+    }
+    $instanceId
+}
+
+$brokerInstanceId = Get-OptionalBrokerInstanceId -Layout $layout
 if ([string]::IsNullOrWhiteSpace($SourceRoot)) { $SourceRoot = [string]$layout.HarnessSourceRoot }
 if ([string]::IsNullOrWhiteSpace($BrokerRoot)) { $BrokerRoot = [string]$layout.BrokerRoot }
 if ([string]::IsNullOrWhiteSpace($PoolDefinitionPath)) { $PoolDefinitionPath = Join-Path $SourceRoot 'pool-definition.json' }
@@ -30,7 +49,15 @@ $installationMutationStarted = $false
 $credentialExistedBefore = $false
 $installCommitted = $false
 $rollbackSucceeded = $false
-$installedFiles = @('HostBroker.ps1', 'PayloadCache.ps1', 'HostInputShare.ps1', 'RequestNetwork.ps1', 'LiveEvidence.ps1', 'PoolCommon.ps1', 'PoolBroker.ps1', 'PoolLifecycle.ps1', 'HostWorker.ps1')
+$installedFiles = @('HostBroker.ps1', 'PayloadCache.ps1', 'HostInputShare.ps1', 'RequestNetwork.ps1', 'RemoteDebuggerProvisioning.ps1', 'RemoteDebuggerObservation.ps1', 'LiveEvidence.ps1', 'PoolCommon.ps1', 'PoolBroker.ps1', 'PoolLifecycle.ps1', 'HostWorker.ps1')
+$remoteDebuggerProvisionProfile = $null
+if ($layout.PSObject.Properties['RemoteDebuggerProvisionV1']) {
+    if ($null -eq $brokerInstanceId) { throw 'RemoteDebuggerProvisionV1 requires a dedicated BrokerInstanceId.' }
+    . (Join-Path $SourceRoot 'RemoteDebuggerProvisioning.ps1')
+    $remoteDebuggerProvisionProfile = $layout.RemoteDebuggerProvisionV1
+    $firstApprovedHash = @($remoteDebuggerProvisionProfile.ApprovedExecutableSha256) | Select-Object -First 1
+    $null = Resolve-RemoteDebuggerProvisionRequestV1 -RequestProfile ([pscustomobject]@{ FixtureRelativePath = 'RemoteDebugger.exe'; ExpectedSha256 = $firstApprovedHash }) -ConfigProfile $remoteDebuggerProvisionProfile -RequestId 'installer-policy-validation'
+}
 $backedUpNames = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
 
 function New-FailClosedRequestNetworkPolicy {
@@ -333,6 +360,12 @@ try {
         RequestNetworkPolicy = $requestNetworkPolicy
         ClientSid = $ClientSid
         InstalledUtc = [DateTime]::UtcNow.ToString('o')
+    }
+    if ($null -ne $brokerInstanceId) {
+        $config['BrokerInstanceId'] = $brokerInstanceId
+    }
+    if ($null -ne $remoteDebuggerProvisionProfile) {
+        $config['RemoteDebuggerProvisionV1'] = $remoteDebuggerProvisionProfile
     }
     $config | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $configPath -Encoding UTF8
     Set-BrokerAcl -Path $configPath -ClientMode None

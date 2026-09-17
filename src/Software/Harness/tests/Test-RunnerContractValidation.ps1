@@ -406,11 +406,44 @@ try {
     }
     $scenarios.Add('network-host-input-auto-forced-vhdx')
 
+    $provisionArtifact = Join-Path $root 'provision-artifact'
+    New-Item -ItemType Directory -Path (Join-Path $provisionArtifact 'release') -Force | Out-Null
+    [IO.File]::WriteAllBytes((Join-Path $provisionArtifact 'Lab.exe'), [byte[]](0, 1, 2, 3))
+    $fixturePath = Join-Path $provisionArtifact 'release\RemoteDebugger.exe'
+    [IO.File]::WriteAllBytes($fixturePath, [byte[]](4, 5, 6, 7))
+    $provisionInvocation = $baseInvocation.Clone()
+    $provisionInvocation.ArtifactPath = $provisionArtifact
+    $provisionInvocation.ExecutableRelativePath = 'Lab.exe'
+    $provisionInvocation.GuestSetupProfile = 'RemoteDebuggerProvisionV1'
+    $provisionInvocation.GuestSetupExecutableRelativePath = 'release\RemoteDebugger.exe'
+    $provisionInvocation.GuestSetupExecutableSha256 = (Get-FileHash -LiteralPath $fixturePath -Algorithm SHA256).Hash
+    foreach ($profile in @('None', 'IsolatedTestNet')) {
+        $provisionInvocation.NetworkProfile = $profile
+        if ($profile -eq 'IsolatedTestNet') { $provisionInvocation.NetworkCohort = 'provision-contract' }
+        $provisionRequest = Get-QueuedRequest -Scenario "provisioned $profile contract" -InvocationParameters $provisionInvocation
+        Assert-Equal -Scenario 'provisioned operation fails closed on older brokers' -Actual $provisionRequest.Operation -Expected 'RunGuestJobProvisionedV1'
+        Assert-Equal -Scenario 'provisioned job still launches payload Lab' -Actual $provisionRequest.Job.executable -Expected '{PAYLOAD}\Lab.exe'
+        Assert-Equal -Scenario 'provisioned exact fixture path' -Actual $provisionRequest.RemoteDebuggerProvisionV1.FixtureRelativePath -Expected 'release\RemoteDebugger.exe'
+        Assert-Equal -Scenario 'provisioned exact fixture bytes' -Actual $provisionRequest.RemoteDebuggerProvisionV1.ExpectedSha256 -Expected $provisionInvocation.GuestSetupExecutableSha256
+        Assert-Equal -Scenario 'provisioned network profile preserved' -Actual $provisionRequest.Network.Profile -Expected $profile
+        Assert-Equal -Scenario 'provisioned schema is bounded' -Actual @($provisionRequest.RemoteDebuggerProvisionV1.PSObject.Properties).Count -Expected 2
+        $scenarios.Add("provisioned-$profile-serialization")
+    }
+    $provisionInvocation.Remove('NetworkCohort')
+    foreach ($forbiddenProfile in @('InternetOnly', 'TrustedLan')) {
+        $provisionInvocation.NetworkProfile = $forbiddenProfile
+        Assert-Rejected -Scenario "provisioned $forbiddenProfile denied" -ExpectedMessage 'only None or IsolatedTestNet' -Operation { & $RunnerPath @provisionInvocation }
+    }
+    $scenarios.Add('provisioned-runner-rejects-external-networks')
+
     if (@(Get-ChildItem -LiteralPath (Join-Path $root 'Requests') -File).Count -ne 0) {
         throw 'Rejected contracts unexpectedly reached the broker queue.'
     }
 }
 finally {
+    $resolvedTestRoot = [IO.Path]::GetFullPath($root)
+    $expectedTempPrefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
+    if (-not $resolvedTestRoot.StartsWith($expectedTempPrefix, [StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($resolvedTestRoot) -notlike 'codex-runner-contract-*') { throw 'Unsafe runner contract cleanup target.' }
     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
 }
 
