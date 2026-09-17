@@ -88,8 +88,20 @@ for (`$iteration = 0; `$iteration -lt 80; `$iteration++) {
     Assert-True ($parseFailures -eq 0) "Readers observed $parseFailures partial or invalid JSON documents."
     $final = Get-Content -Raw -LiteralPath $targetPath | ConvertFrom-Json
     Assert-True ($null -ne $final.Writer -and $null -ne $final.Iteration -and -not [string]::IsNullOrWhiteSpace([string]$final.Token)) 'The final atomic JSON document was incomplete.'
-    Assert-True (@(Get-ChildItem -LiteralPath $testRoot -Filter 'state.json.*.tmp' -File -ErrorAction SilentlyContinue).Count -eq 0) 'An atomic writer leaked temporary files.'
+    Assert-True (@(Get-ChildItem -LiteralPath $testRoot -Filter 'state.json.*.tmp*' -File -ErrorAction SilentlyContinue).Count -eq 0) 'An atomic writer leaked temporary files or backups.'
     $scenarios.Add('six-process-writer-reader-contention')
+
+    $originalJson = [IO.File]::ReadAllText($targetPath)
+    $reader = [IO.StreamReader]::new([IO.File]::Open($targetPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)))
+    try {
+        Write-JsonAtomic -Path $targetPath -Value ([ordered]@{ Writer = 'replacement'; Iteration = 0; Token = 'reader-retains-original' })
+        Assert-True ($reader.ReadToEnd() -ceq $originalJson) 'Replacing broker state changed the document held by an existing reader.'
+        $replacement = Get-Content -Raw -LiteralPath $targetPath | ConvertFrom-Json
+        Assert-True ($replacement.Writer -ceq 'replacement') 'Replacing broker state did not publish the complete new document.'
+        Assert-True (@(Get-ChildItem -LiteralPath $testRoot -Filter 'state.json.*.tmp*' -File).Count -eq 0) 'Replacing broker state left staging files while an old reader remained open.'
+        $scenarios.Add('replacement-preserves-open-reader-without-backup-residue')
+    }
+    finally { $reader.Dispose() }
 
     $requiredFiles = @(
         $HostBrokerPath,

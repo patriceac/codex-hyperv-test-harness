@@ -117,14 +117,15 @@ function Write-JsonAtomic {
     $parent = Split-Path -Parent $Path
     New-Item -ItemType Directory -Force -Path $parent | Out-Null
     $temporaryPath = $Path + '.' + [Guid]::NewGuid().ToString('N') + '.tmp'
-    $backupPath = $temporaryPath + '.bak'
     try {
         $Value | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $temporaryPath -Encoding UTF8
         for ($attempt = 1; $attempt -le 20; $attempt++) {
             try {
                 if ([IO.File]::Exists($Path)) {
-                    [IO.File]::Delete($backupPath)
-                    [IO.File]::Replace($temporaryPath, $Path, $backupPath, $true)
+                    # No rollback copy is needed for transient broker state.
+                    # A reader may retain the replaced file, so do not create a
+                    # backup whose later deletion can fail after publication.
+                    [IO.File]::Replace($temporaryPath, $Path, [NullString]::Value, $true)
                 }
                 else {
                     [IO.File]::Move($temporaryPath, $Path)
@@ -142,7 +143,6 @@ function Write-JsonAtomic {
     }
     finally {
         [IO.File]::Delete($temporaryPath)
-        [IO.File]::Delete($backupPath)
     }
 }
 
