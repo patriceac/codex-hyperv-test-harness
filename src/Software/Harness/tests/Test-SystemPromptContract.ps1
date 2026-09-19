@@ -115,6 +115,7 @@ foreach ($required in @(
 }
 Assert-True ($brokerText.Contains("'SystemPrompts.ps1'") -and $brokerText.Contains('Invoke-SystemPromptServiceV1') -and $brokerText.Contains("`$brokerResultValue['SystemPrompts']")) 'HostBroker does not own prompt validation, runtime service, and result evidence.'
 Assert-True ($moduleText.Contains("`$arguments.TargetSystem = [string]`$settings.__PATH") -and $moduleText.Contains("`$service.PSBase.InvokeMethod('GetVirtualSystemThumbnailImage'")) 'Framebuffer capture does not pass the WMI virtual-system reference path required by Hyper-V.'
+Assert-True (-not $moduleText.Contains("Caption -eq 'Virtual Machine'")) 'System-prompt VM lookup still depends on localized Hyper-V Caption text.'
 Assert-True ($workerText.Contains('ErrorFullyQualifiedId = $terminalErrorFullyQualifiedId') -and $workerText.Contains('ErrorScriptStackTrace = $terminalErrorScriptStackTrace')) 'Pool-worker fallback results do not preserve the original failure diagnostics.'
 Assert-True ($networkText.Contains("'RunGuestJobSystemPromptsV1'")) 'Request-network validation does not accept the versioned system-prompt operation.'
 Assert-True ($installerText.Contains("'SystemPrompts.ps1'")) 'Broker installation does not copy and hash SystemPrompts.ps1.'

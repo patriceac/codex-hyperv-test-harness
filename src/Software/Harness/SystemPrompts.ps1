@@ -261,7 +261,7 @@ function Send-SystemPromptVirtualKey {
 
     $escapedName = $VmName.Replace("'", "''")
     $vmComputer = Get-CimInstance -Namespace 'root/virtualization/v2' -ClassName Msvm_ComputerSystem -Filter "ElementName='$escapedName'" -ErrorAction Stop |
-        Where-Object { $_.Caption -eq 'Virtual Machine' } | Select-Object -First 1
+        Select-Object -First 1
     if (-not $vmComputer) { throw "Hyper-V WMI object not found for VM: $VmName" }
     $keyboard = Get-CimAssociatedInstance -InputObject $vmComputer -Association Msvm_SystemDevice -ResultClassName Msvm_Keyboard -ErrorAction Stop | Select-Object -First 1
     if (-not $keyboard) { throw "Virtual keyboard not found for VM: $VmName" }
@@ -278,7 +278,7 @@ function Save-SystemPromptVmFramebuffer {
     )
 
     $vmComputer = Get-WmiObject -Namespace 'root/virtualization/v2' -Class Msvm_ComputerSystem -ErrorAction Stop |
-        Where-Object { $_.Caption -eq 'Virtual Machine' -and [string]::Equals([string]$_.ElementName, $VmName, [StringComparison]::Ordinal) } |
+        Where-Object { [string]::Equals([string]$_.ElementName, $VmName, [StringComparison]::Ordinal) } |
         Select-Object -First 1
     if (-not $vmComputer) { throw "Hyper-V WMI object not found for VM: $VmName" }
     $settingsQuery = "ASSOCIATORS OF {$($vmComputer.__PATH)} WHERE AssocClass = Msvm_SettingsDefineState ResultClass = Msvm_VirtualSystemSettingData"
