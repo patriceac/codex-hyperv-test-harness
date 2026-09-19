@@ -294,7 +294,8 @@ function Save-SystemPromptVmFramebuffer {
     $result = $service.PSBase.InvokeMethod('GetVirtualSystemThumbnailImage', $arguments, $null)
     if ([uint32]$result.ReturnValue -ne 0) { throw "VM framebuffer capture failed with code $($result.ReturnValue)." }
     $bytes = [byte[]]$result.ImageData
-    if ($bytes.Length -ne $Width * $Height * 2) { throw "VM framebuffer returned $($bytes.Length) bytes; expected $($Width * $Height * 2)." }
+    $pixelBytes = $Width * $Height * 2
+    if ($bytes.Length -lt $pixelBytes) { throw "VM framebuffer returned $($bytes.Length) bytes; expected at least $pixelBytes." }
 
     Add-Type -AssemblyName System.Drawing
     $directory = Split-Path -Parent $Path
@@ -303,7 +304,7 @@ function Save-SystemPromptVmFramebuffer {
     try {
         $rectangle = New-Object Drawing.Rectangle 0, 0, $Width, $Height
         $data = $bitmap.LockBits($rectangle, [Drawing.Imaging.ImageLockMode]::WriteOnly, [Drawing.Imaging.PixelFormat]::Format16bppRgb565)
-        try { [Runtime.InteropServices.Marshal]::Copy($bytes, 0, $data.Scan0, $bytes.Length) }
+        try { [Runtime.InteropServices.Marshal]::Copy($bytes, 0, $data.Scan0, $pixelBytes) }
         finally { $bitmap.UnlockBits($data) }
         $bitmap.Save($Path, [Drawing.Imaging.ImageFormat]::Png)
     }
