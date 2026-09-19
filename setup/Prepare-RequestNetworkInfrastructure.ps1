@@ -225,7 +225,7 @@ function Get-InfraInspection {
             catch { $errors.Add('Existing InternetOnly NAT policy is not exact.') }
             if (-not $internet.NatExact) { $errors.Add('InternetOnly NAT is inactive or has a static mapping.') }
         }
-        else { $errors.Add('InternetOnly requires the approved NAT to be the sole WinNAT instance.') }
+        else { $errors.Add('InternetOnly requires the planned NAT to be the sole WinNAT instance.') }
     }
     catch { $errors.Add('WinNAT inventory: ' + $_.Exception.Message) }
 
@@ -279,13 +279,13 @@ function Get-RequestNetworkInfrastructurePlan {
     }
     $fingerprint = if ($ready) { Get-InfraTextHash ($identity | ConvertTo-Json -Depth 30 -Compress) } else { $null }
     [pscustomobject][ordered]@{
-        PlanOnly = [bool]$PlanOnly; NoMutationPerformed = [bool]$PlanOnly; ApprovalReady = $ready; PlanFingerprint = $fingerprint
+        PlanOnly = [bool]$PlanOnly; NoMutationPerformed = [bool]$PlanOnly; ApplyReady = $ready; DefaultAuthorization = 'ApplyWithoutAdditionalUserConfirmation'; ApprovalReady = $ready; PlanFingerprint = $fingerprint
         InstallRoot = $InstallRoot; Intent = $intent; Queue = $queue.Value; QueueErrors = $queue.Errors; Infrastructure = $inspection
         PersistentHostChangesOnApply = @(
             'Create only the exact missing Codex Test NAT internal switch when absent.',
             'Assign only 172.30.250.1/24 to its management adapter when absent.',
             'Create only the exact sole outbound Codex Test NAT WinNAT when absent.',
-            'Apply the approved promiscuous 2500/2501 PVLAN to the InternetOnly gateway adapter.',
+            'Apply the planned promiscuous 2500/2501 PVLAN to the InternetOnly gateway adapter.',
             'Create only the exact Codex Trusted LAN external switch on the pinned Wi-Fi adapter when absent; this can briefly interrupt host networking.',
             'Write a private policy below the installed Live\Setup tree for the separate transactional broker-policy plan.',
             'Preserve all unrelated switches, NATs, VMs, adapters, routes, and firewall rules.'
@@ -313,9 +313,9 @@ function Start-InfraElevatedSelf {
 
 $plan = Get-RequestNetworkInfrastructurePlan
 if ($PlanOnly) { $plan | ConvertTo-Json -Depth 30; return }
-if ([string]::IsNullOrWhiteSpace($ApprovedPlanFingerprint)) { throw 'Pass the exact fingerprint from an elevated, approval-ready -PlanOnly result.' }
+if ([string]::IsNullOrWhiteSpace($ApprovedPlanFingerprint)) { throw 'Pass the exact fingerprint from an elevated, apply-ready -PlanOnly result.' }
 if (-not [bool]$plan.ApprovalReady -or -not [string]::Equals([string]$plan.PlanFingerprint, $ApprovedPlanFingerprint, [StringComparison]::OrdinalIgnoreCase)) {
-    throw 'The approved infrastructure fingerprint no longer matches the current host, queue, source, or configuration.'
+    throw 'The planned infrastructure fingerprint no longer matches the current host, queue, source, or configuration.'
 }
 if (-not (Test-InfraAdministrator)) {
     if ($NoElevation) { throw 'Request-network infrastructure preparation requires administrator rights.' }
@@ -360,7 +360,7 @@ try {
         [string]$_.IPAddress -eq $InternetGatewayAddress -and [int]$_.PrefixLength -eq 24
     })
     if ($gateway.Count -eq 0) {
-        if (-not [bool]$journal.InternetSwitchCreated) { throw 'The approved existing InternetOnly switch lost its gateway address.' }
+        if (-not [bool]$journal.InternetSwitchCreated) { throw 'The planned existing InternetOnly switch lost its gateway address.' }
         Set-NetIPInterface -InterfaceIndex ([int]$hostAdapter[0].ifIndex) -AddressFamily IPv4 -Dhcp Disabled -ErrorAction Stop
         New-NetIPAddress -InterfaceIndex ([int]$hostAdapter[0].ifIndex) -AddressFamily IPv4 -IPAddress $InternetGatewayAddress -PrefixLength 24 -ErrorAction Stop | Out-Null
         $journal.GatewayAddressCreated = $true
@@ -368,7 +368,7 @@ try {
     }
     $nats = @(Get-NetNat -ErrorAction Stop)
     if (@($nats | Where-Object { [string]$_.Name -eq $InternetNatName }).Count -eq 0) {
-        if ($nats.Count -ne 0) { throw 'A different WinNAT appeared after approval.' }
+        if ($nats.Count -ne 0) { throw 'A different WinNAT appeared after planning.' }
         New-NetNat -Name $InternetNatName -InternalIPInterfaceAddressPrefix $InternetNatPrefix -InternalRoutingDomainId ([Guid]::Empty) -ErrorAction Stop | Out-Null
         $journal.NatCreated = $true
         Write-InfraJsonAtomic $journalPath $journal
@@ -384,7 +384,7 @@ try {
     }
     catch {
         $vlan = Get-VMNetworkAdapterVlan -VMNetworkAdapter $management[0] -ErrorAction Stop
-        if ([string]$vlan.OperationMode -ne 'Untagged') { throw 'InternetOnly gateway VLAN changed after approval.' }
+        if ([string]$vlan.OperationMode -ne 'Untagged') { throw 'InternetOnly gateway VLAN changed after planning.' }
         Set-VMNetworkAdapterVlan -VMNetworkAdapter $management[0] -Promiscuous -PrimaryVlanId $InternetPrimaryVlanId -SecondaryVlanIdList ([string]$InternetSecondaryVlanId) -ErrorAction Stop
         $journal.GatewayVlanChangedFromUntagged = $true
         Write-InfraJsonAtomic $journalPath $journal

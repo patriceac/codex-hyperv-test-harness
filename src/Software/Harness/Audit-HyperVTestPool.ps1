@@ -293,7 +293,7 @@ try {
                 # Use the same canonical management-OS query and normalization
                 # as request preparation and runtime revalidation. Duplicating
                 # the raw Hyper-V object interpretation here caused the audit
-                # to disagree with an approval-ready infrastructure plan.
+                # to disagree with an apply-ready infrastructure plan.
                 $internetGatewayVlan = Assert-RequestNetworkInternetVlan `
                     -Adapter $internetManagementAdapters[0] `
                     -PrimaryVlanId ([int]$internetSettings.PrimaryVlanId) `

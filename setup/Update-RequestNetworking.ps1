@@ -298,7 +298,7 @@ function Get-RequestNetworkingPlan {
     $currentConfigHash = Get-RequestNetworkingFileHash -Path $installedConfigPath
     $policyJson = if ($Policy) { $Policy | ConvertTo-Json -Depth 30 -Compress } else { $null }
     $policyHash = if ($policyJson) { Get-RequestNetworkingSha256Text -Text $policyJson } else { $null }
-    $approvalReady = $null -ne $Policy -and [bool]$infrastructure.ProposedPolicyVerified -and $queueState.Queued -eq 0 -and $queueState.Processing -eq 0 -and $queueState.NetworkLeases -eq 0
+    $applyReady = $null -ne $Policy -and [bool]$infrastructure.ProposedPolicyVerified -and $queueState.Queued -eq 0 -and $queueState.Processing -eq 0 -and $queueState.NetworkLeases -eq 0
     $fingerprintIdentity = [ordered]@{
         FormatVersion = 1
         InstallRoot = $InstallRoot
@@ -315,11 +315,13 @@ function Get-RequestNetworkingPlan {
         Queue = $queueState
         TargetUserSid = $TargetUserSid
     }
-    $planFingerprint = if ($approvalReady) { Get-RequestNetworkingSha256Text -Text ($fingerprintIdentity | ConvertTo-Json -Depth 30 -Compress) } else { $null }
+    $planFingerprint = if ($applyReady) { Get-RequestNetworkingSha256Text -Text ($fingerprintIdentity | ConvertTo-Json -Depth 30 -Compress) } else { $null }
     [pscustomobject][ordered]@{
         PlanOnly = [bool]$PlanOnly
         NoMutationPerformed = [bool]$PlanOnly
-        ApprovalReady = $approvalReady
+        ApplyReady = $applyReady
+        DefaultAuthorization = 'ApplyWithoutAdditionalUserConfirmation'
+        ApprovalReady = $applyReady
         PlanFingerprint = $planFingerprint
         InstallRoot = $InstallRoot
         RepositoryRoot = $repositoryRoot
@@ -355,7 +357,7 @@ function Get-RequestNetworkingPlan {
         )
         InfrastructureProvisioningIncluded = $false
         DeferredLiveWork = @(
-            'Create or reconfigure any missing pinned internal/external switch, WinNAT, gateway address, or private-VLAN state under a separately approved exact infrastructure plan.',
+            'Create or reconfigure any missing pinned internal/external switch, WinNAT, gateway address, or private-VLAN state under a separate exact infrastructure plan.',
             'Run positive and negative canaries for all four profiles, mixed concurrency, cancellation, timeout, and broker/worker interruption.',
             'Run the privileged idle-pool audit, refresh local recovery once, and deep-hash verify it.'
         )
@@ -391,12 +393,12 @@ if ($PlanOnly) {
 }
 
 if (-not $policy) { throw 'A fully populated local -PolicyPath is required for mutation.' }
-if ([string]::IsNullOrWhiteSpace($ApprovedPlanFingerprint)) { throw 'Pass the exact fingerprint from an elevated, approval-ready -PlanOnly result.' }
+if ([string]::IsNullOrWhiteSpace($ApprovedPlanFingerprint)) { throw 'Pass the exact fingerprint from an elevated, apply-ready -PlanOnly result.' }
 if (-not [bool]$plan.ApprovalReady -or [string]::IsNullOrWhiteSpace([string]$plan.PlanFingerprint)) {
-    throw 'The current policy/infrastructure plan is not approval-ready; no mutation was performed.'
+    throw 'The current policy/infrastructure plan is not apply-ready; no mutation was performed.'
 }
 if (-not [string]::Equals([string]$plan.PlanFingerprint, $ApprovedPlanFingerprint, [StringComparison]::OrdinalIgnoreCase)) {
-    throw 'The approved request-network plan fingerprint no longer matches current source, configuration, queue, routes, or host infrastructure.'
+    throw 'The planned request-network fingerprint no longer matches current source, configuration, queue, routes, or host infrastructure.'
 }
 if (-not (Test-RequestNetworkingAdministrator)) {
     if ($NoElevation) { throw 'Request-network policy deployment requires administrator rights.' }

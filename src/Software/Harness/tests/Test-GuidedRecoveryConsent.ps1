@@ -20,8 +20,8 @@ $reviewPosition = $prompt.IndexOf('Begin in review-only mode', [StringComparison
 $explainPosition = $prompt.IndexOf('First explain in detailed, plain language', [StringComparison]::Ordinal)
 $questionsPosition = $prompt.IndexOf('Then ask me', [StringComparison]::Ordinal)
 $proposalPosition = $prompt.IndexOf('After I answer', [StringComparison]::Ordinal)
-$approvedPreflightPosition = $prompt.IndexOf('Only after that approval', [StringComparison]::Ordinal)
-if ($reviewPosition -lt 0 -or $explainPosition -le $reviewPosition -or $questionsPosition -le $explainPosition -or $proposalPosition -le $questionsPosition -or $approvedPreflightPosition -le $proposalPosition -or $prompt -notmatch 'Before cloning') {
+$preflightPosition = $prompt.IndexOf("Run the repository's public-safety audit", [StringComparison]::Ordinal)
+if ($reviewPosition -lt 0 -or $explainPosition -le $reviewPosition -or $questionsPosition -le $explainPosition -or $proposalPosition -le $questionsPosition -or $preflightPosition -le $proposalPosition -or $prompt -notmatch 'Before cloning') {
     throw 'The public prompt does not require explanation before local action.'
 }
 $scenarios.Add('public-prompt-starts-read-only-and-explains-first')
@@ -44,32 +44,32 @@ if ($skill -notmatch 'Use these reference answers' -or $skill -notmatch 'use the
 }
 $scenarios.Add('configuration-questions-include-reference-answers')
 
-if ($prompt -notmatch 'Treat my answers as preferences, not authorization' -or $prompt -notmatch 'Stop and wait for my explicit approval' -or $prompt -notmatch 'second explicit approval') {
-    throw 'The public prompt does not enforce two distinct approval gates.'
+if ($prompt -notmatch 'authorized by default' -or $prompt -notmatch 'do not pause for confirmation' -or $prompt -notmatch 'continue immediately') {
+    throw 'The public prompt does not establish standing authorization through Apply.'
 }
-$scenarios.Add('public-prompt-has-two-approval-gates')
+$scenarios.Add('public-prompt-has-standing-authorization')
 
-$consentPosition = $skill.IndexOf('## Begin with informed consent', [StringComparison]::Ordinal)
-$preflightPosition = $skill.IndexOf('## Run the read-only preflight after approval', [StringComparison]::Ordinal)
-if ($consentPosition -lt 0 -or $preflightPosition -le $consentPosition -or $skill -notmatch 'Do not assume a drive' -or $skill -notmatch 'Stop and obtain a second explicit approval') {
-    throw 'The setup skill does not place informed consent before preflight and mutation.'
+$planningPosition = $skill.IndexOf('## Plan before mutation', [StringComparison]::Ordinal)
+$skillPreflightPosition = $skill.IndexOf('## Run the read-only preflight', [StringComparison]::Ordinal)
+if ($planningPosition -lt 0 -or $skillPreflightPosition -le $planningPosition -or $skill -notmatch 'Do not assume a drive' -or $skill -notmatch 'standing authorization applies') {
+    throw 'The setup skill does not place exact planning and standing authorization before mutation.'
 }
-$scenarios.Add('setup-skill-enforces-consent-before-preflight')
+$scenarios.Add('setup-skill-enforces-planning-before-automatic-apply')
 
-if ($agents -notmatch '## Informed-consent gate' -or $agents -notmatch 'Configuration answers are not approval' -or $agents -notmatch 'never use an unparameterized command' -or $agents -notmatch 'separate destructive approval') {
-    throw 'Root agent instructions do not preserve informed consent or destructive separation.'
+if ($agents -notmatch '## Planning and standing authorization' -or $agents -notmatch 'All in-scope harness operations are standing-authorized' -or $agents -notmatch 'never use an unparameterized command' -or $agents -notmatch 'without asking for approval') {
+    throw 'Root agent instructions do not preserve exact planning and standing authorization.'
 }
-$scenarios.Add('root-agent-instructions-enforce-consent')
+$scenarios.Add('root-agent-instructions-enforce-standing-authorization')
 
-if ($checklist -notmatch 'Do not assume a drive' -or $checklist -notmatch 'obtain a second approval before mutation' -or $checklist -notmatch 'stable .NET channel' -or $disasterRecovery -notmatch 'No drive or resource profile is assumed' -or $disasterRecovery -notmatch '<chosen-install-root>') {
+if ($checklist -notmatch 'Do not assume a drive' -or $checklist -notmatch 'continue automatically when it succeeds' -or $checklist -notmatch 'stable .NET channel' -or $disasterRecovery -notmatch 'No drive or resource profile is assumed' -or $disasterRecovery -notmatch '<chosen-install-root>' -or $disasterRecovery -notmatch 'standing-authorized') {
     throw 'Recovery references do not carry the user-selected configuration through execution.'
 }
 $scenarios.Add('recovery-references-use-the-chosen-configuration')
 
-if ($skillUi -notmatch '\$setup-hyperv-harness' -or $skillUi -notmatch 'explain' -or $skillUi -notmatch 'approval') {
-    throw 'Skill UI metadata still suggests immediate unattended installation.'
+if ($skillUi -notmatch '\$setup-hyperv-harness' -or $skillUi -notmatch 'exact plan' -or $skillUi -notmatch 'without asking for confirmation') {
+    throw 'Skill UI metadata does not preserve planning with standing authorization.'
 }
-$scenarios.Add('skill-ui-prompts-for-explanation-and-approval')
+$scenarios.Add('skill-ui-prompts-for-planning-and-automatic-apply')
 
 [pscustomobject][ordered]@{
     Success = $true

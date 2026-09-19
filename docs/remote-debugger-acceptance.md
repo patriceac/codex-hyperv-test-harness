@@ -6,7 +6,7 @@ The dedicated baseline contains the existing Windows and guest-agent environment
 
 ## Review and installation
 
-`setup/Install-RemoteDebuggerAcceptancePool.ps1` owns the dedicated setup. Use its `PlanOnly` mode first, review the exact source and recovery fingerprints, target names, resource allocation, publisher pin, approved executable hashes, and preservation checks, then authorize the corresponding apply operation. Apply must match the reviewed plan hash and refuse existing target assets rather than replacing them.
+`setup/Install-RemoteDebuggerAcceptancePool.ps1` owns the dedicated setup. Use its `PlanOnly` mode first and inspect the exact source and recovery fingerprints, target names, resource allocation, publisher pin, allowed executable hashes, and preservation checks, then continue automatically to the corresponding apply operation. Apply must match the planned hash and refuse existing target assets rather than replacing them.
 
 No Windows media is downloaded, no guest update network is required, and neither the shared baseline nor its worker registrations are replaced. The known recovery credential is copied as an opaque administrator-protected file during setup. Do not log or publish it. All images, credentials, plan outputs, application binaries, test results, and screenshots remain local and outside Git.
 
@@ -27,7 +27,7 @@ The runner accepts `GuestSetupProfile=RemoteDebuggerProvisionV1`, `GuestSetupExe
 
 Older brokers reject the new operation. Ordinary jobs omit the object and retain their existing behavior. The protected broker configuration must explicitly enable the profile, pin the publisher's SHA-256 fingerprint, and allowlist each accepted executable SHA-256. The request supplies no administrator command, script, account, installer argument, or executable outside the payload. Both `ResetToBaseline` and `StopAfter` must be exact Boolean `true`.
 
-After validating the request and payload, the broker uses its administrator PowerShell Direct session to verify and stage the exact approved fixture and invoke the fixed `cli platform-provision` command inside the disposable guest. It validates the managed binary, product receipt, registered user, and LocalSystem service. The normal job remains the payload Lab executable running in the interactive user's medium-integrity session. Lab launches the protected managed product and verifies the resulting process identity.
+After validating the request and payload, the broker uses its administrator PowerShell Direct session to verify and stage the exact allowlisted fixture and invoke the fixed `cli platform-provision` command inside the disposable guest. It validates the managed binary, product receipt, registered user, and LocalSystem service. The normal job remains the payload Lab executable running in the interactive user's medium-integrity session. Lab launches the protected managed product and verifies the resulting process identity.
 
 This is evidence for an administrator-provisioned deployment. It does not simulate or prove a person's first interactive UAC consent.
 

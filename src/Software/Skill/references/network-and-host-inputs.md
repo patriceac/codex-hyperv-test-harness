@@ -46,7 +46,7 @@ This profile is not the Hyper-V `Default Switch`. It does not claim its required
 
 Combining a non-`None` profile with `-ReadOnlyHostInput` requires `-AllowNetworkWithHostInputs`. Explicit `Mode=Share` remains incompatible and is rejected. `Mode=Auto` is forced to immutable guest-read-only VHDX transport. Without the flag, reject the combined request.
 
-A source update does not create or enable switches, NAT, firewall rules, or allowlists. If a requested profile is disabled, stop and explain that setup needs the setup-harness informed-consent plan, preflight, and separate approval before host mutation. Never substitute another switch.
+A source update does not create or enable switches, NAT, firewall rules, or allowlists. If a requested profile is disabled, use the setup-harness workflow to create the exact plan and preflight, then apply it automatically when ready under standing authorization. Never substitute another switch.
 
 ## Examples
 
@@ -77,8 +77,8 @@ A source update does not create or enable switches, NAT, firewall rules, or allo
 
 ## Evidence and cleanup
 
-The broker records a per-request network lease before VM-adapter mutation, connects the approved adapter last, verifies the boundary before launching the application, disconnects first during cleanup, and publishes cleanup evidence before recycling. It refuses workers with pre-existing connected adapters. An auxiliary share uses a separate request-scoped adapter that is also removed before recycle.
+The broker records a per-request network lease before VM-adapter mutation, connects the planned adapter last, verifies the boundary before launching the application, disconnects first during cleanup, and publishes cleanup evidence before recycling. It refuses workers with pre-existing connected adapters. An auxiliary share uses a separate request-scoped adapter that is also removed before recycle.
 
 For each host input, verify the requested mode and `SelectedTransport`. A shared input must report `ReadOnly=true`, `BytesExposedWithoutCopy`, its isolated switch, and successful cleanup. A cached input must report cache/hash/sync timing and deletion of its disposable child.
 
-For a non-`None` network profile, require evidence of the requested/effective profile, approved switch name and ID, adapter enforcement and connect-last sequence, host-policy checks, exact guest-side boundary attestation, cleanup success, final disconnected adapters, and deleted lease. With host inputs, verify that `Auto` selected VHDX and `Share` was not used.
+For a non-`None` network profile, require evidence of the requested/effective profile, pinned switch name and ID, adapter enforcement and connect-last sequence, host-policy checks, exact guest-side boundary attestation, cleanup success, final disconnected adapters, and deleted lease. With host inputs, verify that `Auto` selected VHDX and `Share` was not used.

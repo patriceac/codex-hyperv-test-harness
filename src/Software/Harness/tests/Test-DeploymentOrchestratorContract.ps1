@@ -15,9 +15,10 @@ $recoveryWrapperPath = Join-Path $setupRoot 'Refresh-LocalRecovery.ps1'
 $publicAuditPath = Join-Path $setupRoot 'Test-PublicRepository.ps1'
 $deploymentDocPath = Join-Path $repositoryRoot 'docs\deployment.md'
 $skillPath = Join-Path $repositoryRoot '.agents\skills\setup-hyperv-harness\SKILL.md'
+$agentsPath = Join-Path $repositoryRoot 'AGENTS.md'
 $scenarios = New-Object Collections.Generic.List[string]
 
-foreach ($path in @($deployPath, $acceptancePath, $installPath, $runnerPath, $poolBrokerPath, $recoveryWrapperPath, $publicAuditPath, $deploymentDocPath, $skillPath)) {
+foreach ($path in @($deployPath, $acceptancePath, $installPath, $runnerPath, $poolBrokerPath, $recoveryWrapperPath, $publicAuditPath, $deploymentDocPath, $skillPath, $agentsPath)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Release contract input is missing: $path" }
 }
 
@@ -177,8 +178,9 @@ if ($deploy -notmatch 'guest-baseline-provenance\.json' -or
     throw 'Guest-baseline detection and resume are not bound to durable provenance and the persisted plan.'
 }
 if ($deploy -notmatch '\$publicAuditJson\s*=\s*&\s*\(Join-Path \$repositoryRoot ''setup\\Test-PublicRepository\.ps1''\)' -or
-    $deploy -notmatch 'ApprovalReady = \[bool\]\$publicAudit\.Success') {
-    throw 'PlanOnly does not include the public repository audit in its approval-ready boundary.'
+    $deploy -notmatch 'ApplyReady = \$applyReady' -or
+    $deploy -notmatch "DefaultAuthorization = 'ApplyWithoutAdditionalUserConfirmation'") {
+    throw 'PlanOnly does not include the public repository audit in its default-authorized apply boundary.'
 }
 if ($deploy -notmatch 'status --porcelain=v1 --untracked-files=all') {
     throw 'The immutable commit check does not reject non-ignored untracked deployment source.'
@@ -214,6 +216,12 @@ if ($guestUpdater -notmatch '-PoolSize\s+\(\[int\]\$layout\.PoolSize\)' -or
     $guestUpdater -notmatch '-ClientSid\s+\$ClientSid') {
     throw 'Guest-baseline promotion does not preserve the installed pool shape and target client SID.'
 }
+if ($guestUpdater -notmatch 'ApplyReady\s*=\s*\$applyReady' -or
+    $guestUpdater -notmatch "DefaultAuthorization\s*=\s*'ApplyWithoutAdditionalUserConfirmation'" -or
+    $guestUpdater -notmatch 'DestructiveApprovalRequired\s*=\s*\$false' -or
+    $guestUpdater -notmatch 'DestructiveOperationStandingAuthorized\s*=\s*\$true') {
+    throw 'Guest-baseline promotion does not expose standing authorization for its destructive exact plan.'
+}
 $runner = Get-Content -LiteralPath $runnerPath -Raw
 if ($runner -notmatch '\[switch\]\s*\$ThrowOnFailure' -or $runner -notmatch 'if \(\$ThrowOnFailure\)') {
     throw 'The runner cannot return acceptance failures to the orchestrator without terminating its state process.'
@@ -239,12 +247,14 @@ $scenarios.Add('shutdown-probe-flushes-and-atomically-promotes-marker-before-pow
 
 $deploymentDoc = Get-Content -LiteralPath $deploymentDocPath -Raw
 $skill = Get-Content -LiteralPath $skillPath -Raw
-foreach ($requiredText in @('LiveShadowPoolAvailable = false','no magic phrase','NeedsFixForward','one final local recovery')) {
+$agents = Get-Content -LiteralPath $agentsPath -Raw
+foreach ($requiredText in @('LiveShadowPoolAvailable = false','No additional user confirmation is required','NeedsFixForward','one final local recovery')) {
     if ($deploymentDoc.IndexOf($requiredText, [StringComparison]::OrdinalIgnoreCase) -lt 0) { throw "Deployment documentation is missing: $requiredText" }
 }
 if ($skill.IndexOf('Deploy-HarnessRelease.ps1', [StringComparison]::Ordinal) -lt 0 -or
-    $skill.IndexOf('do not require a magic phrase', [StringComparison]::OrdinalIgnoreCase) -lt 0) {
-    throw 'The setup skill does not route future ordinary releases through the canonical controller.'
+    $skill.IndexOf('Every in-scope harness operation is authorized by default', [StringComparison]::OrdinalIgnoreCase) -lt 0 -or
+    $agents.IndexOf('All in-scope harness operations are standing-authorized', [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+    throw 'The repository instructions and setup skill do not preserve standing authorization while routing ordinary releases through the canonical controller.'
 }
 $scenarios.Add('documentation-and-skill-make-the-controller-the-durable-default')
 

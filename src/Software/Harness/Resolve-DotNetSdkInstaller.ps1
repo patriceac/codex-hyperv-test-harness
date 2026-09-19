@@ -87,7 +87,7 @@ try {
     }
     $version = [string]$channelEntry.'latest-sdk'
     if (-not [string]::IsNullOrWhiteSpace($ExpectedVersion) -and $version -ne $ExpectedVersion) {
-        throw "The latest stable .NET $Channel SDK changed after approval: expected $ExpectedVersion, resolved $version. Review a new plan before downloading it."
+        throw "The latest stable .NET $Channel SDK changed after planning: expected $ExpectedVersion, resolved $version. Create a new plan before downloading it."
     }
 
     $releasesUri = Assert-OfficialHttpsUri -Value ([string]$channelEntry.'releases.json') -AllowedHosts $officialMetadataHosts -Purpose 'The .NET channel metadata'

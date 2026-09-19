@@ -178,8 +178,9 @@ $planPosition = $wrapper.IndexOf('if ($PlanOnly)', [StringComparison]::Ordinal)
 $invocationPreflightPosition = $wrapper.IndexOf('$invocationPreflight = & $innerUpdatePath @updateParameters -InvocationPreflightOnly', [StringComparison]::Ordinal)
 $elevationPosition = $wrapper.IndexOf('if (-not (Test-Administrator))', $planPosition + 1, [StringComparison]::Ordinal)
 if ($invocationPreflightPosition -lt 0 -or $planPosition -le $invocationPreflightPosition -or $elevationPosition -le $planPosition -or
-    $wrapper -notmatch 'NoMutationPerformed = \$true' -or $wrapper -notmatch 'ApprovalReady = \$true' -or $wrapper -notmatch 'RequiresSecondApproval = \$true') {
-    throw 'Image maintenance does not expose a non-mutating plan before elevation and the second approval.'
+    $wrapper -notmatch 'NoMutationPerformed = \$true' -or $wrapper -notmatch 'ApplyReady = \$true' -or
+    $wrapper -notmatch "DefaultAuthorization = 'ApplyWithoutAdditionalUserConfirmation'" -or $wrapper -notmatch 'RequiresSecondApproval = \$false') {
+    throw 'Image maintenance does not expose a non-mutating, default-authorized plan before elevation.'
 }
 $scenarios.Add('plan-only-precedes-elevation')
 
@@ -356,7 +357,7 @@ finally {
 }
 $scenarios.Add('controller-cancellation-finishes-current-operation-and-restores-state')
 
-foreach ($resolverContract in @('dotnetcli.blob.core.windows.net', 'builds.dotnet.microsoft.com', 'latest-sdk', 'win-x64', 'Get-AuthenticodeSignature', 'changed after approval')) {
+foreach ($resolverContract in @('dotnetcli.blob.core.windows.net', 'builds.dotnet.microsoft.com', 'latest-sdk', 'win-x64', 'Get-AuthenticodeSignature', 'changed after planning')) {
     if ($resolver.IndexOf($resolverContract, [StringComparison]::OrdinalIgnoreCase) -lt 0) { throw "SDK resolver is missing contract: $resolverContract" }
 }
 $scenarios.Add('sdk-resolver-pins-and-verifies-official-payload')
@@ -368,7 +369,7 @@ if ($deferPosition -lt 0 -or $servicingPosition -le $deferPosition -or $checkpoi
     throw 'Cold rebuild does not service the new guest before creating the clean checkpoint.'
 }
 if ($installer -notmatch 'GuestUpdateSwitchName' -or $installer -notmatch 'ExpectedDotNetSdkVersion' -or $installer -notmatch 'NetworkFinalState') {
-    throw 'Cold-rebuild planning does not carry the approved guest update network and SDK pin.'
+    throw 'Cold-rebuild planning does not carry the configured guest update network and SDK pin.'
 }
 $scenarios.Add('cold-rebuild-services-before-sealing')
 
@@ -400,7 +401,7 @@ if ($wrapper.IndexOf('ResumeUpdateId', [StringComparison]::Ordinal) -lt 0 -or
     $wrapper.IndexOf('do not run Windows Update or boot the baseline', [StringComparison]::OrdinalIgnoreCase) -lt 0 -or
     $maintenanceDoc.IndexOf("ResumeUpdateId = '<YYYYMMDDTHHMMSSFFFZ>'", [StringComparison]::Ordinal) -lt 0 -or
     $setupSkill.IndexOf('-ResumeUpdateId <EXACT_FAILED_UPDATE_ID>', [StringComparison]::Ordinal) -lt 0) {
-    throw 'The approval-gated wrapper and maintenance guidance do not expose retained-generation resume.'
+    throw 'The fingerprinted wrapper and maintenance guidance do not expose retained-generation resume.'
 }
 $resumeValidationPosition = $imageUpdate.IndexOf("Write-UpdateStatus -Phase 'ResumingRetainedGeneration'", [StringComparison]::Ordinal)
 $resumeWorkerReusePosition = $imageUpdate.IndexOf('-UseExistingOsChild:$resumeRetainedGeneration', $resumeValidationPosition, [StringComparison]::Ordinal)
@@ -434,7 +435,7 @@ if ($recovery -notmatch "BaselineExportMode\s*=\s*'FullExport'" -or
 $scenarios.Add('recovery-follows-live-verification-and-records-provenance')
 
 if ($maintenanceDoc -notmatch 'Update-Images.ps1 @parameters -PlanOnly' -or $maintenanceDoc -notmatch 'deep-hash' -or $setupSkill -notmatch 'intentional Windows/.NET baseline refresh') {
-    throw 'Maintenance documentation or the setup skill does not route image updates through the approval-gated workflow.'
+    throw 'Maintenance documentation or the setup skill does not route image updates through the fingerprinted workflow.'
 }
 $scenarios.Add('maintenance-documentation-routes-through-skill')
 
@@ -478,9 +479,9 @@ try {
         & $resolverPath -Channel '10.0' -ExpectedVersion '10.0.399' -ReleaseIndexPath $indexPath -ReleasesPath $releasesPath -AllowUnsignedLocalMetadata | Out-Null
     }
     catch {
-        $mismatchRejected = $_.Exception.Message -match 'changed after approval'
+        $mismatchRejected = $_.Exception.Message -match 'changed after planning'
     }
-    if (-not $mismatchRejected) { throw 'The SDK resolver did not reject a version change after approval.' }
+    if (-not $mismatchRejected) { throw 'The SDK resolver did not reject a version change after planning.' }
 }
 finally {
     Remove-Item -LiteralPath $temporaryRoot -Recurse -Force -ErrorAction SilentlyContinue

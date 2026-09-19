@@ -232,14 +232,14 @@ try {
     Assert-True ($secondPreviewIndex -gt $elevationIndex -and $secondPreviewIndex -lt $stagingIndex) 'Installer does not revalidate the reviewed configuration fingerprint immediately before source staging.'
     Assert-True ($installText.Contains("'harness-config.json'")) 'Source mirroring can delete the installed harness configuration.'
     Assert-True ($installText.Contains("@('-ExpectedExistingConfigurationSha256', `$ExpectedExistingConfigurationSha256)")) 'Elevation/resume does not carry the reviewed configuration fingerprint.'
-    Assert-True ($installText.Contains("'ResetRequestNetworkPolicy'") -and $installText.Contains('PolicyResetApproval')) 'Installer does not propagate and visibly report intentional policy reset.'
+    Assert-True ($installText.Contains("'ResetRequestNetworkPolicy'") -and $installText.Contains('PolicyResetAuthorization') -and $installText.Contains('AuthorizedByDefaultAfterSuccessfulPlan')) 'Installer does not propagate and visibly report default authorization for intentional policy reset.'
     Assert-True ($installText.Contains("`$ExpectedExistingConfigurationSha256 = [string]`$layout.CommittedConfigurationSha256")) 'Restart resume does not advance to the newly committed configuration fingerprint.'
     $scenarios.Add('installer-validates-before-staging-and-propagates-policy-intent')
 
     $maintenanceText = Get-Content -LiteralPath (Join-Path $RepositoryRoot 'docs\maintenance.md') -Raw
     $setupSkillText = Get-Content -LiteralPath (Join-Path $RepositoryRoot '.agents\skills\setup-hyperv-harness\SKILL.md') -Raw
     Assert-True ($maintenanceText.Contains('RequestNetworkPolicyDisposition = PreservedExisting') -and $maintenanceText.Contains('ResetToFailClosed')) 'Maintenance documentation does not distinguish ordinary preservation from intentional policy reset.'
-    Assert-True ($setupSkillText.Contains('ExpectedExistingConfigurationSha256') -and $setupSkillText.Contains('separate explicit approval')) 'Setup skill does not require a fingerprint and separate approval for policy reset.'
+    Assert-True ($setupSkillText.Contains('ExpectedExistingConfigurationSha256') -and $setupSkillText.Contains('ResetToFailClosed') -and $setupSkillText.Contains('apply the exact configuration fingerprint automatically')) 'Setup skill does not require a fingerprint and automatic apply for policy reset.'
     $scenarios.Add('maintenance-contract-documents-preserve-and-reset-paths')
 
     foreach ($path in @($configurationPath, $installPath, $PSCommandPath)) {

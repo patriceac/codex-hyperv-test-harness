@@ -9,7 +9,7 @@ The harness exposes four request-time profiles while keeping `None` as the compa
 | `IsolatedTestNet` | `-NetworkProfile IsolatedTestNet -NetworkCohort '<LABEL>'` | Requests with the same explicit cohort share an installation-scoped private VM-only switch. No host endpoint, gateway, DNS, LAN, or Internet route exists. |
 | `TrustedLan` | `-NetworkProfile TrustedLan` | Full reachability offered by one broker-pinned external switch, including LAN and usually router-provided Internet. It does not promise to inherit a host VPN. |
 
-The runner has no switch-selection parameter. `TrustedLan` policy must contain exactly one switch pinned by its Hyper-V name and ID, one physical adapter GUID and description, and the approved management-OS sharing state. `InternetOnly` similarly pins its switch, NAT, prefix, gateway, VLAN pair, DNS, filtering behavior, and timeouts. Requests cannot provide switch names or IDs, NAT, addresses, routes, VLANs, DNS, or firewall rules.
+The runner has no switch-selection parameter. `TrustedLan` policy must contain exactly one switch pinned by its Hyper-V name and ID, one physical adapter GUID and description, and the planned management-OS sharing state. `InternetOnly` similarly pins its switch, NAT, prefix, gateway, VLAN pair, DNS, filtering behavior, and timeouts. Requests cannot provide switch names or IDs, NAT, addresses, routes, VLANs, DNS, or firewall rules.
 
 Every non-`None` request uses `RunGuestJobNetworkV1`. This makes an older broker reject the request instead of ignoring a new field and accidentally running under a different boundary.
 
@@ -17,7 +17,9 @@ Every non-`None` request uses `RunGuestJobNetworkV1`. This makes an older broker
 
 The broker writes a SYSTEM-only lease before it mutates a VM. It creates the request adapter disconnected, applies guards, private-VLAN state, and the exact weighted extended ACL set, revalidates the pinned host infrastructure, then connects the adapter last. Guest configuration and attestation complete before the application starts. For `IsolatedTestNet`, the broker classifies only the disposable request adapter as a Private guest connection and exempts exactly that alias from the guest firewall so same-cohort tests may use arbitrary protocols; the private VM-only switch still has no host, LAN, DNS, gateway, or Internet path, and the disposable OS child is discarded after the request.
 
-During `InternetOnly`, the broker periodically verifies the NAT, switch, gateway, VLAN and ACL state, current host routes and addresses, and the complete default-route interface identity. A VPN/default-route change fails closed rather than silently changing the approved egress boundary.
+During `InternetOnly`, the broker periodically verifies the NAT, switch, gateway, VLAN and ACL state, current host routes and addresses, and the complete default-route interface identity. A VPN/default-route change fails closed rather than silently changing the pinned egress boundary.
+
+The legacy parameter name `ApprovedPlanFingerprint` means the exact apply-bound plan fingerprint. It does not represent or require conversational user approval.
 
 Cleanup reverses the order: disconnect first, remove the adapter and lease, verify every VM adapter is disconnected, and only then publish terminal evidence or recycle the worker. Startup and periodic orphan reconciliation use exact VM/adapter lease ownership; a managed-looking name alone never authorizes deletion.
 
@@ -51,7 +53,7 @@ Run the non-elevated discovery preflight with explicit intent:
   -PlanOnly
 ```
 
-This call never elevates or writes. If Hyper-V identity is unavailable to the unelevated account, it reports that limitation and returns no approval fingerprint. An elevated read-only pass, separately approved, must resolve exact switch, management-adapter, NAT, gateway, VLAN, physical-uplink, route, and idle-pool identities. A fully populated local policy can then be supplied with `-PolicyPath`; only an approval-ready plan receives a fingerprint.
+This call never elevates or writes. If Hyper-V identity is unavailable to the unelevated account, it reports that limitation and returns no plan fingerprint. Run the elevated read-only pass automatically to resolve exact switch, management-adapter, NAT, gateway, VLAN, physical-uplink, route, and idle-pool identities. A fully populated local policy can then be supplied with `-PolicyPath`; only an apply-ready plan receives a fingerprint.
 
 When the pinned switches, gateway PVLAN, or WinNAT are not yet prepared, first run the reusable infrastructure planner with preselected switch GUIDs:
 
@@ -64,7 +66,7 @@ When the pinned switches, gateway PVLAN, or WinNAT are not yet prepared, first r
   -PlanOnly
 ```
 
-Run that approval-ready plan elevated but still read-only, review its exact fingerprint, then pass the fingerprint without PlanOnly. Preparation creates only missing named infrastructure, writes the private policy under the installed Live\Setup tree, and stops for the separate transactional broker-policy plan. A failed preparation removes only objects created by that transaction and restores a gateway VLAN it changed from untagged. It never removes or repurposes an unrelated switch, NAT, VM adapter, route, or firewall rule. Creating an external switch with management-OS sharing can briefly interrupt the host uplink.
+Run that apply-ready plan elevated but still read-only, inspect its exact fingerprint, then pass the fingerprint without PlanOnly immediately; standing authorization applies. Preparation creates only missing named infrastructure and writes the private policy under the installed Live\Setup tree; immediately continue with the separate transactional broker-policy plan. A failed preparation removes only objects created by that transaction and restores a gateway VLAN it changed from untagged. It never removes or repurposes an unrelated switch, NAT, VM adapter, route, or firewall rule. Creating an external switch with management-OS sharing can briefly interrupt the host uplink.
 
 Applying that exact fingerprint overlays the reviewed broker source, replaces only `RequestNetworkPolicy` in the installed v1 configuration, transactionally reinstalls the broker, refreshes the runtime skill, runs the privileged idle-pool audit, and retains the rollback snapshot through live acceptance and recovery refresh. It deliberately does not create or reconfigure switches, NAT, firewall, VLAN, or gateway state; those are separate host-infrastructure mutations in the reviewed live plan.
 
@@ -78,6 +80,6 @@ Source tests establish schema, lifecycle, policy, cleanup, and canary behavior, 
 4. prove the exact logical and physical switch identity and intended LAN reachability for `TrustedLan`;
 5. run mixed-profile concurrency, cancellation, timeout, broker interruption, and worker recycle cases;
 6. finish with an idle pool audit showing no lease, managed adapter, owned cohort switch, or connected worker adapter;
-7. refresh local recovery once, deep-hash verify it, and run the public audit before any separately approved source push.
+7. refresh local recovery once, deep-hash verify it, run the public audit, and push any in-scope source changes automatically.
 
 No baseline image, worker disk, Windows Update state, .NET SDK, checkpoint, or VM operating-system configuration changes are required.

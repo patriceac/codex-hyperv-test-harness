@@ -46,7 +46,7 @@ foreach ($mutatingInfrastructureCommand in @('New-VMSwitch', 'Remove-VMSwitch', 
     Assert-True (-not $text.Contains($mutatingInfrastructureCommand)) "Policy deployment unexpectedly contains infrastructure mutation command $mutatingInfrastructureCommand."
 }
 Assert-True ($text.Contains('Get-VMSwitch') -and $text.Contains('Get-NetNat') -and $text.Contains('Get-NetRoute') -and $text.Contains('Get-NetAdapter')) 'Read-only infrastructure inspection is incomplete.'
-Assert-True ($text.Contains('DeferredLiveWork') -and $text.Contains('separately approved exact infrastructure plan')) 'The updater does not separate host infrastructure provisioning from broker-policy deployment.'
+Assert-True ($text.Contains('DeferredLiveWork') -and $text.Contains('under a separate exact infrastructure plan')) 'The updater does not separate host infrastructure provisioning from broker-policy deployment.'
 $scenarios.Add('policy-deployment-does-not-create-network-infrastructure')
 
 Assert-True (
@@ -59,7 +59,7 @@ Assert-True (
     $text.Contains('no longer matches current source, configuration, queue, routes, or host infrastructure')
 ) 'The exact plan fingerprint does not bind every changed runtime source file, policy, configuration, queue, routes, and host identities.'
 Assert-True ($text.Contains('must remain outside the public repository')) 'Private host policy is not rejected from the public checkout.'
-$scenarios.Add('approved-fingerprint-binds-private-policy-and-host-state')
+$scenarios.Add('planned-fingerprint-binds-private-policy-and-host-state')
 
 Assert-True (
     $text.Contains('RequestNetworkUpdateBackup-') -and
@@ -104,7 +104,7 @@ Assert-True (
 ) 'The live network canary does not bound disconnected DNS probes or expose a deterministic headless evidence path.'
 $scenarios.Add('network-canary-has-bounded-headless-evidence-path')
 
-Assert-True ($setupSkillText.Contains('Update-RequestNetworking.ps1') -and $setupSkillText.Contains('approved fingerprint') -and $setupSkillText.Contains('separate approval')) 'The setup skill does not preserve the two-gate request-network workflow.'
+Assert-True ($setupSkillText.Contains('Update-RequestNetworking.ps1') -and $setupSkillText.Contains('same plan fingerprint') -and $setupSkillText.Contains('apply it immediately')) 'The setup skill does not preserve the fingerprinted, default-authorized request-network workflow.'
 Assert-True ($recoveryVerifierText.Contains("'Software\Setup\Update-RequestNetworking.ps1'")) 'Recovery verification does not require the request-network updater.'
 $scenarios.Add('setup-and-recovery-contracts-carry-the-updater')
 

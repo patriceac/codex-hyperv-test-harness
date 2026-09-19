@@ -7,9 +7,9 @@ The GitHub repository is the recovery seed. It does not need the original VHDX, 
 On a reimaged Windows 11 Pro, Enterprise, or Education host:
 
 1. Install Codex. The repository is public, so read-only inspection and cloning do not require a GitHub token.
-2. Give Codex the informed-consent prompt in the README. Codex must inspect the public instructions without cloning, explain the complete rebuild and its risks, ask for the user's configuration, present an exact proposal, and wait. No drive or resource profile is assumed.
-3. After the user explicitly approves that proposal, Codex may clone the repository and run only the public audit and plan-only preflight with the chosen values. Review their exact output and give a second explicit approval before any mutating installation step.
-4. Save open work, then allow the approved Windows elevation. If Hyper-V is newly enabled, the installer restarts automatically unless the user selected `-NoRestart`. When a new baseline is required, the installer temporarily connects only that VM to the explicitly approved switch, converges the approved non-preview Windows Update scope, resolves and verifies the approved stable .NET SDK, performs an SDK build smoke test, and disconnects the VM before checkpoint creation.
+2. Give Codex the planning prompt in the README. Codex must inspect the public instructions without cloning, explain the complete rebuild and its risks, ask for the user's required configuration, and present an exact proposal. No drive or resource profile is assumed.
+3. Codex then clones the repository, runs the public audit and plan-only preflight with the chosen values, reports their exact output, and continues automatically when they succeed. Every in-scope recovery step is standing-authorized; no conversational approval pause is required.
+4. Save open work before the Windows elevation. If Hyper-V is newly enabled, the installer restarts automatically unless the user selected `-NoRestart`. When a new baseline is required, the installer temporarily connects only that VM to the configured switch, converges the planned non-preview Windows Update scope, resolves and verifies the pinned stable .NET SDK, performs an SDK build smoke test, and disconnects the VM before checkpoint creation.
 5. Monitor `<chosen-install-root>\Live\Setup\setup-state.json`. A registered SYSTEM task owns post-restart continuation; do not launch a competing installer.
 6. Require `Phase=Ready` and `Success=true` in `<chosen-install-root>\Live\Setup\setup-result.json`. Those terminal states are published only after the internal privileged audit and isolated canary pass. Run `setup\Verify.ps1 -InstallRoot <chosen-install-root>` for a later independent recheck.
 
@@ -25,10 +25,10 @@ Neither recovery path enters a key, signs into a Microsoft account, transfers a 
 
 ## Safe reruns
 
-- A matching baseline checkpoint is reused. Use the separately approved sequential image-maintenance workflow when that baseline itself must be updated; an ordinary source refresh does not silently change it.
+- A matching baseline checkpoint is reused. Use the separately planned sequential image-maintenance workflow when that baseline itself must be updated; an ordinary source refresh does not silently change it.
 - The official ISO cache is reused only after signature, edition, and SHA-256 checks.
 - The broker and runtime skill are refreshed from the repository source.
 - The repository stores only one marker-delimited harness policy fragment at `setup\AGENTS.block.md`, never a snapshot of the user's global `AGENTS.md`. Both cold installation and fast local recovery merge only that fragment into the target profile while preserving unrelated personal instructions; the local bundle's `Codex\AGENTS.md` is copied from the same canonical fragment in its software snapshot.
-- An ordinary source refresh preserves the complete schema-valid installed request-network policy only after PlanOnly reports its exact configuration fingerprint and the approved apply supplies that fingerprint. Drift or malformed state stops before source staging. Discarding the policy requires a separately planned and approved `ResetRequestNetworkPolicy` operation.
+- An ordinary source refresh preserves the complete schema-valid installed request-network policy only after PlanOnly reports its exact configuration fingerprint and Apply supplies that fingerprint. Drift or malformed state stops before source staging. Discarding the policy requires a separate `ResetRequestNetworkPolicy` plan; when that recovery is requested, apply the successful plan automatically.
 - A cold rebuild restores fail-closed generic request-network defaults. Re-enable InternetOnly or TrustedLan only through a fingerprinted `setup\Prepare-RequestNetworkInfrastructure.ps1` plan followed by the separately fingerprinted broker-policy update. Local recovery carries the installed private policy and both scripts.
 - `-ForceRebuild` removes the harness's named VMs and baseline storage. Do not use it merely to retry a transient failure.

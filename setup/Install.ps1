@@ -294,7 +294,7 @@ if (-not [string]::IsNullOrWhiteSpace($ExpectedExistingConfigurationSha256)) { $
 if ($ResetRequestNetworkPolicy) { $configurationParameters.ResetRequestNetworkPolicy = $true }
 $configurationPreview = & $configurationScript @configurationParameters
 if ($DeferPoolRebuildForGuestBaselineUpdate -and -not [bool]$configurationPreview.ExistingConfigurationDetected) {
-    throw 'DeferPoolRebuildForGuestBaselineUpdate is valid only for an existing harness whose installed pool will be replaced by the next approved deployment phase.'
+    throw 'DeferPoolRebuildForGuestBaselineUpdate is valid only for an existing harness whose installed pool will be replaced by the next planned deployment phase.'
 }
 if (-not $PlanOnly -and [bool]$configurationPreview.ExistingConfigurationDetected -and [string]::IsNullOrWhiteSpace($ExpectedExistingConfigurationSha256)) {
     throw 'An existing harness configuration can be refreshed only with ExpectedExistingConfigurationSha256 from the reviewed PlanOnly result.'
@@ -306,6 +306,7 @@ if ($PlanOnly) {
     $workerNoun = if ($PoolSize -eq 1) { 'worker' } else { 'workers' }
     [pscustomobject][ordered]@{
         PlanOnly = $true; InstallRoot = $InstallRoot; SourceSoftware = $sourceSoftware
+        DefaultAuthorization = 'ApplyWithoutAdditionalUserConfirmation'
         TargetUserProfile = $TargetUserProfile; TargetUserSid = $TargetUserSid
         WindowsIso = 'Downloaded automatically from the official Microsoft Windows 11 page'
         GuestEdition = 'Windows 11 Pro selected dynamically by EditionId Professional'
@@ -325,7 +326,8 @@ if ($PlanOnly) {
             RequestNetworkPolicyDisposition = [string]$configurationPreview.RequestNetworkPolicyDisposition
             RequestNetworkPolicySha256 = [string]$configurationPreview.RequestNetworkPolicySha256
             IntentionalPolicyReset = [bool]$configurationPreview.IntentionalPolicyReset
-            PolicyResetApproval = if ($ResetRequestNetworkPolicy) { 'Separate explicit approval required before apply' } else { 'Not requested' }
+            PolicyResetAuthorization = if ($ResetRequestNetworkPolicy) { 'AuthorizedByDefaultAfterSuccessfulPlan' } else { 'Not requested' }
+            PolicyResetApproval = if ($ResetRequestNetworkPolicy) { 'Authorized by default after successful plan' } else { 'Not requested' }
             NoMutationPerformed = $true
         }
         DeploymentCoordination = [ordered]@{
@@ -422,7 +424,7 @@ try {
         New-Item -ItemType Directory -Force -Path ([string]$layout.BaselineRoot) | Out-Null
         New-VM -Name ([string]$layout.BaselineVmName) -Generation 2 -NoVHD -MemoryStartupBytes ([long]$layout.VmMemoryBytes) -Path ([string]$layout.BaselineRoot) | Out-Null
         & (Join-Path ([string]$layout.HarnessSourceRoot) 'Provision-Windows11Vm.ps1') -VmName ([string]$layout.BaselineVmName) -InstallIso ([string]$isoResult.IsoPath) -SeedIso ([string]$seed.IsoPath) -CredentialPath (Join-Path ([string]$layout.HarnessSourceRoot) 'private\guest-credential.json') -StatusPath (Join-Path $setupStateRoot 'provision-status.json') -ConfigPath $configPath -DeferBaselineCheckpoint
-        Write-SetupState -Phase 'ServicingBaseline' -Message 'Applying current non-preview Windows updates and the approved latest stable .NET SDK before sealing the clean baseline.' -Details @{
+        Write-SetupState -Phase 'ServicingBaseline' -Message 'Applying current non-preview Windows updates and the pinned latest stable .NET SDK before sealing the clean baseline.' -Details @{
             GuestUpdateSwitchName = $GuestUpdateSwitchName
             DotNetChannel = $DotNetChannel
             ExpectedDotNetSdkVersion = $ExpectedDotNetSdkVersion

@@ -103,7 +103,7 @@ try {
     $dotNetMetadata = & $resolver -Channel $DotNetChannel -ExpectedVersion $ExpectedDotNetSdkVersion
 }
 catch { $dotNetMetadataError = $_.Exception.Message }
-Add-Check -Name 'DotNetReleaseMetadata' -Passed ($null -ne $dotNetMetadata) -Required $true -Message $(if ($dotNetMetadata) { "Official metadata resolved stable .NET SDK $($dotNetMetadata.Version)." } else { "Official .NET release metadata could not validate the approved SDK: $dotNetMetadataError" }) -Details $dotNetMetadata
+Add-Check -Name 'DotNetReleaseMetadata' -Passed ($null -ne $dotNetMetadata) -Required $true -Message $(if ($dotNetMetadata) { "Official metadata resolved stable .NET SDK $($dotNetMetadata.Version)." } else { "Official .NET release metadata could not validate the pinned SDK: $dotNetMetadataError" }) -Details $dotNetMetadata
 
 $feature = $null
 try { $feature = Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -ErrorAction Stop } catch { }
@@ -116,7 +116,7 @@ try {
     $updateSwitch = Get-VMSwitch -Name $GuestUpdateSwitchName -ErrorAction Stop
 }
 catch { }
-Add-Check -Name 'GuestUpdateSwitch' -Passed $true -Required $false -Message $(if ($updateSwitch) { "The explicitly selected guest-update switch '$GuestUpdateSwitchName' exists." } else { "The guest-update switch '$GuestUpdateSwitchName' will be verified after the approved elevation." }) -Details $(if ($updateSwitch) { [ordered]@{ Name = $updateSwitch.Name; SwitchType = [string]$updateSwitch.SwitchType } } else { $null })
+Add-Check -Name 'GuestUpdateSwitch' -Passed $true -Required $false -Message $(if ($updateSwitch) { "The explicitly selected guest-update switch '$GuestUpdateSwitchName' exists." } else { "The guest-update switch '$GuestUpdateSwitchName' will be verified after elevation." }) -Details $(if ($updateSwitch) { [ordered]@{ Name = $updateSwitch.Name; SwitchType = [string]$updateSwitch.SwitchType } } else { $null })
 
 $result = [pscustomobject][ordered]@{
     Success = @($checks | Where-Object { $_.Required -and -not $_.Passed }).Count -eq 0

@@ -28,7 +28,7 @@ if ([string]::IsNullOrWhiteSpace($TargetUserProfile)) { $TargetUserProfile = $en
 if ([string]::IsNullOrWhiteSpace($TargetUserSid)) { $TargetUserSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value }
 try { [void][Security.Principal.SecurityIdentifier]::new($TargetUserSid) } catch { throw "Invalid target-user SID: $TargetUserSid" }
 if ([string]::IsNullOrWhiteSpace($ExpectedDotNetSdkVersion)) {
-    throw 'Pass the exact latest stable SDK version approved during preflight with -ExpectedDotNetSdkVersion.'
+    throw 'Pass the exact latest stable SDK version pinned during preflight with -ExpectedDotNetSdkVersion.'
 }
 if ($AdoptCurrentBaseline -and $GuestRestartMode -ne 'Manual') {
     throw '-AdoptCurrentBaseline requires -GuestRestartMode Manual so the preserved guest is never restarted automatically.'
@@ -179,6 +179,8 @@ if ($PlanOnly) {
     [pscustomobject][ordered]@{
         PlanOnly = $true
         NoMutationPerformed = $true
+        ApplyReady = $true
+        DefaultAuthorization = 'ApplyWithoutAdditionalUserConfirmation'
         ApprovalReady = $true
         RepositoryRoot = $repositoryRoot
         RepositoryCommit = $repositoryCommit
@@ -254,7 +256,7 @@ if ($PlanOnly) {
         )
         ExplicitlyExcluded = @('Host reboot','Windows activation or product key','Microsoft account sign-in','Unrelated Hyper-V VMs','Preview updates','Optional drivers','Windows feature-version upgrade','.NET preview SDKs','VM images or credentials in Git')
         InvocationPreflight = $invocationPreflight
-        RequiresSecondApproval = $true
+        RequiresSecondApproval = $false
     }
     return
 }

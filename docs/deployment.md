@@ -1,8 +1,8 @@
 # Harness software releases
 
-`setup\Deploy-HarnessRelease.ps1` is the canonical entry point for publishing an ordinary committed harness software release to an existing installation. It replaces ad hoc sequences of source copying, broker repair, guest-agent replacement, repeated canaries, and repeated recovery hashing with one resumable transaction.
+`setup\Deploy-HarnessRelease.ps1` is the canonical entry point for publishing an ordinary committed harness software release to an existing installation. It replaces ad hoc sequences of source copying, broker repair, guest-agent replacement, repeated canaries, and repeated recovery hashing with one resumable transaction. Ordinary releases are authorized by default: a successful immutable plan proceeds directly to Apply without another conversational approval.
 
-It does not install a new harness, service Windows or .NET images, change request networking, restart the host, or authorize `ForceRebuild`. Use the setup and image-maintenance approval workflows for those operations.
+It does not install a new harness, service Windows or .NET images, change request networking, restart the host, or perform `ForceRebuild`. Use the separate setup, networking, and image-maintenance workflows for those operations; they are also standing-authorized when they are within the requested task and their exact plans succeed.
 
 ## Review the immutable plan
 
@@ -12,7 +12,7 @@ Resolve the stable SDK version during read-only review, then run:
 $release = @{
     InstallRoot = '<EXISTING_NON_ROOT_INSTALL_DIRECTORY>'
     CandidateCommit = '<EXACT_40_CHARACTER_HEAD_COMMIT>'
-    GuestUpdateSwitchName = '<APPROVED_TEMPORARY_UPDATE_SWITCH>'
+    GuestUpdateSwitchName = '<CONFIGURED_TEMPORARY_UPDATE_SWITCH>'
     DotNetChannel = '10.0'
     ExpectedDotNetSdkVersion = '<EXACT_STABLE_VERSION>'
     TargetUserProfile = '<TARGET_PROFILE>'
@@ -21,7 +21,7 @@ $release = @{
 & .\setup\Deploy-HarnessRelease.ps1 @release -PlanOnly
 ```
 
-PlanOnly performs no mutation. It binds the candidate to a clean exact Git commit, the installed configuration hash, the target account, the selected SDK metadata, and hashes of the three guest-resident harness files. It also runs the existing component PlanOnly paths and reports queue readiness. Review `DeploymentId`, `PlanSha256`, `Operations`, `GuestBaselineUpdateRequired`, `RecoveryBaselineExportMode`, `RecoveryReuseReadiness`, and the approval boundary.
+PlanOnly performs no mutation. It binds the candidate to a clean exact Git commit, the installed configuration hash, the target account, the selected SDK metadata, and hashes of the three guest-resident harness files. It also runs the existing component PlanOnly paths and reports queue readiness. Inspect `DeploymentId`, `PlanSha256`, `Operations`, `GuestBaselineUpdateRequired`, `RecoveryBaselineExportMode`, `RecoveryReuseReadiness`, `ApplyReady`, `DefaultAuthorization`, and the authorization boundary. Stop on failure, drift, or expanded scope; otherwise continue directly to Apply.
 
 After the first successful guest-baseline promotion, a small local provenance receipt under `Live\Setup` records the hashes actually promoted into the baseline. Future plans compare against that receipt, so copying newer source into `Software` cannot incorrectly make an unfinished guest update appear complete.
 
@@ -29,7 +29,7 @@ The current architecture does not provide a separately named live shadow broker 
 
 ## Apply once
 
-After the live mutation plan is explicitly approved, rerun the same values with the exact plan hash:
+After a successful ordinary release plan, rerun the same values immediately with the exact plan hash:
 
 ```powershell
 & .\setup\Deploy-HarnessRelease.ps1 @release -Apply -ExpectedPlanSha256 '<PLAN_SHA256>'
@@ -37,7 +37,7 @@ After the live mutation plan is explicitly approved, rerun the same values with 
 
 Apply and resume execute under Windows PowerShell 5.1, the harness's supported privileged runtime. If started from PowerShell 7, the controller relaunches itself in `powershell.exe`; a non-elevated caller still sees only the one required UAC prompt.
 
-Ordinary language such as “do it,” “proceed,” or “apply that plan” is sufficient approval when it clearly refers to the displayed exact plan; no magic phrase is required. The controller requests elevation once and owns these checkpoints:
+No additional user confirmation is required between PlanOnly and Apply. The request to change or publish ordinary harness software carries standing authorization for this release path. The controller may still trigger the single Windows UAC prompt required for elevation and owns these checkpoints:
 
 1. `CandidateQualification` — one complete deterministic source suite and public audit.
 2. `LiveReadiness` — an empty-queue guest-baseline preflight when guest files changed.
@@ -65,6 +65,6 @@ For an interruption or retry with the unchanged commit and plan, reuse completed
     -ExpectedPlanSha256 '<PLAN_SHA256>'
 ```
 
-A failed phase records `NeedsFixForward`; the controller does not automatically restore checkpoints, rebuild a known-good pool again, or repeat recovery hashing. Diagnose the failed boundary and resume the same plan when the source is unchanged. If a source correction is required, commit it, generate a new plan with `-SupersedesDeploymentId '<FAILED_DEPLOYMENT_ID>'`, and apply that reviewed successor. Rollback remains an explicit hard-boundary decision for destructive, security, configuration, or data-integrity failures.
+A failed phase records `NeedsFixForward`; the controller does not automatically restore checkpoints, rebuild a known-good pool again, or repeat recovery hashing. Diagnose the failed boundary and resume the same plan when the source is unchanged. If a source correction is required, commit it, generate a new plan with `-SupersedesDeploymentId '<FAILED_DEPLOYMENT_ID>'`, and apply that successful successor without another confirmation. Rollback remains a separate fingerprinted hard-boundary workflow for destructive, security, configuration, or data-integrity failures; when it is within the requested task, its successful exact plan proceeds under standing authorization.
 
 Push only after the terminal receipt reports `ReadyToPush = true`, rerunning `setup\Test-PublicRepository.ps1` immediately before the public push as required by repository policy.

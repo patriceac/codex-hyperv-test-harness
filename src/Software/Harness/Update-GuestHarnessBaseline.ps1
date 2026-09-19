@@ -62,10 +62,13 @@ function Get-GuestHarnessBaselineUpdatePlan {
     $liveQueued = @(Get-ChildItem -LiteralPath (Join-Path $BrokerRoot 'LiveEvidence\Requests') -Filter '*.json' -File -ErrorAction SilentlyContinue).Count
     $liveProcessing = @(Get-ChildItem -LiteralPath (Join-Path $BrokerRoot 'LiveEvidence\Processing') -Filter '*.json' -File -ErrorAction SilentlyContinue).Count
     $poolDefinition = Get-Content -LiteralPath $PoolDefinitionPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    $applyReady = $queued -eq 0 -and $processing -eq 0 -and $liveQueued -eq 0 -and $liveProcessing -eq 0
     [pscustomobject][ordered]@{
         PlanOnly = [bool]$PlanOnly
         NoMutationPerformed = [bool]$PlanOnly
-        ApprovalReady = $queued -eq 0 -and $processing -eq 0 -and $liveQueued -eq 0 -and $liveProcessing -eq 0
+        ApplyReady = $applyReady
+        DefaultAuthorization = 'ApplyWithoutAdditionalUserConfirmation'
+        ApprovalReady = $applyReady
         ConfigPath = [IO.Path]::GetFullPath($ConfigPath)
         SourceRoot = [IO.Path]::GetFullPath($SourceRoot)
         BrokerRoot = [IO.Path]::GetFullPath($BrokerRoot)
@@ -93,7 +96,8 @@ function Get-GuestHarnessBaselineUpdatePlan {
             'No application-under-test execution on the physical host.',
             'No request cancellation or deadline extension; apply waits for active processing to drain.'
         )
-        DestructiveApprovalRequired = $true
+        DestructiveApprovalRequired = $false
+        DestructiveOperationStandingAuthorized = $true
         DestructiveScope = "Replace the canonical baseline checkpoint and force-recreate only the $([int]$poolDefinition.PoolSize) named disposable pool workers."
         RecoveryRefreshRequired = $true
         LiveCanaryRequired = $true

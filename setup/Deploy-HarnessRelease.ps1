@@ -425,14 +425,14 @@ function Get-ResumableReleasePlan {
     $repositoryState = Get-ReleaseRepositoryState -Root $repositoryRoot -RequestedCommit ([string]$persistedPlan.CandidateCommit)
     $configuration = Get-InstalledReleaseConfiguration -Path $configPath
     if (-not [string]::Equals([string]$configuration.Sha256, [string]$persistedPlan.InstalledConfigurationSha256, [StringComparison]::OrdinalIgnoreCase)) {
-        throw 'The installed harness configuration changed after the deployment plan was approved.'
+        throw 'The installed harness configuration changed after the deployment plan was created.'
     }
     $currentGuestInventory = @(Get-GuestReleaseInventory -CandidateSoftwareRoot (Join-Path $repositoryRoot 'src\Software') -InstalledSoftwareRoot (Join-Path $InstallRoot 'Software') -ProvenancePath $baselineProvenancePath)
     foreach ($approvedEntry in @($persistedPlan.GuestSourceInventory)) {
         $currentEntry = @($currentGuestInventory | Where-Object { [string]$_.RelativePath -eq [string]$approvedEntry.RelativePath })
         if ($currentEntry.Count -ne 1 -or
             -not [string]::Equals([string]$currentEntry[0].CandidateSha256, [string]$approvedEntry.CandidateSha256, [StringComparison]::OrdinalIgnoreCase)) {
-            throw "Candidate guest source changed after approval: $($approvedEntry.RelativePath)"
+            throw "Candidate guest source changed after plan creation: $($approvedEntry.RelativePath)"
         }
     }
     $expectedSupersedes = if ([string]::IsNullOrWhiteSpace($SupersedesDeploymentId)) { $null } else { $SupersedesDeploymentId }
@@ -445,11 +445,11 @@ function Get-ResumableReleasePlan {
         [pscustomobject]@{ Name = 'SupersedesDeploymentId'; Current = $expectedSupersedes; Approved = [string]$persistedPlan.SupersedesDeploymentId }
     )) {
         if (-not [string]::Equals([string]$binding.Current, [string]$binding.Approved, [StringComparison]::OrdinalIgnoreCase)) {
-            throw "Resume parameter $($binding.Name) differs from the approved deployment plan."
+            throw "Resume parameter $($binding.Name) differs from the persisted deployment plan."
         }
     }
     if ([bool]$AllowLowResources -ne [bool]$persistedPlan.AllowLowResources) {
-        throw 'Resume parameter AllowLowResources differs from the approved deployment plan.'
+        throw 'Resume parameter AllowLowResources differs from the persisted deployment plan.'
     }
     [pscustomobject][ordered]@{ Plan = $persistedPlan; Configuration = $configuration }
 }
@@ -575,11 +575,15 @@ if ($PlanOnly) {
         if (-not [bool]$guestPlan.NoMutationPerformed) { throw 'The guest-baseline component plan did not remain read-only.' }
     }
     $acceptancePlan = & (Join-Path $repositoryRoot 'setup\Invoke-HarnessReleaseAcceptance.ps1') -InstallRoot $InstallRoot -InvocationPreflightOnly
+    $applyReady = [bool]$publicAudit.Success -and [bool]$installPlan.Preflight.Success -and ($null -eq $guestPlan -or [bool]$guestPlan.ApplyReady) -and [bool]$acceptancePlan.Success
+    $authorizationBoundary = 'A successful ordinary release plan is authorized for immediate Apply without additional user confirmation. ForceRebuild, image servicing, networking changes, host restart, and rollback use their own exact plans and are also standing-authorized when they are within the requested task.'
     [pscustomobject][ordered]@{
         FormatVersion = 1
         PlanOnly = $true
         NoMutationPerformed = $true
-        ApprovalReady = [bool]$publicAudit.Success -and [bool]$installPlan.Preflight.Success -and ($null -eq $guestPlan -or [bool]$guestPlan.ApprovalReady) -and [bool]$acceptancePlan.Success
+        ApplyReady = $applyReady
+        DefaultAuthorization = 'ApplyWithoutAdditionalUserConfirmation'
+        ApprovalReady = $applyReady
         DeploymentId = [string]$plan.DeploymentId
         PlanSha256 = [string]$plan.PlanSha256
         Plan = $plan
@@ -589,7 +593,8 @@ if ($PlanOnly) {
             GuestBaseline = $guestPlan
             AcceptanceInvocation = $acceptancePlan
         }
-        ApprovalBoundary = 'Apply performs one elevation and the listed live mutations. ForceRebuild, image servicing, networking changes, host restart, and automatic rollback are not authorized by this plan.'
+        AuthorizationBoundary = $authorizationBoundary
+        ApprovalBoundary = $authorizationBoundary
         ApplyParameters = [ordered]@{
             InstallRoot = $InstallRoot
             Apply = $true
@@ -762,12 +767,12 @@ try {
 
     Invoke-DeploymentPhase -Name 'LiveReadiness' -Body {
         if (-not [bool]$plan.GuestBaselineUpdateRequired) {
-            return [pscustomobject][ordered]@{ GuestBaselineUpdateRequired = $false; ApprovalReady = $true }
+            return [pscustomobject][ordered]@{ GuestBaselineUpdateRequired = $false; ApplyReady = $true; DefaultAuthorization = 'ApplyWithoutAdditionalUserConfirmation'; ApprovalReady = $true }
         }
         $guestPlanParameters = New-GuestBaselineInvocationParameters -Plan $plan -Configuration $configuration -SourceRoot (Join-Path $repositoryRoot 'src\Software\Harness') -StatusPath (Join-Path $deploymentRoot 'guest-plan.json') -ForPlanOnly
         $guestPlanJson = & (Join-Path $repositoryRoot 'src\Software\Harness\Update-GuestHarnessBaseline.ps1') @guestPlanParameters
         $guestPlan = if ($guestPlanJson -is [string]) { $guestPlanJson | ConvertFrom-Json } else { $guestPlanJson }
-        if (-not [bool]$guestPlan.NoMutationPerformed -or -not [bool]$guestPlan.ApprovalReady) {
+        if (-not [bool]$guestPlan.NoMutationPerformed -or -not [bool]$guestPlan.ApplyReady) {
             throw 'Guest-baseline readiness failed because the broker is not drained or the exact component plan is invalid.'
         }
         $guestPlan
