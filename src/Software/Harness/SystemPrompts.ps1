@@ -219,9 +219,13 @@ public static class CodexSystemPromptToken
 
         $all = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)
         $consent = @($all | Where-Object { [string]::Equals([string]$_.Name, 'consent.exe', [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { Get-ObservedProcess $_ })
+        $pickerHostPath = Join-Path $env:WINDIR 'System32\PickerHost.exe'
         $firewall = @($all | Where-Object {
             ([string]::Equals([string]$_.Name, 'rundll32.exe', [StringComparison]::OrdinalIgnoreCase) -and [string]$_.CommandLine -match '(?i)FirewallUX\.dll') -or
-            ([string]::Equals([string]$_.Name, 'SystemSettingsAdminFlows.exe', [StringComparison]::OrdinalIgnoreCase) -and [string]$_.CommandLine -match '(?i)firewall')
+            ([string]::Equals([string]$_.Name, 'SystemSettingsAdminFlows.exe', [StringComparison]::OrdinalIgnoreCase) -and [string]$_.CommandLine -match '(?i)firewall') -or
+            ([string]::Equals([string]$_.Name, 'PickerHost.exe', [StringComparison]::OrdinalIgnoreCase) -and
+                [string]::Equals([string]$_.ExecutablePath, $pickerHostPath, [StringComparison]::OrdinalIgnoreCase) -and
+                [string]$_.CommandLine -match '(?i)(?:^|\s)FirewallNotificationDialogServer(?:\s|$)')
         } | ForEach-Object { Get-ObservedProcess $_ })
 
         $lease = $null
@@ -347,13 +351,17 @@ function Prepare-SystemPromptFirewallProfilesV1 {
     @(Invoke-Command -Session $Session -ErrorAction Stop -ScriptBlock {
         param($RequestedProfilesJson)
         foreach ($profileName in @($RequestedProfilesJson | ConvertFrom-Json)) {
-            Set-NetFirewallProfile -Name $profileName -Enabled True -DefaultInboundAction Block -NotifyOnListen True -DisabledInterfaceAliases ([string[]]@()) -ErrorAction Stop
+            Set-NetFirewallProfile -Name $profileName -Enabled True -DefaultInboundAction Block -NotifyOnListen True `
+                -AllowInboundRules True -AllowLocalFirewallRules True -AllowUserApps True -AllowUserPorts True `
+                -DisabledInterfaceAliases ([string[]]@()) -ErrorAction Stop
             $profiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore -Name $profileName -ErrorAction Stop)
             $disabledAliases = @($profiles[0].DisabledInterfaceAliases | ForEach-Object { [string]$_ } | Where-Object {
                 -not [string]::IsNullOrWhiteSpace($_) -and $_ -ne 'NotConfigured'
             })
             if ($profiles.Count -ne 1 -or [string]$profiles[0].Enabled -ne 'True' -or
                 [string]$profiles[0].DefaultInboundAction -ne 'Block' -or [string]$profiles[0].NotifyOnListen -ne 'True' -or
+                [string]$profiles[0].AllowInboundRules -ne 'True' -or [string]$profiles[0].AllowLocalFirewallRules -ne 'True' -or
+                [string]$profiles[0].AllowUserApps -ne 'True' -or [string]$profiles[0].AllowUserPorts -ne 'True' -or
                 $disabledAliases.Count -ne 0) {
                 throw "The $profileName firewall profile could not be prepared for an application-listen notification."
             }
@@ -362,6 +370,10 @@ function Prepare-SystemPromptFirewallProfilesV1 {
                 Enabled = [string]$profiles[0].Enabled
                 DefaultInboundAction = [string]$profiles[0].DefaultInboundAction
                 NotifyOnListen = [string]$profiles[0].NotifyOnListen
+                AllowInboundRules = [string]$profiles[0].AllowInboundRules
+                AllowLocalFirewallRules = [string]$profiles[0].AllowLocalFirewallRules
+                AllowUserApps = [string]$profiles[0].AllowUserApps
+                AllowUserPorts = [string]$profiles[0].AllowUserPorts
                 DisabledInterfaceAliases = @($disabledAliases)
             }
         }
