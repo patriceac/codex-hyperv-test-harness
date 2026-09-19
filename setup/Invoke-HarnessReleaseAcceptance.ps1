@@ -118,6 +118,25 @@ function New-HarnessReleaseAcceptanceInvocations {
                 ExecutionTimeoutSeconds = 300
                 ThrowOnFailure = $true
             }
+        },
+        [pscustomobject][ordered]@{
+            Name = 'SystemPrompts'
+            Parameters = @{
+                ArtifactPath = Join-Path $canaryRoot 'SystemPromptCanary.exe'
+                Arguments = '--result "{OUTDIR}\system-prompt-result.json" --settle-ms 15000'
+                ActionsPath = Join-Path $canaryRoot 'system-prompt-actions.json'
+                AssertResultFile = '{OUTDIR}\system-prompt-result.json'
+                AssertResultJsonPointer = '/passed'
+                AssertResultEqualsJson = 'true'
+                AcceptUacPrompt = $true
+                AcceptWindowsFirewallPrompt = $true
+                SystemPromptTimeoutSeconds = 60
+                WindowsFirewallProfiles = @('Private')
+                BrokerRoot = $BrokerRoot
+                QueueTimeoutSeconds = 900
+                ExecutionTimeoutSeconds = 300
+                ThrowOnFailure = $true
+            }
         }
     )
 }
@@ -133,7 +152,7 @@ if ($InvocationPreflightOnly) {
         $null -eq (Get-ReleaseOptionalPropertyValue -InputObject $shapeProbe -Name 'Missing') -and
         (Get-ReleaseOptionalPropertyValue -InputObject $shapeProbe -Name 'Present') -is [bool]
     [pscustomobject][ordered]@{
-        Success = $preview.Count -eq 4 -and $maintenanceSnapshotShapeSafe
+        Success = $preview.Count -eq 5 -and $maintenanceSnapshotShapeSafe
         NoMutationPerformed = $true
         MaintenanceSnapshotShapeSafe = [bool]$maintenanceSnapshotShapeSafe
         TestNames = @($preview.Name)
@@ -392,6 +411,18 @@ if (-not [bool]$shutdown.ExpectedGuestPowerOffContractProven -or
     -not [bool]$shutdown.ExpectedGuestPowerOffContractSatisfied -or
     [bool]$shutdown.ApplicationRelaunchedByHarnessAfterGuestPowerOff) {
     throw 'Expected-guest-power-off acceptance did not prove ordered shutdown and no replay.'
+}
+
+$systemPrompts = $results.SystemPrompts
+if (-not [bool]$systemPrompts.SystemPromptContractProven -or
+    -not [bool]$systemPrompts.SystemPrompts.ContractSatisfied -or
+    (@($systemPrompts.SystemPrompts.RequestedKinds) -join ',') -cne 'Uac,WindowsFirewall') {
+    throw 'System-prompt acceptance did not prove ordered UAC and Windows Firewall authorization.'
+}
+foreach ($fileName in @('system-prompt-uac-before.png', 'system-prompt-uac-after.png', 'system-prompt-firewall-before.png', 'system-prompt-firewall-after.png')) {
+    if (-not (Test-Path -LiteralPath (Join-Path ([string]$systemPrompts.ResultPath) $fileName) -PathType Leaf)) {
+        throw "System-prompt acceptance did not return $fileName."
+    }
 }
 
 $postAudit = Invoke-PoolAuditUnderMaintenance -Name 'post-acceptance-audit'

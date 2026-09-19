@@ -169,6 +169,17 @@ try {
     }
     $scenarios.Add('power-off-recovery-timeout-bounded')
 
+    Assert-Rejected -Scenario 'system prompt timeout requires opt-in' -ExpectedMessage 'options require AcceptUacPrompt or AcceptWindowsFirewallPrompt' -Operation {
+        & $RunnerPath -ArtifactPath $artifact -BrokerRoot $root -SystemPromptTimeoutSeconds 30
+    }
+    Assert-Rejected -Scenario 'firewall profiles require firewall prompt' -ExpectedMessage 'requires AcceptWindowsFirewallPrompt' -Operation {
+        & $RunnerPath -ArtifactPath $artifact -BrokerRoot $root -AcceptUacPrompt -WindowsFirewallProfiles Public
+    }
+    Assert-Rejected -Scenario 'system prompts reject expected power-off' -ExpectedMessage 'cannot be combined with ExpectGuestPowerOff' -Operation {
+        & $RunnerPath -ArtifactPath $artifact -BrokerRoot $root -AcceptUacPrompt -ExpectGuestPowerOff -AssertResultFile '{OUTDIR}\result.json'
+    }
+    $scenarios.Add('system-prompt-options-are-explicit-and-incompatible-with-power-off')
+
     Assert-Rejected -Scenario 'wait result token scope' -ExpectedMessage 'Allowed tokens: {OUTDIR}' -Operation {
         & $RunnerPath -ArtifactPath $artifact -BrokerRoot $root -ActionsJson '[{"type":"wait_result_file","path":"{PAYLOAD}\\result.json","timeoutMs":1000}]'
     }
@@ -299,8 +310,9 @@ try {
     $legacyDefaultRequest = Get-QueuedRequest -Scenario 'legacy default request shape' -InvocationParameters $legacyDefaultInvocation
     if ($legacyDefaultRequest.PSObject.Properties.Name -contains 'ExpectGuestPowerOff' -or
         $legacyDefaultRequest.PSObject.Properties.Name -contains 'GuestPowerOffRecoveryTimeoutSeconds' -or
-        $legacyDefaultRequest.Job.PSObject.Properties.Name -contains 'expectGuestPowerOff') {
-        throw 'The legacy default request serialized expected-power-off properties without opt-in.'
+        $legacyDefaultRequest.Job.PSObject.Properties.Name -contains 'expectGuestPowerOff' -or
+        $legacyDefaultRequest.PSObject.Properties.Name -contains 'SystemPrompts') {
+        throw 'The legacy default request serialized opt-in power-off or system-prompt properties.'
     }
     $legacyDefaultActionsJson = @($legacyDefaultRequest.Job.actions) | ConvertTo-Json -Compress
     $expectedLegacyDefaultActionsJson = '[{"type":"wait_window","timeoutMs":30000},{"type":"screenshot","name":"launched.png"},{"type":"wait","ms":2000},{"type":"screenshot","name":"after-wait.png"}]'
@@ -354,6 +366,32 @@ try {
         throw 'The default network contract must serialize null Cohort and AllowHostInputs=false without a switch selector.'
     }
     $scenarios.Add('network-default-serialized-none')
+
+    $promptInvocation = $baseInvocation.Clone()
+    $promptInvocation.AcceptUacPrompt = $true
+    $promptInvocation.AcceptWindowsFirewallPrompt = $true
+    $promptInvocation.SystemPromptTimeoutSeconds = 75
+    $promptInvocation.WindowsFirewallProfiles = @('Private', 'Public')
+    $promptRequest = Get-QueuedRequest -Scenario 'system prompt request contract' -InvocationParameters $promptInvocation
+    Assert-Equal -Scenario 'system prompt operation is fail-closed on older brokers' -Actual ([string]$promptRequest.Operation) -Expected 'RunGuestJobSystemPromptsV1'
+    Assert-Equal -Scenario 'system prompt schema is bounded' -Actual @($promptRequest.SystemPrompts.PSObject.Properties).Count -Expected 7
+    Assert-Equal -Scenario 'system prompt format version' -Actual ([int]$promptRequest.SystemPrompts.FormatVersion) -Expected 1
+    Assert-Equal -Scenario 'system prompt timeout serialization' -Actual ([int]$promptRequest.SystemPrompts.PromptTimeoutSeconds) -Expected 75
+    Assert-Equal -Scenario 'system prompt executable path binding' -Actual ([string]$promptRequest.SystemPrompts.ExecutableRelativePath) -Expected 'never-run.exe'
+    Assert-Equal -Scenario 'system prompt executable hash binding' -Actual ([string]$promptRequest.SystemPrompts.ExecutableSha256) -Expected ((Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash)
+    Assert-Equal -Scenario 'system prompt profile ordering' -Actual (@($promptRequest.SystemPrompts.FirewallProfiles) -join ',') -Expected 'Private,Public'
+    if ($promptRequest.SystemPrompts.AcceptUac -isnot [bool] -or -not [bool]$promptRequest.SystemPrompts.AcceptUac -or
+        $promptRequest.SystemPrompts.AcceptWindowsFirewall -isnot [bool] -or -not [bool]$promptRequest.SystemPrompts.AcceptWindowsFirewall) {
+        throw 'System-prompt acceptance flags were not serialized as exact Boolean true values.'
+    }
+    $scenarios.Add('system-prompt-request-is-versioned-and-bound-to-payload-hash')
+
+    $networkPromptInvocation = $promptInvocation.Clone()
+    $networkPromptInvocation.NetworkProfile = 'InternetOnly'
+    $networkPromptRequest = Get-QueuedRequest -Scenario 'networked system prompt request contract' -InvocationParameters $networkPromptInvocation
+    Assert-Equal -Scenario 'networked system prompt keeps fail-closed operation' -Actual ([string]$networkPromptRequest.Operation) -Expected 'RunGuestJobSystemPromptsV1'
+    Assert-Equal -Scenario 'networked system prompt preserves profile' -Actual ([string]$networkPromptRequest.Network.Profile) -Expected 'InternetOnly'
+    $scenarios.Add('system-prompt-operation-remains-versioned-with-network')
 
     $keyboardInvocation = $baseInvocation.Clone()
     $keyboardInvocation.ActionsJson = '[{"type":"send_keys","keys":"WIN+LEFT","holdMs":75}]'

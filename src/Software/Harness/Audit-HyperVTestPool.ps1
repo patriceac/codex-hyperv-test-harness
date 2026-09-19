@@ -379,7 +379,7 @@ try {
     try { [void][Security.Principal.SecurityIdentifier]::new($resolvedClientSid) } catch { throw "Invalid broker client SID: $resolvedClientSid" }
     $brokerTask = Get-ScheduledTask -TaskName ([string]$layout.BrokerTaskName) -ErrorAction SilentlyContinue
 
-    $installedFiles = @('HostBroker.ps1', 'PayloadCache.ps1', 'HostInputShare.ps1', 'RequestNetwork.ps1', 'LiveEvidence.ps1', 'PoolCommon.ps1', 'PoolBroker.ps1', 'PoolLifecycle.ps1', 'HostWorker.ps1')
+    $installedFiles = @('HostBroker.ps1', 'PayloadCache.ps1', 'HostInputShare.ps1', 'RequestNetwork.ps1', 'SystemPrompts.ps1', 'LiveEvidence.ps1', 'PoolCommon.ps1', 'PoolBroker.ps1', 'PoolLifecycle.ps1', 'HostWorker.ps1')
     $privateRoot = Join-Path $BrokerRoot 'Private'
     $aclTargets = New-Object Collections.Generic.List[object]
     $aclTargets.Add([pscustomobject]@{ Path = $BrokerRoot; ClientMode = 'ReadExecute'; ClientInherits = $false })

@@ -49,7 +49,7 @@ $installationMutationStarted = $false
 $credentialExistedBefore = $false
 $installCommitted = $false
 $rollbackSucceeded = $false
-$installedFiles = @('HostBroker.ps1', 'PayloadCache.ps1', 'HostInputShare.ps1', 'RequestNetwork.ps1', 'RemoteDebuggerProvisioning.ps1', 'RemoteDebuggerObservation.ps1', 'LiveEvidence.ps1', 'PoolCommon.ps1', 'PoolBroker.ps1', 'PoolLifecycle.ps1', 'HostWorker.ps1')
+$installedFiles = @('HostBroker.ps1', 'PayloadCache.ps1', 'HostInputShare.ps1', 'RequestNetwork.ps1', 'SystemPrompts.ps1', 'RemoteDebuggerProvisioning.ps1', 'RemoteDebuggerObservation.ps1', 'LiveEvidence.ps1', 'PoolCommon.ps1', 'PoolBroker.ps1', 'PoolLifecycle.ps1', 'HostWorker.ps1')
 $remoteDebuggerProvisionProfile = $null
 if ($layout.PSObject.Properties['RemoteDebuggerProvisionV1']) {
     if ($null -eq $brokerInstanceId) { throw 'RemoteDebuggerProvisionV1 requires a dedicated BrokerInstanceId.' }

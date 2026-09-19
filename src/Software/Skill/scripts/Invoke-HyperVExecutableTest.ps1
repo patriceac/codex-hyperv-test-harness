@@ -9,6 +9,10 @@ param(
     [string] $AssertResultJsonPointer,
     [string] $AssertResultEqualsJson,
     [switch] $ExpectGuestPowerOff,
+    [switch] $AcceptUacPrompt,
+    [switch] $AcceptWindowsFirewallPrompt,
+    [ValidateRange(5, 600)] [int] $SystemPromptTimeoutSeconds = 120,
+    [ValidateSet('Private', 'Public')] [string[]] $WindowsFirewallProfiles = @('Private'),
     [Alias('HostInput')] [hashtable[]] $ReadOnlyHostInput = @(),
     [ValidateRange(1048576, 1099511627776)] [long] $HostInputColdShareThresholdBytes = 1073741824,
     [ValidateRange(1048576, 1099511627776)] [long] $HostInputIncrementalShareThresholdBytes = 268435456,
@@ -40,12 +44,25 @@ if (-not $ExpectGuestPowerOff -and $PSBoundParameters.ContainsKey('GuestPowerOff
 if ($ExpectGuestPowerOff -and [string]::IsNullOrWhiteSpace($AssertResultFile)) {
     throw 'AssertResultFile is required when ExpectGuestPowerOff is specified.'
 }
+$systemPromptRequested = [bool]$AcceptUacPrompt -or [bool]$AcceptWindowsFirewallPrompt
+if (-not $systemPromptRequested -and ($PSBoundParameters.ContainsKey('SystemPromptTimeoutSeconds') -or $PSBoundParameters.ContainsKey('WindowsFirewallProfiles'))) {
+    throw 'System-prompt options require AcceptUacPrompt or AcceptWindowsFirewallPrompt.'
+}
+if ($ExpectGuestPowerOff -and $systemPromptRequested) {
+    throw 'System-prompt acceptance cannot be combined with ExpectGuestPowerOff.'
+}
+if (-not $AcceptWindowsFirewallPrompt -and $PSBoundParameters.ContainsKey('WindowsFirewallProfiles')) {
+    throw 'WindowsFirewallProfiles requires AcceptWindowsFirewallPrompt.'
+}
+if ($AcceptWindowsFirewallPrompt -and @($WindowsFirewallProfiles).Count -ne (@($WindowsFirewallProfiles | Select-Object -Unique).Count)) {
+    throw 'WindowsFirewallProfiles cannot contain duplicates.'
+}
 if ($GuestSetupProfile -eq 'None') {
     if ($PSBoundParameters.ContainsKey('GuestSetupExecutableRelativePath') -or $PSBoundParameters.ContainsKey('GuestSetupExecutableSha256')) {
         throw 'Guest setup executable fields require GuestSetupProfile RemoteDebuggerProvisionV1.'
     }
 }
-elseif ($NetworkProfile -notin @('None', 'IsolatedTestNet') -or $ReadOnlyHostInput.Count -gt 0 -or $AllowNetworkWithHostInputs -or $ExpectGuestPowerOff) {
+elseif ($NetworkProfile -notin @('None', 'IsolatedTestNet') -or $ReadOnlyHostInput.Count -gt 0 -or $AllowNetworkWithHostInputs -or $ExpectGuestPowerOff -or $systemPromptRequested) {
     throw 'RemoteDebuggerProvisionV1 permits only None or IsolatedTestNet, without host inputs or expected power-off.'
 }
 
@@ -490,6 +507,7 @@ function Get-RequestLifecycleDisplay {
         'StartingVm' { "Starting VM: $message".Trim() }
         'WaitingForGuestAgent' { "Waiting for guest agent: $message".Trim() }
         'LaunchingApplication' { "Launching application: $message".Trim() }
+        'AcceptingSystemPrompt' { "Accepting verified VM system prompt: $message".Trim() }
         'ApplicationRunning' {
             $pidText = if ($null -ne $applicationProcessId) { " PID $([int]$applicationProcessId)" } else { '' }
             "Application running on $workerText${pidText}: $RequestId. $message".Trim()
@@ -1211,6 +1229,17 @@ try {
     $payloadManifest = Get-PayloadManifest -Artifact $artifact -PreviousIndex $previousIndex -Inventory $payloadInventory
     $payloadFiles = @($payloadManifest.Files)
     $payloadDirectories = @($payloadManifest.Directories)
+    $systemPromptExecutableHash = $null
+    if ($systemPromptRequested) {
+        $normalizedExecutableManifestPath = $relativeExecutable.Replace('\', '/')
+        $systemPromptExecutableEntry = @($payloadFiles | Where-Object {
+            [string]::Equals([string]$_.RelativePath, $normalizedExecutableManifestPath, [StringComparison]::OrdinalIgnoreCase)
+        })
+        if ($systemPromptExecutableEntry.Count -ne 1 -or [string]$systemPromptExecutableEntry[0].Sha256 -cnotmatch '^[A-F0-9]{64}$') {
+            throw 'The prompt-bound executable did not resolve to exactly one hashed payload-manifest file.'
+        }
+        $systemPromptExecutableHash = [string]$systemPromptExecutableEntry[0].Sha256
+    }
     $payloadContentKey = Get-PayloadContentKey -Files $payloadFiles -Directories $payloadDirectories
     $payloadManifestPath = Join-Path $payloadManifestDirectory ($payloadContentKey + '.json')
     $payloadBytes = [long](($payloadFiles | Measure-Object -Property Length -Sum).Sum)
@@ -1371,11 +1400,33 @@ try {
         $job['expectGuestPowerOff'] = $true
     }
 
+    $systemPromptContract = $null
+    if ($systemPromptRequested) {
+        $requestedPromptKinds = @()
+        if ($AcceptUacPrompt) { $requestedPromptKinds += 'Uac' }
+        if ($AcceptWindowsFirewallPrompt) { $requestedPromptKinds += 'WindowsFirewall' }
+        $systemPromptContract = [ordered]@{
+            FormatVersion = 1
+            AcceptUac = [bool]$AcceptUacPrompt
+            AcceptWindowsFirewall = [bool]$AcceptWindowsFirewallPrompt
+            PromptTimeoutSeconds = [int]$SystemPromptTimeoutSeconds
+            ExecutableRelativePath = $relativeExecutable
+            ExecutableSha256 = $systemPromptExecutableHash
+            FirewallProfiles = if ($AcceptWindowsFirewallPrompt) { @($WindowsFirewallProfiles) } else { @() }
+        }
+        foreach ($kind in $requestedPromptKinds) {
+            $prefix = if ($kind -eq 'Uac') { 'system-prompt-uac' } else { 'system-prompt-firewall' }
+            foreach ($name in @($prefix + '-before.png', $prefix + '-after.png')) {
+                if ($expectedHarnessEvidence -notcontains $name) { $expectedHarnessEvidence += $name }
+            }
+        }
+    }
+
     $createdUtc = [DateTime]::UtcNow
     $queueDeadlineUtc = $createdUtc.AddSeconds($QueueTimeoutSeconds)
     $request = [ordered]@{
         RequestId = $requestId
-        Operation = if ($guestSetupRequest) { 'RunGuestJobProvisionedV1' } elseif ($networkEnabled) { 'RunGuestJobNetworkV1' } else { 'RunGuestJob' }
+        Operation = if ($systemPromptRequested) { 'RunGuestJobSystemPromptsV1' } elseif ($guestSetupRequest) { 'RunGuestJobProvisionedV1' } elseif ($networkEnabled) { 'RunGuestJobNetworkV1' } else { 'RunGuestJob' }
         CreatedUtc = $createdUtc.ToString('o')
         QueueTimeoutSeconds = $QueueTimeoutSeconds
         ExecutionTimeoutSeconds = $ExecutionTimeoutSeconds
@@ -1402,6 +1453,7 @@ try {
         Job = $job
     }
     if ($guestSetupRequest) { $request['RemoteDebuggerProvisionV1'] = $guestSetupRequest }
+    if ($systemPromptContract) { $request['SystemPrompts'] = $systemPromptContract }
     if ($ExpectGuestPowerOff) {
         $request['ExpectGuestPowerOff'] = $true
         $request['GuestPowerOffRecoveryTimeoutSeconds'] = [int]$GuestPowerOffRecoveryTimeoutSeconds
@@ -1600,6 +1652,11 @@ try {
             $summary['ExpectedGuestPowerOffContractProven'] = $false
             $summary['PowerOffRecoveryDeadlineUtc'] = $null
         }
+        if ($systemPromptRequested) {
+            $summary['SystemPrompts'] = $systemPromptContract
+            $summary['SystemPromptContractProven'] = $false
+            $summary['SystemPromptContractEvidenceFailures'] = @('The request did not start.')
+        }
         $summary | ConvertTo-Json -Depth 8
         $finalExitCode = if ($queueTimedOutBeforeStart) { 124 } else { 130 }
     }
@@ -1773,11 +1830,92 @@ try {
             $expectedGuestPowerOffContractProven = $powerOffContractEvidenceFailures.Count -eq 0
         }
 
+        $systemPromptContractEvidenceFailures = @()
+        $systemPromptContractProven = -not $systemPromptRequested
+        if ($systemPromptRequested) {
+            $promptEvidenceProperty = @($brokerResult.PSObject.Properties | Where-Object { $_.Name -ceq 'SystemPrompts' }) | Select-Object -First 1
+            $promptEvidence = if ($promptEvidenceProperty) { $promptEvidenceProperty.Value } else { $null }
+            if (-not $promptEvidence) {
+                $systemPromptContractEvidenceFailures += 'Broker result SystemPrompts is missing.'
+            }
+            else {
+                $satisfiedProperty = @($promptEvidence.PSObject.Properties | Where-Object { $_.Name -ceq 'ContractSatisfied' }) | Select-Object -First 1
+                if ([int]$promptEvidence.FormatVersion -ne 1) { $systemPromptContractEvidenceFailures += 'SystemPrompts FormatVersion is not 1.' }
+                if (-not $satisfiedProperty -or $satisfiedProperty.Value -isnot [bool] -or -not [bool]$satisfiedProperty.Value) {
+                    $systemPromptContractEvidenceFailures += 'SystemPrompts ContractSatisfied is not exact Boolean true.'
+                }
+                if (-not [string]::Equals([string]$promptEvidence.ExecutableRelativePath, $relativeExecutable, [StringComparison]::OrdinalIgnoreCase) -or
+                    -not [string]::Equals([string]$promptEvidence.ExecutableSha256, $systemPromptExecutableHash, [StringComparison]::Ordinal)) {
+                    $systemPromptContractEvidenceFailures += 'SystemPrompts executable identity differs from the submitted payload manifest.'
+                }
+                if ([int]$promptEvidence.PromptTimeoutSeconds -ne [int]$SystemPromptTimeoutSeconds) {
+                    $systemPromptContractEvidenceFailures += 'SystemPrompts timeout differs from the request.'
+                }
+                if ((@($promptEvidence.RequestedKinds) -join '|') -cne (@($requestedPromptKinds) -join '|')) {
+                    $systemPromptContractEvidenceFailures += 'SystemPrompts requested prompt sequence differs from the request.'
+                }
+                $expectedProfiles = if ($AcceptWindowsFirewallPrompt) { @($WindowsFirewallProfiles) } else { @() }
+                if ((@($promptEvidence.FirewallProfiles) -join '|') -cne ($expectedProfiles -join '|')) {
+                    $systemPromptContractEvidenceFailures += 'SystemPrompts firewall profiles differ from the request.'
+                }
+                $acceptances = @($promptEvidence.Acceptances)
+                if ($acceptances.Count -ne @($requestedPromptKinds).Count) {
+                    $systemPromptContractEvidenceFailures += 'SystemPrompts acceptance count differs from the requested prompt count.'
+                }
+                else {
+                    for ($promptIndex = 0; $promptIndex -lt $acceptances.Count; $promptIndex++) {
+                        $acceptance = $acceptances[$promptIndex]
+                        $expectedKind = [string]$requestedPromptKinds[$promptIndex]
+                        $successProperty = @($acceptance.PSObject.Properties | Where-Object { $_.Name -ceq 'Success' }) | Select-Object -First 1
+                        if ([string]$acceptance.Kind -cne $expectedKind -or -not $successProperty -or $successProperty.Value -isnot [bool] -or -not [bool]$successProperty.Value) {
+                            $systemPromptContractEvidenceFailures += "SystemPrompts acceptance $($promptIndex + 1) has the wrong kind or success value."
+                            continue
+                        }
+                        if (-not [string]::Equals([string]$acceptance.ExpectedSha256, $systemPromptExecutableHash, [StringComparison]::Ordinal) -or
+                            -not [string]::Equals([string]$acceptance.ObservedSha256, $systemPromptExecutableHash, [StringComparison]::Ordinal) -or
+                            -not [string]::Equals([string]$acceptance.ExpectedExecutablePath, [string]$acceptance.ObservedExecutablePath, [StringComparison]::OrdinalIgnoreCase) -or
+                            [int]$acceptance.ApplicationProcessId -le 0 -or [int]$acceptance.ObservedProcessId -le 0) {
+                            $systemPromptContractEvidenceFailures += "SystemPrompts acceptance $($promptIndex + 1) does not prove the exact process identity."
+                        }
+                        try { $null = [DateTimeOffset]::Parse([string]$acceptance.AcceptedUtc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind) }
+                        catch { $systemPromptContractEvidenceFailures += "SystemPrompts acceptance $($promptIndex + 1) has an invalid AcceptedUtc timestamp." }
+                        foreach ($screenshotName in @([string]$acceptance.BeforeScreenshot, [string]$acceptance.AfterScreenshot)) {
+                            if ([string]::IsNullOrWhiteSpace($screenshotName) -or [IO.Path]::GetFileName($screenshotName) -cne $screenshotName -or
+                                -not (Test-Path -LiteralPath (Join-Path $resultPath $screenshotName) -PathType Leaf)) {
+                                $systemPromptContractEvidenceFailures += "SystemPrompts acceptance $($promptIndex + 1) is missing bounded screenshot evidence."
+                            }
+                        }
+                        if ($expectedKind -eq 'Uac') {
+                            $elevatedProperty = @($acceptance.PSObject.Properties | Where-Object { $_.Name -ceq 'Elevated' }) | Select-Object -First 1
+                            if (-not $elevatedProperty -or $elevatedProperty.Value -isnot [bool] -or -not [bool]$elevatedProperty.Value -or
+                                [string]$acceptance.AuthorizationMethod -cne 'HyperVVirtualKeyboard') {
+                                $systemPromptContractEvidenceFailures += 'UAC acceptance does not prove the elevated token and secure-desktop input method.'
+                            }
+                        }
+                        elseif ($expectedKind -eq 'WindowsFirewall') {
+                            if ([string]$acceptance.AuthorizationMethod -cne 'ExactInboundFirewallRules' -or
+                                (@($acceptance.FirewallProfiles) -join '|') -cne ($expectedProfiles -join '|') -or
+                                @($acceptance.FirewallRules).Count -ne $expectedProfiles.Count) {
+                                $systemPromptContractEvidenceFailures += 'Windows Firewall acceptance does not prove every exact requested profile rule.'
+                            }
+                            foreach ($rule in @($acceptance.FirewallRules)) {
+                                if ([string]$rule.Direction -cne 'Inbound' -or [string]$rule.Action -cne 'Allow' -or
+                                    -not [string]::Equals([string]$rule.Program, [string]$acceptance.ObservedExecutablePath, [StringComparison]::OrdinalIgnoreCase)) {
+                                    $systemPromptContractEvidenceFailures += 'Windows Firewall acceptance contains a broad or mismatched rule.'
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            $systemPromptContractProven = $systemPromptContractEvidenceFailures.Count -eq 0
+        }
+
         $baseHarnessSucceeded = [bool]$brokerResult.Success -and
             [string]$brokerResult.VmFinalState -eq 'Off' -and
             $guestResult -and [bool]$guestResult.Success -and
             $missingHarnessEvidence.Count -eq 0
-        $harnessSucceeded = [bool]$baseHarnessSucceeded -and [bool]$expectedGuestPowerOffContractProven
+        $harnessSucceeded = [bool]$baseHarnessSucceeded -and [bool]$expectedGuestPowerOffContractProven -and [bool]$systemPromptContractProven
         $testEvaluated = [bool]($guestResult -and $guestResult.TestEvaluated)
         $testPassed = if ($testEvaluated) { [bool]$guestResult.TestPassed } else { $null }
         if ($missingTestEvidence.Count -gt 0) {
@@ -1810,6 +1948,9 @@ try {
             FailureKind = if (-not $harnessSucceeded) {
                 if ($baseHarnessSucceeded -and $ExpectGuestPowerOff -and -not $expectedGuestPowerOffContractProven) {
                     'ExpectedGuestPowerOffContract'
+                }
+                elseif ($baseHarnessSucceeded -and $systemPromptRequested -and -not $systemPromptContractProven) {
+                    'SystemPromptContract'
                 }
                 elseif (-not [string]::IsNullOrWhiteSpace([string]$brokerResult.FailureKind)) {
                     [string]$brokerResult.FailureKind
@@ -1878,6 +2019,9 @@ try {
             elseif ($ExpectGuestPowerOff -and -not $expectedGuestPowerOffContractProven) {
                 'Expected guest power-off contract evidence was incomplete or invalid: ' + ($powerOffContractEvidenceFailures -join ' ')
             }
+            elseif ($systemPromptRequested -and -not $systemPromptContractProven) {
+                'System-prompt acceptance evidence was incomplete or invalid: ' + ($systemPromptContractEvidenceFailures -join ' ')
+            }
             elseif ($testEvaluated -and -not $testPassed) {
                 if ($missingTestEvidence.Count -gt 0) {
                     'Required test evidence is missing or empty: ' + ($missingTestEvidence -join ', ')
@@ -1910,6 +2054,12 @@ try {
             $summary['ExpectedGuestPowerOffContractProven'] = [bool]$expectedGuestPowerOffContractProven
             $summary['ExpectedGuestPowerOffContractEvidenceFailures'] = @($powerOffContractEvidenceFailures)
             $summary['PowerOffRecoveryDeadlineUtc'] = $publishedPowerOffRecoveryDeadlineUtc
+        }
+        if ($systemPromptRequested) {
+            $publishedPromptProperty = $brokerResult.PSObject.Properties['SystemPrompts']
+            $summary['SystemPrompts'] = if ($publishedPromptProperty) { $publishedPromptProperty.Value } else { $systemPromptContract }
+            $summary['SystemPromptContractProven'] = [bool]$systemPromptContractProven
+            $summary['SystemPromptContractEvidenceFailures'] = @($systemPromptContractEvidenceFailures)
         }
         $summary | ConvertTo-Json -Depth 8
         if (-not $overallSucceeded) {

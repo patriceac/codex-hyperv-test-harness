@@ -53,8 +53,8 @@ if (-not [bool]$acceptancePreview.Success -or
     (Test-Path -LiteralPath $probeRoot)) {
     throw 'Acceptance invocation preflight was not successful and mutation-free.'
 }
-if ((@($acceptancePreview.TestNames) -join ',') -ne 'LegacyLaunch,Utf8ActionName,KeyboardInput,ExpectedGuestPowerOff') {
-    throw 'Release acceptance does not contain the exact four required paths in order.'
+if ((@($acceptancePreview.TestNames) -join ',') -ne 'LegacyLaunch,Utf8ActionName,KeyboardInput,ExpectedGuestPowerOff,SystemPrompts') {
+    throw 'Release acceptance does not contain the exact five required paths in order.'
 }
 $utf8Invocation = @($acceptancePreview.Invocations | Where-Object Name -eq 'Utf8ActionName')[0].Parameters
 if ([string]$utf8Invocation.ActionsPath -notlike '*release-utf8-actions.json' -or
@@ -78,13 +78,21 @@ if (-not $shutdownInvocation.ContainsKey('ExpectGuestPowerOff') -or
     [string]$shutdownInvocation.Arguments -notmatch '--delay-ms 3000') {
     throw 'Expected-power-off acceptance is not bound to the canonical marker and recovery contract.'
 }
+$systemPromptInvocation = @($acceptancePreview.Invocations | Where-Object Name -eq 'SystemPrompts')[0].Parameters
+if (-not $systemPromptInvocation.ContainsKey('AcceptUacPrompt') -or
+    -not $systemPromptInvocation.ContainsKey('AcceptWindowsFirewallPrompt') -or
+    [int]$systemPromptInvocation.SystemPromptTimeoutSeconds -ne 60 -or
+    (@($systemPromptInvocation.WindowsFirewallProfiles) -join ',') -cne 'Private' -or
+    [string]$systemPromptInvocation.ActionsPath -notlike '*system-prompt-actions.json') {
+    throw 'System-prompt acceptance is not bound to ordered UAC and exact Private-profile firewall authorization.'
+}
 $acceptanceSource = Get-Content -LiteralPath $acceptancePath -Raw
 if ($acceptanceSource -match '\.Parameters\.ActionsPath' -or
     $acceptanceSource -notmatch "Parameters\.ContainsKey\('ActionsPath'\)" -or
     $acceptanceSource -notmatch "Parameters\['ActionsPath'\]") {
     throw "Release acceptance does not handle the expected-power-off test's absent optional ActionsPath safely."
 }
-$scenarios.Add('four-path-isolated-acceptance-is-exactly-bound')
+$scenarios.Add('five-path-isolated-acceptance-is-exactly-bound')
 
 if ($acceptanceSource -notmatch "Invoke-PoolAuditUnderMaintenance -Name 'pre-acceptance-audit'" -or
     $acceptanceSource -notmatch "Invoke-PoolAuditUnderMaintenance -Name 'post-acceptance-audit'" -or
@@ -141,8 +149,8 @@ if ($sendKeys.Count -ne 1 -or [string]$sendKeys[0].keys -cne 'WIN+LEFT' -or [int
 $scenarios.Add('keyboard-proof-captures-before-and-after-exact-chord')
 
 $deploy = Get-Content -LiteralPath $deployPath -Raw
-if ($deploy -notmatch [regex]::Escape("Run legacy launch, accented-name UI Automation, bounded keyboard, and expected-guest-power-off acceptance in isolated workers.")) {
-    throw 'The immutable release plan does not describe all four isolated acceptance paths.'
+if ($deploy -notmatch [regex]::Escape("Run legacy launch, accented-name UI Automation, bounded keyboard, expected-guest-power-off, and verified system-prompt acceptance in isolated workers.")) {
+    throw 'The immutable release plan does not describe all five isolated acceptance paths.'
 }
 $phaseNames = @('CandidateQualification','LiveReadiness','SourcePromotion','GuestBaselinePromotion','IsolatedAcceptance','RecoveryRefresh','Finalization')
 $lastIndex = -1

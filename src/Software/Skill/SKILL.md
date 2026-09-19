@@ -22,6 +22,7 @@ Do not preload every reference.
 
 - For interaction actions, result assertions, reserved tokens, screenshots, or locked-host proof, read [artifact invocation and actions](references/artifact-and-actions.md).
 - For any auxiliary host input or non-default networking, read [network and host inputs](references/network-and-host-inputs.md) before constructing the request.
+- For an expected startup UAC prompt or Windows Firewall access prompt, read [system-prompt acceptance](references/system-prompts.md). Prompt handling is explicit, identity-bound, and VM-only.
 - For an application expected to shut down its disposable guest, read [expected guest power-off](references/expected-guest-power-off.md). That mode has a distinct no-replay evidence contract.
 - For shared queue use, a long request, live evidence, cancellation, or deadline behavior, read [queue, observation, and cancellation](references/queue-observation-and-cancellation.md).
 - For payload-cache behavior, pool internals, lifecycle recovery, or performance diagnosis, read [broker, pool, and cache internals](references/broker-pool-and-cache.md).

@@ -337,7 +337,7 @@ function New-ReleasePlan {
     $operations.Add('Stage and publish source through Install.ps1 without creating recovery or running duplicate smoke acceptance.')
     if ($guestUpdateRequired) { $operations.Add('Replace the guest harness in the canonical baseline and rebuild the disposable pool exactly once.') }
     else { $operations.Add('Refresh the disposable pool exactly once from the unchanged canonical baseline.') }
-    $operations.Add('Run legacy launch, accented-name UI Automation, bounded keyboard, and expected-guest-power-off acceptance in isolated workers.')
+    $operations.Add('Run legacy launch, accented-name UI Automation, bounded keyboard, expected-guest-power-off, and verified system-prompt acceptance in isolated workers.')
     if ($recoveryBaselineExportMode -eq 'ReuseCurrent') {
         $operations.Add('Reuse the receipt-backed unchanged baseline export with NTFS hard links, hash only the recovery delta, and rotate local recovery exactly once after acceptance.')
     }
@@ -366,7 +366,7 @@ function New-ReleasePlan {
         Operations = $operations.ToArray()
         PrePromotionQualification = 'Exact source parse, build, deterministic tests, invocation contracts, and public-payload audit. No live shadow pool is claimed.'
         LiveShadowPoolAvailable = $false
-        Acceptance = @('LegacyLaunch','Utf8ActionName','KeyboardInput','ExpectedGuestPowerOff')
+        Acceptance = @('LegacyLaunch','Utf8ActionName','KeyboardInput','ExpectedGuestPowerOff','SystemPrompts')
         RecoveryRefreshCount = 1
         AutomaticRollback = $false
         FailurePolicy = 'Stop at the failed checkpoint, preserve valid completed phases, and resume or supersede with a reviewed fix-forward candidate.'
@@ -812,7 +812,7 @@ try {
             -InstallRoot $InstallRoot `
             -EvidenceRoot (Join-Path $deploymentRoot 'Acceptance') `
             -ClientSid $TargetUserSid
-        if (-not [bool]$acceptance.Success -or @($acceptance.Tests).Count -ne 4) { throw 'Release acceptance did not pass all four isolated checks.' }
+        if (-not [bool]$acceptance.Success -or @($acceptance.Tests).Count -ne 5) { throw 'Release acceptance did not pass all five isolated checks.' }
         $acceptance
     } | Out-Null
 
@@ -850,7 +850,7 @@ try {
     $terminalResult = [ordered]@{
         Success = $true; Status = 'Ready'; DeploymentId = [string]$plan.DeploymentId; PlanSha256 = [string]$plan.PlanSha256
         CandidateCommit = [string]$plan.CandidateCommit; StatePath = $statePath; RecoveryRefreshCount = 1
-        AcceptanceTests = @('LegacyLaunch','Utf8ActionName','KeyboardInput','ExpectedGuestPowerOff')
+        AcceptanceTests = @('LegacyLaunch','Utf8ActionName','KeyboardInput','ExpectedGuestPowerOff','SystemPrompts')
         AutomaticRollbackAttempted = $false; ReadyToPush = $true; CompletedUtc = [DateTime]::UtcNow.ToString('o')
     }
     Write-JsonAtomic -Path $resultPath -Value $terminalResult

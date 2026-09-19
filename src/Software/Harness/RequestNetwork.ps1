@@ -798,8 +798,13 @@ function Resolve-RequestNetworkProfile {
 
     $provisionProfile = Get-RequestNetworkObjectPropertyValue -Value $Request -Name 'RemoteDebuggerProvisionV1'
     $hasProvisionProfile = @(Get-RequestNetworkObjectPropertyNames -Value $Request) -contains 'RemoteDebuggerProvisionV1'
+    $systemPrompts = Get-RequestNetworkObjectPropertyValue -Value $Request -Name 'SystemPrompts'
+    $hasSystemPrompts = @(Get-RequestNetworkObjectPropertyNames -Value $Request) -contains 'SystemPrompts'
     if ($operation -ne 'RunGuestJobProvisionedV1' -and $hasProvisionProfile) {
         throw 'RemoteDebuggerProvisionV1 requires the versioned RunGuestJobProvisionedV1 operation.'
+    }
+    if ($operation -ne 'RunGuestJobSystemPromptsV1' -and $hasSystemPrompts) {
+        throw 'SystemPrompts requires the versioned RunGuestJobSystemPromptsV1 operation.'
     }
 
     if ($operation -eq 'RunGuestJob') {
@@ -811,6 +816,11 @@ function Resolve-RequestNetworkProfile {
         if (-not $network -or $profile -eq 'None') {
             throw 'RunGuestJobNetworkV1 requires an explicit non-None Network profile.'
         }
+    }
+    elseif ($operation -eq 'RunGuestJobSystemPromptsV1') {
+        if (-not $hasSystemPrompts -or -not $systemPrompts) { throw 'RunGuestJobSystemPromptsV1 requires SystemPrompts.' }
+        if ($profile -ne 'None' -and -not $network) { throw 'A system-prompt request with network access requires an explicit Network object.' }
+        if ($hasProvisionProfile) { throw 'System-prompt jobs cannot include guest provisioning.' }
     }
     elseif ($operation -eq 'RunGuestJobProvisionedV1') {
         if (-not $hasProvisionProfile -or -not $provisionProfile) { throw 'RunGuestJobProvisionedV1 requires RemoteDebuggerProvisionV1.' }

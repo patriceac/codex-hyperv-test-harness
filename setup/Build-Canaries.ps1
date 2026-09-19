@@ -28,7 +28,8 @@ $targets = @(
     @{ Source = 'HostInputCanary.cs'; Output = 'HostInputCanary.exe' },
     @{ Source = 'NetworkBoundaryCanary.cs'; Output = 'NetworkBoundaryCanary.exe' },
     @{ Source = 'LiveEvidenceCanary.cs'; Output = 'LiveEvidenceCanary.exe' },
-    @{ Source = 'ShutdownProbe.cs'; Output = 'ShutdownProbe.exe' }
+    @{ Source = 'ShutdownProbe.cs'; Output = 'ShutdownProbe.exe' },
+    @{ Source = 'SystemPromptCanary.cs'; Output = 'SystemPromptCanary.exe'; Manifest = 'SystemPromptCanary.manifest' }
 )
 
 $lock = $null
@@ -62,7 +63,14 @@ try {
         $source = Join-Path $CanaryRoot $target.Source
         $output = Join-Path $CanaryRoot $target.Output
         if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Canary source is missing: $source" }
-        & $compiler /nologo /target:winexe /optimize+ "/out:$output" /reference:System.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll $source
+        $compilerArguments = @('/nologo', '/target:winexe', '/optimize+', "/out:$output", '/reference:System.dll', '/reference:System.Drawing.dll', '/reference:System.Windows.Forms.dll')
+        if ($target.ContainsKey('Manifest')) {
+            $manifest = Join-Path $CanaryRoot $target.Manifest
+            if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) { throw "Canary manifest is missing: $manifest" }
+            $compilerArguments += "/win32manifest:$manifest"
+        }
+        $compilerArguments += $source
+        & $compiler @compilerArguments
         if ($LASTEXITCODE -ne 0) { throw "Canary compilation failed for $($target.Source) with exit code $LASTEXITCODE." }
         $file = Get-Item -LiteralPath $output
         [pscustomobject][ordered]@{

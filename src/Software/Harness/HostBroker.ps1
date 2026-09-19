@@ -264,6 +264,11 @@ if (-not (Test-Path -LiteralPath $requestNetworkModulePath -PathType Leaf)) {
     throw "Request-network module not found: $requestNetworkModulePath"
 }
 . $requestNetworkModulePath
+$systemPromptsModulePath = Join-Path $PSScriptRoot 'SystemPrompts.ps1'
+if (-not (Test-Path -LiteralPath $systemPromptsModulePath -PathType Leaf)) {
+    throw "System-prompts module not found: $systemPromptsModulePath"
+}
+. $systemPromptsModulePath
 $remoteDebuggerProvisionModulePath = Join-Path $PSScriptRoot 'RemoteDebuggerProvisioning.ps1'
 if (Test-Path -LiteralPath $remoteDebuggerProvisionModulePath -PathType Leaf) {
     . $remoteDebuggerProvisionModulePath
@@ -3325,6 +3330,8 @@ function Invoke-GuestRequest {
         StateDeleted = $false
     }
     $requestNetworkCleanupPerformed = $false
+    $systemPromptPolicy = $null
+    $systemPromptRuntime = $null
     $expectGuestPowerOff = $false
     $guestPowerOffRecoveryTimeoutSeconds = 180
     $expectedGuestPowerOffSubmissionStartedUtc = $null
@@ -3467,6 +3474,7 @@ function Invoke-GuestRequest {
         elseif (-not [string]::Equals([string]$Request.Job.executable, 'C:\CodexGuest\InputProbe.exe', [StringComparison]::OrdinalIgnoreCase)) {
             throw 'Every external application-under-test must include canonical ArtifactPath payload metadata.'
         }
+        $systemPromptPolicy = Resolve-SystemPromptPolicyV1 -Request $Request -PayloadManifest $payloadManifest
         $hostInputNames = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
         $hostInputDefinitions = @($Request.HostInputs)
         if ($hostInputDefinitions.Count -gt 8) { throw 'A request may expose at most eight read-only host inputs.' }
@@ -3786,6 +3794,19 @@ function Invoke-GuestRequest {
             catch { throw "assertResultEqualsJson is invalid JSON: $($_.Exception.Message)" }
         }
 
+        if ($systemPromptPolicy) {
+            $failureStage = 'PreparingSystemPromptAcceptance'
+            Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
+            $systemPromptRuntime = New-SystemPromptRuntimeV1 `
+                -Policy $systemPromptPolicy `
+                -Session $session `
+                -VmName $vmName `
+                -RequestId $requestId `
+                -GuestOutbox $guestOutbox `
+                -GuestExecutablePath $guestExecutable `
+                -ResultRoot $ResultRoot
+        }
+
         if ($requestNetworkRuntime) {
             $failureStage = 'VerifyingNetwork'
             Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
@@ -4061,6 +4082,27 @@ function Invoke-GuestRequest {
                 continue
             }
 
+            if ($systemPromptRuntime -and -not [bool]$systemPromptRuntime.Complete) {
+                try {
+                    $failureStage = 'AcceptingSystemPrompt'
+                    $promptProgress = Invoke-SystemPromptServiceV1 -Runtime $systemPromptRuntime -Session $session -ActivityCheck {
+                        Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
+                    }
+                    if ([bool]$promptProgress.Changed) {
+                        Write-BrokerState -Status 'AcceptingSystemPrompt' -RequestId $requestId -Message ([string]$promptProgress.Message)
+                        Write-RequestState -ResultRoot $RequestStateRoot -RequestId $requestId -Status 'AcceptingSystemPrompt' -Message ([string]$promptProgress.Message) -CreatedUtc $createdUtc -ClaimedUtc $ClaimedUtc -ExecutionDeadlineUtc $executionDeadlineUtc -WorkerId $workerId
+                        $failureStage = 'WaitingForGuestJob'
+                        Start-Sleep -Milliseconds 500
+                        continue
+                    }
+                    $failureStage = 'WaitingForGuestJob'
+                }
+                catch {
+                    $failureKind = 'SystemPromptAcceptanceFailed'
+                    throw
+                }
+            }
+
             $guestLifecycle = Get-GuestLifecycleProgress -CompletionState $completionState -RequestId $requestId -ApplicationRunningPublished $applicationRunningPublished
             $firstApplicationConfirmation = -not $applicationRunningPublished -and [bool]$guestLifecycle.ApplicationConfirmed
             if ($firstApplicationConfirmation -and $expectGuestPowerOff) {
@@ -4167,6 +4209,10 @@ function Invoke-GuestRequest {
                     Write-RequestState -ResultRoot $RequestStateRoot -RequestId $requestId -Status 'AwaitingExpectedGuestPowerOff' -Message 'Guest result exists; waiting for a broker-observed VM Off state before cleanup.' -CreatedUtc $createdUtc -ClaimedUtc $ClaimedUtc -ExecutionDeadlineUtc $originalExecutionDeadlineUtc -WorkerId $workerId -ExpectGuestPowerOff $true -GuestApplicationEraRunningObservedUtc $guestApplicationEraRunningObservedUtc
                     Start-Sleep -Milliseconds 500
                     continue
+                }
+                if ($systemPromptRuntime -and -not [bool]$systemPromptRuntime.Complete) {
+                    $failureKind = 'SystemPromptAcceptanceFailed'
+                    throw 'The guest job reached a terminal state before every requested system prompt was observed, accepted, and verified.'
                 }
                 if ($liveEvidenceContext) {
                     Complete-HostLiveEvidenceFailure -Context $liveEvidenceContext -Status 'RequestAlreadyTerminal' -FailureKind 'RequestAlreadyTerminal' -Message 'The guest request reached terminal evidence before the live capture completed.' -LifecycleStage 'CollectingEvidence' -ApplicationProcessId $(if ($liveApplicationProcessId -gt 0) { $liveApplicationProcessId } else { $null })
@@ -4611,6 +4657,10 @@ function Invoke-GuestRequest {
         }
         Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
         $evidenceValidationSucceeded = $true
+        if ($systemPromptRuntime -and -not [bool]$systemPromptRuntime.Complete) {
+            $failureKind = 'SystemPromptAcceptanceFailed'
+            throw 'System-prompt acceptance evidence is incomplete.'
+        }
 
         $failureStage = 'CheckingCompletionLockState'
         Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
@@ -4975,7 +5025,8 @@ function Invoke-GuestRequest {
             HostInputSetupMilliseconds = [Math]::Round($hostInputSetupWatch.Elapsed.TotalMilliseconds, 3)
             HostInputCleanup = $hostInputCleanup
             Network = [ordered]@{
-                ContractVersion = if ([string]$Request.Operation -eq 'RunGuestJobNetworkV1' -or ([string]$Request.Operation -eq 'RunGuestJobProvisionedV1' -and [string]$requestNetworkDefinition.EffectiveProfile -ne 'None')) { 1 } else { 0 }
+                ContractVersion = if ([string]$Request.Operation -eq 'RunGuestJobNetworkV1' -or
+                    ([string]$Request.Operation -in @('RunGuestJobProvisionedV1', 'RunGuestJobSystemPromptsV1') -and [string]$requestNetworkDefinition.EffectiveProfile -ne 'None')) { 1 } else { 0 }
                 RequestedProfile = if ($requestNetworkDefinition) { [string]$requestNetworkDefinition.RequestedProfile } else { 'None' }
                 EffectiveProfile = if ($requestNetworkDefinition) { [string]$requestNetworkDefinition.EffectiveProfile } else { 'None' }
                 Cohort = if ($requestNetworkDefinition -and [string]$requestNetworkDefinition.EffectiveProfile -eq 'IsolatedTestNet') { [string]$requestNetworkDefinition.Cohort } else { $null }
@@ -5068,6 +5119,9 @@ function Invoke-GuestRequest {
             RequireHostLocked = [bool]$Request.RequireHostLocked
             HostLockEvidenceBefore = $lockEvidenceBefore
             HostLockEvidenceAfter = $lockEvidenceAfter
+        }
+        if ($systemPromptPolicy) {
+            $brokerResultValue['SystemPrompts'] = Get-SystemPromptEvidenceV1 -Runtime $systemPromptRuntime
         }
         if ($expectGuestPowerOff) {
             $brokerResultValue['ExpectGuestPowerOff'] = $true
