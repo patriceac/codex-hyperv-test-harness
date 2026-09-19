@@ -82,10 +82,13 @@ if (-not $shutdownInvocation.ContainsKey('ExpectGuestPowerOff') -or
 $systemPromptInvocation = @($acceptancePreview.Invocations | Where-Object Name -eq 'SystemPrompts')[0].Parameters
 if (-not $systemPromptInvocation.ContainsKey('AcceptUacPrompt') -or
     -not $systemPromptInvocation.ContainsKey('AcceptWindowsFirewallPrompt') -or
-    [int]$systemPromptInvocation.SystemPromptTimeoutSeconds -ne 60 -or
+    [int]$systemPromptInvocation.SystemPromptTimeoutSeconds -ne 120 -or
     (@($systemPromptInvocation.WindowsFirewallProfiles) -join ',') -cne 'Private' -or
+    [string]$systemPromptInvocation.NetworkProfile -cne 'IsolatedTestNet' -or
+    [string]$systemPromptInvocation.NetworkCohort -cne 'release-system-prompts' -or
+    [string]$systemPromptInvocation.Arguments -notmatch '--settle-ms 30000' -or
     [string]$systemPromptInvocation.ActionsPath -notlike '*system-prompt-actions.json') {
-    throw 'System-prompt acceptance is not bound to ordered UAC and exact Private-profile firewall authorization.'
+    throw 'System-prompt acceptance is not bound to ordered UAC and exact isolated Private-profile firewall authorization.'
 }
 $acceptanceSource = Get-Content -LiteralPath $acceptancePath -Raw
 if ($acceptanceSource -match '\.Parameters\.ActionsPath' -or

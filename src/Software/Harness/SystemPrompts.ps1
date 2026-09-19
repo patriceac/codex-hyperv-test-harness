@@ -337,6 +337,37 @@ function Get-SystemPromptFirewallRulesV1 {
     } -ArgumentList $ExecutablePath)
 }
 
+function Prepare-SystemPromptFirewallProfilesV1 {
+    param(
+        [Parameter(Mandatory = $true)] [Management.Automation.Runspaces.PSSession] $Session,
+        [Parameter(Mandatory = $true)] [string[]] $Profiles
+    )
+
+    $profilesJson = ConvertTo-Json -Compress -InputObject @($Profiles)
+    @(Invoke-Command -Session $Session -ErrorAction Stop -ScriptBlock {
+        param($RequestedProfilesJson)
+        foreach ($profileName in @($RequestedProfilesJson | ConvertFrom-Json)) {
+            Set-NetFirewallProfile -Name $profileName -Enabled True -DefaultInboundAction Block -NotifyOnListen True -DisabledInterfaceAliases ([string[]]@()) -ErrorAction Stop
+            $profiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore -Name $profileName -ErrorAction Stop)
+            $disabledAliases = @($profiles[0].DisabledInterfaceAliases | ForEach-Object { [string]$_ } | Where-Object {
+                -not [string]::IsNullOrWhiteSpace($_) -and $_ -ne 'NotConfigured'
+            })
+            if ($profiles.Count -ne 1 -or [string]$profiles[0].Enabled -ne 'True' -or
+                [string]$profiles[0].DefaultInboundAction -ne 'Block' -or [string]$profiles[0].NotifyOnListen -ne 'True' -or
+                $disabledAliases.Count -ne 0) {
+                throw "The $profileName firewall profile could not be prepared for an application-listen notification."
+            }
+            [pscustomobject][ordered]@{
+                Name = [string]$profiles[0].Name
+                Enabled = [string]$profiles[0].Enabled
+                DefaultInboundAction = [string]$profiles[0].DefaultInboundAction
+                NotifyOnListen = [string]$profiles[0].NotifyOnListen
+                DisabledInterfaceAliases = @($disabledAliases)
+            }
+        }
+    } -ArgumentList $profilesJson)
+}
+
 function Grant-SystemPromptFirewallAccessV1 {
     param(
         [Parameter(Mandatory = $true)] [Management.Automation.Runspaces.PSSession] $Session,
@@ -385,9 +416,11 @@ function New-SystemPromptRuntimeV1 {
     if (@($observation.ConsentProcesses).Count -ne 0 -or @($observation.FirewallProcesses).Count -ne 0) {
         throw 'A system prompt was already active before the guest job was submitted.'
     }
+    $firewallProfileReadiness = @()
     if ($Policy.AcceptWindowsFirewall) {
         $priorRules = @(Get-SystemPromptFirewallRulesV1 -Session $Session -ExecutablePath $GuestExecutablePath)
         if ($priorRules.Count -ne 0) { throw 'The exact test executable already has active inbound firewall rules; prompt acceptance would be ambiguous.' }
+        $firewallProfileReadiness = @(Prepare-SystemPromptFirewallProfilesV1 -Session $Session -Profiles @($Policy.FirewallProfiles))
     }
 
     [pscustomobject][ordered]@{
@@ -400,6 +433,7 @@ function New-SystemPromptRuntimeV1 {
         StartedUtc = [DateTime]::UtcNow
         PromptDeadlineUtc = [DateTime]::UtcNow.AddSeconds([int]$Policy.PromptTimeoutSeconds)
         CurrentIndex = 0
+        FirewallProfileReadiness = @($firewallProfileReadiness)
         Acceptances = (New-Object Collections.Generic.List[object])
         Complete = $false
     }
@@ -484,6 +518,10 @@ function Invoke-SystemPromptServiceV1 {
         })
         if ($matches.Count -eq 0) { return [pscustomobject]@{ Changed = $false; Complete = $false; Message = 'Waiting for the exact Windows Firewall prompt host.' } }
         if ($matches.Count -ne 1) { throw 'The Windows Firewall prompt did not resolve to one new firewall UX process.' }
+        $firewallStartedUtc = [DateTime]::Parse([string]$matches[0].StartedUtc).ToUniversalTime()
+        if ([DateTime]::UtcNow - $firewallStartedUtc -lt [TimeSpan]::FromSeconds(2)) {
+            return [pscustomobject]@{ Changed = $false; Complete = $false; Message = 'Waiting for the Windows Firewall prompt to finish rendering.' }
+        }
 
         $acceptedUtc = [DateTime]::UtcNow
         $beforeName = 'system-prompt-firewall-before.png'
@@ -545,6 +583,7 @@ function Get-SystemPromptEvidenceV1 {
         ExecutableSha256 = [string]$Runtime.Policy.ExecutableSha256
         RequestedKinds = @($Runtime.Policy.Sequence)
         FirewallProfiles = @($Runtime.Policy.FirewallProfiles)
+        FirewallProfileReadiness = @($Runtime.FirewallProfileReadiness)
         PromptTimeoutSeconds = [int]$Runtime.Policy.PromptTimeoutSeconds
         Acceptances = $Runtime.Acceptances.ToArray()
     }

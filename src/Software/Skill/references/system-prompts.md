@@ -10,6 +10,8 @@ Opt in explicitly:
   -AcceptUacPrompt `
   -AcceptWindowsFirewallPrompt `
   -WindowsFirewallProfiles Private `
+  -NetworkProfile IsolatedTestNet `
+  -NetworkCohort 'prompt-test' `
   -SystemPromptTimeoutSeconds 120 `
   -AssertResultFile '{OUTDIR}\result.json'
 ```
@@ -20,4 +22,4 @@ For a Windows Firewall prompt, the broker requires the exact application process
 
 Both modes are fail-closed and versioned. They cannot be combined with `-ExpectGuestPowerOff` or `-GuestSetupProfile`. A requested prompt that never appears, appears more than once, has the wrong ordering, outlives its timeout, or fails its executable/token/rule verification fails the harness run. Results include ordered acceptance evidence plus before/after VM framebuffer screenshots. These switches never authorize prompts on the physical host.
 
-`WindowsFirewallProfiles` defaults to `Private` and accepts only unique `Private` and `Public` values. A firewall prompt still depends on Windows actually presenting one. `IsolatedTestNet` deliberately exempts its request adapter from the Private firewall and therefore is not a suitable live proof of the native firewall prompt.
+`WindowsFirewallProfiles` defaults to `Private` and accepts only unique `Private` and `Public` values. A firewall prompt still depends on Windows actually presenting one. For a bounded system-prompt request, the broker removes the disposable `IsolatedTestNet` interface exemption, enables listen notifications for the requested profile, and records the effective readiness before launch; the VM-only switch still has no host, LAN, DNS, gateway, or Internet path.

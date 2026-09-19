@@ -61,10 +61,11 @@ $scenarios.Add('valid-versioned-policy')
 $runtime = [pscustomobject][ordered]@{
     Policy = $policy
     Complete = $false
+    FirewallProfileReadiness = @([pscustomobject]@{ Name = 'Private'; NotifyOnListen = 'True' })
     Acceptances = (New-Object Collections.Generic.List[object])
 }
 $emptyEvidence = Get-SystemPromptEvidenceV1 -Runtime $runtime
-Assert-True ($emptyEvidence.Acceptances -is [Array] -and @($emptyEvidence.Acceptances).Count -eq 0 -and -not [bool]$emptyEvidence.ContractSatisfied) 'Empty prompt evidence did not remain a safe JSON array under Windows PowerShell 5.1.'
+Assert-True ($emptyEvidence.Acceptances -is [Array] -and @($emptyEvidence.Acceptances).Count -eq 0 -and @($emptyEvidence.FirewallProfileReadiness).Count -eq 1 -and -not [bool]$emptyEvidence.ContractSatisfied) 'Empty prompt evidence did not retain safe arrays and firewall readiness under Windows PowerShell 5.1.'
 $runtime.Acceptances.Add([pscustomobject]@{ Kind = 'Uac'; Success = $true })
 $runtime.Acceptances.Add([pscustomobject]@{ Kind = 'WindowsFirewall'; Success = $true })
 $runtime.Complete = $true
@@ -107,6 +108,8 @@ foreach ($required in @(
     'Msvm_Keyboard',
     'GetVirtualSystemThumbnailImage',
     'FirewallUX\.dll',
+    'NotifyOnListen',
+    'DisabledInterfaceAliases',
     'New-NetFirewallRule',
     'ExactInboundFirewallRules',
     'UAC acceptance did not produce the exact hashed executable with an elevated token.'
@@ -118,6 +121,7 @@ Assert-True ($moduleText.Contains("`$arguments.TargetSystem = [string]`$settings
 Assert-True ($moduleText.Contains('if ($bytes.Length -lt $pixelBytes)') -and $moduleText.Contains('Marshal]::Copy($bytes, 0, $data.Scan0, $pixelBytes)')) 'Framebuffer capture does not bound its RGB565 copy to the requested pixel payload.'
 Assert-True (-not $moduleText.Contains("Caption -eq 'Virtual Machine'")) 'System-prompt VM lookup still depends on localized Hyper-V Caption text.'
 Assert-True ($moduleText.Contains("[TimeSpan]::FromSeconds(2)") -and $moduleText.Contains('Start-Sleep -Milliseconds 250')) 'UAC input is not delayed until the consent UI can render and process focus changes.'
+Assert-True ($moduleText.Contains('Waiting for the Windows Firewall prompt to finish rendering.')) 'Firewall authorization does not wait for its prompt UI to render.'
 Assert-True ($workerText.Contains('ErrorFullyQualifiedId = $terminalErrorFullyQualifiedId') -and $workerText.Contains('ErrorScriptStackTrace = $terminalErrorScriptStackTrace')) 'Pool-worker fallback results do not preserve the original failure diagnostics.'
 Assert-True ($networkText.Contains("'RunGuestJobSystemPromptsV1'")) 'Request-network validation does not accept the versioned system-prompt operation.'
 Assert-True ($installerText.Contains("'SystemPrompts.ps1'")) 'Broker installation does not copy and hash SystemPrompts.ps1.'
