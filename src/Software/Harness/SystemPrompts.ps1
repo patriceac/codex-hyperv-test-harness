@@ -277,20 +277,21 @@ function Save-SystemPromptVmFramebuffer {
         [ValidateRange(120, 1080)] [int] $Height = 600
     )
 
-    $escapedName = $VmName.Replace("'", "''")
-    $vmComputer = Get-CimInstance -Namespace 'root/virtualization/v2' -ClassName Msvm_ComputerSystem -Filter "ElementName='$escapedName'" -ErrorAction Stop |
-        Where-Object { $_.Caption -eq 'Virtual Machine' } | Select-Object -First 1
+    $vmComputer = Get-WmiObject -Namespace 'root/virtualization/v2' -Class Msvm_ComputerSystem -ErrorAction Stop |
+        Where-Object { $_.Caption -eq 'Virtual Machine' -and [string]::Equals([string]$_.ElementName, $VmName, [StringComparison]::Ordinal) } |
+        Select-Object -First 1
     if (-not $vmComputer) { throw "Hyper-V WMI object not found for VM: $VmName" }
-    $allSettings = @(Get-CimAssociatedInstance -InputObject $vmComputer -Association Msvm_SettingsDefineState -ResultClassName Msvm_VirtualSystemSettingData -ErrorAction Stop)
+    $settingsQuery = "ASSOCIATORS OF {$($vmComputer.__PATH)} WHERE AssocClass = Msvm_SettingsDefineState ResultClass = Msvm_VirtualSystemSettingData"
+    $allSettings = @(Get-WmiObject -Namespace 'root/virtualization/v2' -Query $settingsQuery -ErrorAction Stop)
     $settings = $allSettings | Where-Object { [string]$_.VirtualSystemType -match 'Realized' } | Select-Object -First 1
     if (-not $settings) { $settings = $allSettings | Select-Object -First 1 }
     if (-not $settings) { throw "Realized virtual-system settings not found for VM: $VmName" }
-    $service = Get-CimInstance -Namespace 'root/virtualization/v2' -ClassName Msvm_VirtualSystemManagementService -ErrorAction Stop | Select-Object -First 1
-    $result = Invoke-CimMethod -InputObject $service -MethodName GetVirtualSystemThumbnailImage -Arguments @{
-        TargetSystem = $settings
-        WidthPixels = [uint16]$Width
-        HeightPixels = [uint16]$Height
-    } -ErrorAction Stop
+    $service = Get-WmiObject -Namespace 'root/virtualization/v2' -Class Msvm_VirtualSystemManagementService -ErrorAction Stop | Select-Object -First 1
+    $arguments = $service.PSBase.GetMethodParameters('GetVirtualSystemThumbnailImage')
+    $arguments.TargetSystem = [string]$settings.__PATH
+    $arguments.WidthPixels = [uint16]$Width
+    $arguments.HeightPixels = [uint16]$Height
+    $result = $service.PSBase.InvokeMethod('GetVirtualSystemThumbnailImage', $arguments, $null)
     if ([uint32]$result.ReturnValue -ne 0) { throw "VM framebuffer capture failed with code $($result.ReturnValue)." }
     $bytes = [byte[]]$result.ImageData
     if ($bytes.Length -ne $Width * $Height * 2) { throw "VM framebuffer returned $($bytes.Length) bytes; expected $($Width * $Height * 2)." }
@@ -533,12 +534,12 @@ function Get-SystemPromptEvidenceV1 {
     if ($null -eq $Runtime) { return $null }
     [pscustomobject][ordered]@{
         FormatVersion = 1
-        ContractSatisfied = [bool]$Runtime.Complete -and @($Runtime.Acceptances).Count -eq @($Runtime.Policy.Sequence).Count
+        ContractSatisfied = [bool]$Runtime.Complete -and $Runtime.Acceptances.Count -eq @($Runtime.Policy.Sequence).Count
         ExecutableRelativePath = [string]$Runtime.Policy.ExecutableRelativePath
         ExecutableSha256 = [string]$Runtime.Policy.ExecutableSha256
         RequestedKinds = @($Runtime.Policy.Sequence)
         FirewallProfiles = @($Runtime.Policy.FirewallProfiles)
         PromptTimeoutSeconds = [int]$Runtime.Policy.PromptTimeoutSeconds
-        Acceptances = @($Runtime.Acceptances)
+        Acceptances = $Runtime.Acceptances.ToArray()
     }
 }

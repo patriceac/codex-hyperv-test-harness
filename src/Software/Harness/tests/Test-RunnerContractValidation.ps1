@@ -109,6 +109,16 @@ New-Item -ItemType Directory -Force -Path $hostInput | Out-Null
 $scenarios = New-Object Collections.Generic.List[string]
 try {
     Import-RunnerFunction -Path $RunnerPath -Name 'ConvertTo-UtcRequestStateTimestamp'
+    Import-RunnerFunction -Path $RunnerPath -Name 'Initialize-BrokerResultDefaults'
+    $minimalBrokerResult = [pscustomobject]@{ Error = 'synthetic worker failure remains visible' }
+    $normalizedBrokerResult = Initialize-BrokerResultDefaults -BrokerResult $minimalBrokerResult
+    if ([string]$normalizedBrokerResult.Error -cne [string]$minimalBrokerResult.Error -or
+        [bool]$normalizedBrokerResult.QueueTimedOut -or [bool]$normalizedBrokerResult.ExecutionTimedOut -or [bool]$normalizedBrokerResult.Cancelled -or
+        @($normalizedBrokerResult.HostInputs).Count -ne 0 -or @($normalizedBrokerResult.InfrastructureRetryHistory).Count -ne 0) {
+        throw 'Minimal pool-worker failures are not normalized without replacing their original error.'
+    }
+    $scenarios.Add('minimal-worker-failure-preserves-original-error')
+
     $typedDeadline = [DateTime]::Parse(
         '2026-08-31T15:13:49.6772745Z',
         [Globalization.CultureInfo]::InvariantCulture,

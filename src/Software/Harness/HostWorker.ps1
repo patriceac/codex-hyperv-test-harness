@@ -183,7 +183,17 @@ try {
 catch {
     $exitCode = 1
     $brokerResultPath = Join-Path $resultRoot 'broker-result.json'
-    $terminalError = $_.Exception.Message
+    $terminalErrorRecord = $_
+    $terminalError = $terminalErrorRecord.Exception.Message
+    $terminalErrorType = $terminalErrorRecord.Exception.GetType().FullName
+    $terminalErrorFullyQualifiedId = [string]$terminalErrorRecord.FullyQualifiedErrorId
+    $terminalErrorScriptStackTrace = [string]$terminalErrorRecord.ScriptStackTrace
+    $terminalErrorPositionMessage = if ($terminalErrorRecord.InvocationInfo -and $terminalErrorRecord.InvocationInfo.PositionMessage) {
+        $terminalErrorRecord.InvocationInfo.PositionMessage.Trim()
+    }
+    else {
+        $null
+    }
     if (-not $retryRequested) {
         Invoke-WithTerminalResultPublicationMutex -RequestId $RequestId -ScopeRoot $resultRoot -Operation {
             if (-not (Test-Path -LiteralPath $brokerResultPath -PathType Leaf)) {
@@ -201,6 +211,10 @@ catch {
                     FailureKind = 'Harness'
                     Error = $terminalError
                     FailureStage = 'WorkerProcess'
+                    ErrorType = $terminalErrorType
+                    ErrorFullyQualifiedId = $terminalErrorFullyQualifiedId
+                    ErrorScriptStackTrace = $terminalErrorScriptStackTrace
+                    ErrorPositionMessage = $terminalErrorPositionMessage
                     ClaimedUtc = $ClaimedUtc
                     CompletedUtc = [DateTime]::UtcNow.ToString('o')
                     VmName = [string]$worker.VmName

@@ -26,6 +26,7 @@ function Assert-Rejected {
 
 $modulePath = Join-Path $HarnessRoot 'SystemPrompts.ps1'
 $brokerPath = Join-Path $HarnessRoot 'HostBroker.ps1'
+$workerPath = Join-Path $HarnessRoot 'HostWorker.ps1'
 $networkPath = Join-Path $HarnessRoot 'RequestNetwork.ps1'
 $installerPath = Join-Path $HarnessRoot 'Install-PoolHostBroker.ps1'
 $runnerPath = Join-Path (Split-Path -Parent $HarnessRoot) 'Skill\scripts\Invoke-HyperVExecutableTest.ps1'
@@ -57,6 +58,20 @@ Assert-True ((@($policy.Sequence) -join ',') -ceq 'Uac,WindowsFirewall') 'System
 Assert-True ([string]$policy.ExecutableSha256 -ceq $hash -and (@($policy.FirewallProfiles) -join ',') -ceq 'Private') 'System-prompt policy did not retain exact executable and firewall identity.'
 $scenarios.Add('valid-versioned-policy')
 
+$runtime = [pscustomobject][ordered]@{
+    Policy = $policy
+    Complete = $false
+    Acceptances = (New-Object Collections.Generic.List[object])
+}
+$emptyEvidence = Get-SystemPromptEvidenceV1 -Runtime $runtime
+Assert-True ($emptyEvidence.Acceptances -is [Array] -and @($emptyEvidence.Acceptances).Count -eq 0 -and -not [bool]$emptyEvidence.ContractSatisfied) 'Empty prompt evidence did not remain a safe JSON array under Windows PowerShell 5.1.'
+$runtime.Acceptances.Add([pscustomobject]@{ Kind = 'Uac'; Success = $true })
+$runtime.Acceptances.Add([pscustomobject]@{ Kind = 'WindowsFirewall'; Success = $true })
+$runtime.Complete = $true
+$completeEvidence = Get-SystemPromptEvidenceV1 -Runtime $runtime
+Assert-True ($completeEvidence.Acceptances -is [Array] -and @($completeEvidence.Acceptances).Count -eq 2 -and [bool]$completeEvidence.ContractSatisfied) 'Completed prompt evidence did not serialize the generic acceptance list safely.'
+$scenarios.Add('prompt-evidence-generic-list-is-windows-powershell-safe')
+
 $legacy = Copy-JsonObject $request
 $legacy.Operation = 'RunGuestJob'
 $legacy.PSObject.Properties.Remove('SystemPrompts')
@@ -84,6 +99,7 @@ $scenarios.Add('malformed-and-unbounded-contracts-rejected')
 
 $moduleText = Get-Content -LiteralPath $modulePath -Raw
 $brokerText = Get-Content -LiteralPath $brokerPath -Raw
+$workerText = Get-Content -LiteralPath $workerPath -Raw
 $networkText = Get-Content -LiteralPath $networkPath -Raw
 $installerText = Get-Content -LiteralPath $installerPath -Raw
 $runnerText = Get-Content -LiteralPath $runnerPath -Raw
@@ -98,6 +114,8 @@ foreach ($required in @(
     Assert-True ($moduleText.Contains($required)) "System-prompts module is missing runtime contract: $required"
 }
 Assert-True ($brokerText.Contains("'SystemPrompts.ps1'") -and $brokerText.Contains('Invoke-SystemPromptServiceV1') -and $brokerText.Contains("`$brokerResultValue['SystemPrompts']")) 'HostBroker does not own prompt validation, runtime service, and result evidence.'
+Assert-True ($moduleText.Contains("`$arguments.TargetSystem = [string]`$settings.__PATH") -and $moduleText.Contains("`$service.PSBase.InvokeMethod('GetVirtualSystemThumbnailImage'")) 'Framebuffer capture does not pass the WMI virtual-system reference path required by Hyper-V.'
+Assert-True ($workerText.Contains('ErrorFullyQualifiedId = $terminalErrorFullyQualifiedId') -and $workerText.Contains('ErrorScriptStackTrace = $terminalErrorScriptStackTrace')) 'Pool-worker fallback results do not preserve the original failure diagnostics.'
 Assert-True ($networkText.Contains("'RunGuestJobSystemPromptsV1'")) 'Request-network validation does not accept the versioned system-prompt operation.'
 Assert-True ($installerText.Contains("'SystemPrompts.ps1'")) 'Broker installation does not copy and hash SystemPrompts.ps1.'
 Assert-True ($runnerText.Contains('[switch] $AcceptUacPrompt') -and $runnerText.Contains('[switch] $AcceptWindowsFirewallPrompt') -and $runnerText.Contains("'RunGuestJobSystemPromptsV1'")) 'Runner does not expose and serialize both bounded prompt capabilities.'
@@ -109,7 +127,7 @@ if (-not ('CodexSystemPromptToken' -as [type])) { Add-Type -TypeDefinition $nati
 Assert-True ($null -ne ('CodexSystemPromptToken' -as [type]).GetMethod('IsElevated')) 'Token-elevation helper did not compile with IsElevated.'
 $scenarios.Add('token-elevation-helper-compiles')
 
-foreach ($path in @($modulePath, $brokerPath, $networkPath, $installerPath, $runnerPath, $PSCommandPath)) {
+foreach ($path in @($modulePath, $brokerPath, $workerPath, $networkPath, $installerPath, $runnerPath, $PSCommandPath)) {
     $tokens = $null
     $errors = $null
     [void][Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)

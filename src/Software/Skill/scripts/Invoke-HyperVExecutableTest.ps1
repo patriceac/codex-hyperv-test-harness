@@ -427,6 +427,42 @@ function Get-OptionalRequestStateValue {
     $property.Value
 }
 
+function Initialize-BrokerResultDefaults {
+    param([Parameter(Mandatory = $true)] $BrokerResult)
+
+    $defaults = [ordered]@{
+        PayloadFingerprintEnumerationMilliseconds = 0
+        PayloadCandidateHashMilliseconds = 0
+        PayloadDetectionTotalMilliseconds = 0
+        PayloadFilesHashed = 0
+        PayloadHashesReused = 0
+        PayloadCacheOperationMilliseconds = 0
+        PayloadVhdxSyncMilliseconds = 0
+        PayloadCacheHit = $false
+        PayloadSyncMode = $null
+        PayloadFilesCopied = 0
+        PayloadFilesDeleted = 0
+        PayloadParentVhdx = $null
+        PayloadChildDeleted = $false
+        HostInputs = @()
+        Network = $null
+        InfrastructureRetryCount = 0
+        InfrastructureRetryHistory = @()
+        Cancelled = $false
+        QueueTimedOut = $false
+        ExecutionTimedOut = $false
+        HostLockEvidenceBefore = $null
+        HostLockEvidenceAfter = $null
+        ExecutionDeadlineUtc = $null
+    }
+    foreach ($entry in $defaults.GetEnumerator()) {
+        if ($null -eq $BrokerResult.PSObject.Properties[$entry.Key]) {
+            $BrokerResult | Add-Member -NotePropertyName $entry.Key -NotePropertyValue $entry.Value
+        }
+    }
+    $BrokerResult
+}
+
 function ConvertTo-UtcRequestStateTimestamp {
     [OutputType([DateTime])]
     param(
@@ -1662,7 +1698,7 @@ try {
         $finalExitCode = if ($queueTimedOutBeforeStart) { 124 } else { 130 }
     }
     else {
-        $brokerResult = Get-Content -Raw -LiteralPath $brokerResultPath -Encoding UTF8 | ConvertFrom-Json
+        $brokerResult = Initialize-BrokerResultDefaults -BrokerResult (Get-Content -Raw -LiteralPath $brokerResultPath -Encoding UTF8 | ConvertFrom-Json)
         $guestResultPath = Join-Path $resultPath 'result.json'
         $guestResult = if (Test-Path -LiteralPath $guestResultPath -PathType Leaf) {
             Get-Content -Raw -LiteralPath $guestResultPath -Encoding UTF8 | ConvertFrom-Json
