@@ -386,6 +386,16 @@ try {
     }
     $scenarios.Add('system-prompt-request-is-versioned-and-bound-to-payload-hash')
 
+    $singleProfileInvocation = $baseInvocation.Clone()
+    $singleProfileInvocation.AcceptWindowsFirewallPrompt = $true
+    $singleProfileRequest = Get-QueuedRequest -Scenario 'single firewall profile remains an array' -InvocationParameters $singleProfileInvocation
+    if ($singleProfileRequest.SystemPrompts.FirewallProfiles -isnot [Array] -or
+        @($singleProfileRequest.SystemPrompts.FirewallProfiles).Count -ne 1 -or
+        [string]$singleProfileRequest.SystemPrompts.FirewallProfiles[0] -cne 'Private') {
+        throw 'A single Windows Firewall profile was not serialized as a one-item JSON array.'
+    }
+    $scenarios.Add('single-firewall-profile-preserves-json-array-shape')
+
     $networkPromptInvocation = $promptInvocation.Clone()
     $networkPromptInvocation.NetworkProfile = 'InternetOnly'
     $networkPromptRequest = Get-QueuedRequest -Scenario 'networked system prompt request contract' -InvocationParameters $networkPromptInvocation

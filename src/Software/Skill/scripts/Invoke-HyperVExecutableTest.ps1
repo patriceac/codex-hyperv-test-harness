@@ -1412,8 +1412,9 @@ try {
             PromptTimeoutSeconds = [int]$SystemPromptTimeoutSeconds
             ExecutableRelativePath = $relativeExecutable
             ExecutableSha256 = $systemPromptExecutableHash
-            FirewallProfiles = if ($AcceptWindowsFirewallPrompt) { @($WindowsFirewallProfiles) } else { @() }
+            FirewallProfiles = @()
         }
+        if ($AcceptWindowsFirewallPrompt) { $systemPromptContract['FirewallProfiles'] = @($WindowsFirewallProfiles) }
         foreach ($kind in $requestedPromptKinds) {
             $prefix = if ($kind -eq 'Uac') { 'system-prompt-uac' } else { 'system-prompt-firewall' }
             foreach ($name in @($prefix + '-before.png', $prefix + '-after.png')) {
