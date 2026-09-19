@@ -1453,7 +1453,7 @@ try {
         if ($AcceptWindowsFirewallPrompt) { $systemPromptContract['FirewallProfiles'] = @($WindowsFirewallProfiles) }
         foreach ($kind in $requestedPromptKinds) {
             $prefix = if ($kind -eq 'Uac') { 'system-prompt-uac' } else { 'system-prompt-firewall' }
-            foreach ($name in @($prefix + '-before.png', $prefix + '-after.png')) {
+            foreach ($name in @(($prefix + '-before.png'), ($prefix + '-after.png'))) {
                 if ($expectedHarnessEvidence -notcontains $name) { $expectedHarnessEvidence += $name }
             }
         }

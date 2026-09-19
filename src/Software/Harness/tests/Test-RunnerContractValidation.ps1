@@ -409,6 +409,10 @@ try {
         throw 'A single Windows Firewall profile is not validated with an array-safe rule count under Windows PowerShell 5.1.'
     }
     $scenarios.Add('single-firewall-profile-validation-is-array-safe')
+    if (-not $runnerText.Contains("@((`$prefix + '-before.png'), (`$prefix + '-after.png'))")) {
+        throw 'System-prompt before/after screenshot names can collapse into one space-joined value under Windows PowerShell 5.1.'
+    }
+    $scenarios.Add('system-prompt-screenshot-evidence-names-stay-distinct')
 
     $networkPromptInvocation = $promptInvocation.Clone()
     $networkPromptInvocation.NetworkProfile = 'InternetOnly'
