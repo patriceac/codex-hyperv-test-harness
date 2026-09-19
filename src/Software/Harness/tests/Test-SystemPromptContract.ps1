@@ -117,6 +117,7 @@ Assert-True ($brokerText.Contains("'SystemPrompts.ps1'") -and $brokerText.Contai
 Assert-True ($moduleText.Contains("`$arguments.TargetSystem = [string]`$settings.__PATH") -and $moduleText.Contains("`$service.PSBase.InvokeMethod('GetVirtualSystemThumbnailImage'")) 'Framebuffer capture does not pass the WMI virtual-system reference path required by Hyper-V.'
 Assert-True ($moduleText.Contains('if ($bytes.Length -lt $pixelBytes)') -and $moduleText.Contains('Marshal]::Copy($bytes, 0, $data.Scan0, $pixelBytes)')) 'Framebuffer capture does not bound its RGB565 copy to the requested pixel payload.'
 Assert-True (-not $moduleText.Contains("Caption -eq 'Virtual Machine'")) 'System-prompt VM lookup still depends on localized Hyper-V Caption text.'
+Assert-True ($moduleText.Contains("[TimeSpan]::FromSeconds(2)") -and $moduleText.Contains('Start-Sleep -Milliseconds 250')) 'UAC input is not delayed until the consent UI can render and process focus changes.'
 Assert-True ($workerText.Contains('ErrorFullyQualifiedId = $terminalErrorFullyQualifiedId') -and $workerText.Contains('ErrorScriptStackTrace = $terminalErrorScriptStackTrace')) 'Pool-worker fallback results do not preserve the original failure diagnostics.'
 Assert-True ($networkText.Contains("'RunGuestJobSystemPromptsV1'")) 'Request-network validation does not accept the versioned system-prompt operation.'
 Assert-True ($installerText.Contains("'SystemPrompts.ps1'")) 'Broker installation does not copy and hash SystemPrompts.ps1.'

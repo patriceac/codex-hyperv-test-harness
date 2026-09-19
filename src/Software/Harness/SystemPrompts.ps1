@@ -428,6 +428,10 @@ function Invoke-SystemPromptServiceV1 {
         })
         if ($matches.Count -eq 0) { return [pscustomobject]@{ Changed = $false; Complete = $false; Message = 'Waiting for the exact startup UAC prompt.' } }
         if ($matches.Count -ne 1) { throw 'The startup UAC prompt did not resolve to one new consent.exe process.' }
+        $consentStartedUtc = [DateTime]::Parse([string]$matches[0].StartedUtc).ToUniversalTime()
+        if ([DateTime]::UtcNow - $consentStartedUtc -lt [TimeSpan]::FromSeconds(2)) {
+            return [pscustomobject]@{ Changed = $false; Complete = $false; Message = 'Waiting for the startup UAC prompt to finish rendering.' }
+        }
 
         $acceptedUtc = [DateTime]::UtcNow
         $beforeName = 'system-prompt-uac-before.png'
@@ -435,6 +439,7 @@ function Invoke-SystemPromptServiceV1 {
         $null = Save-SystemPromptVmFramebuffer -VmName $Runtime.VmName -Path (Join-Path $Runtime.ResultRoot $beforeName)
         # Consent UI defaults to No. Left selects Yes without relying on localized text.
         Send-SystemPromptVirtualKey -VmName $Runtime.VmName -VirtualKey 0x25
+        Start-Sleep -Milliseconds 250
         Send-SystemPromptVirtualKey -VmName $Runtime.VmName -VirtualKey 0x0D
 
         $verificationDeadline = [DateTime]::UtcNow.AddSeconds(15)
