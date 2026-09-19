@@ -1932,7 +1932,7 @@ try {
                         elseif ($expectedKind -eq 'WindowsFirewall') {
                             if ([string]$acceptance.AuthorizationMethod -cne 'ExactInboundFirewallRules' -or
                                 (@($acceptance.FirewallProfiles) -join '|') -cne ($expectedProfiles -join '|') -or
-                                @($acceptance.FirewallRules).Count -ne $expectedProfiles.Count) {
+                                @($acceptance.FirewallRules).Count -ne @($expectedProfiles).Count) {
                                 $systemPromptContractEvidenceFailures += 'Windows Firewall acceptance does not prove every exact requested profile rule.'
                             }
                             foreach ($rule in @($acceptance.FirewallRules)) {

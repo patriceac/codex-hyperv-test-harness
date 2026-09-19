@@ -405,6 +405,10 @@ try {
         throw 'A single Windows Firewall profile was not serialized as a one-item JSON array.'
     }
     $scenarios.Add('single-firewall-profile-preserves-json-array-shape')
+    if (-not $runnerText.Contains('@($acceptance.FirewallRules).Count -ne @($expectedProfiles).Count')) {
+        throw 'A single Windows Firewall profile is not validated with an array-safe rule count under Windows PowerShell 5.1.'
+    }
+    $scenarios.Add('single-firewall-profile-validation-is-array-safe')
 
     $networkPromptInvocation = $promptInvocation.Clone()
     $networkPromptInvocation.NetworkProfile = 'InternetOnly'
