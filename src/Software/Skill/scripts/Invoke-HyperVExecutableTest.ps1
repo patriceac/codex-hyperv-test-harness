@@ -19,9 +19,10 @@ param(
     [ValidateSet('None', 'IsolatedTestNet', 'InternetOnly', 'TrustedLan')] [string] $NetworkProfile = 'None',
     [string] $NetworkCohort,
     [switch] $AllowNetworkWithHostInputs,
-    [ValidateSet('None', 'RemoteDebuggerProvisionV1')] [string] $GuestSetupProfile = 'None',
     [string] $GuestSetupExecutableRelativePath,
     [string] $GuestSetupExecutableSha256,
+    [string[]] $GuestSetupArguments = @(),
+    [ValidateRange(5, 600)] [int] $GuestSetupTimeoutSeconds = 120,
     [switch] $RequireHostLocked,
     [ValidateRange(5, 86400)] [int] $QueueTimeoutSeconds = 1800,
     [Alias('TimeoutSeconds')] [ValidateRange(10, 7200)] [int] $ExecutionTimeoutSeconds = 900,
@@ -57,30 +58,34 @@ if (-not $AcceptWindowsFirewallPrompt -and $PSBoundParameters.ContainsKey('Windo
 if ($AcceptWindowsFirewallPrompt -and @($WindowsFirewallProfiles).Count -ne (@($WindowsFirewallProfiles | Select-Object -Unique).Count)) {
     throw 'WindowsFirewallProfiles cannot contain duplicates.'
 }
-if ($GuestSetupProfile -eq 'None') {
-    if ($PSBoundParameters.ContainsKey('GuestSetupExecutableRelativePath') -or $PSBoundParameters.ContainsKey('GuestSetupExecutableSha256')) {
-        throw 'Guest setup executable fields require GuestSetupProfile RemoteDebuggerProvisionV1.'
-    }
+$guestSetupRequested = $PSBoundParameters.ContainsKey('GuestSetupExecutableRelativePath') -or $PSBoundParameters.ContainsKey('GuestSetupExecutableSha256')
+if ($guestSetupRequested -and (-not $PSBoundParameters.ContainsKey('GuestSetupExecutableRelativePath') -or -not $PSBoundParameters.ContainsKey('GuestSetupExecutableSha256'))) {
+    throw 'Guest setup requires both GuestSetupExecutableRelativePath and GuestSetupExecutableSha256.'
 }
-elseif ($NetworkProfile -notin @('None', 'IsolatedTestNet') -or $ReadOnlyHostInput.Count -gt 0 -or $AllowNetworkWithHostInputs -or $ExpectGuestPowerOff -or $systemPromptRequested) {
-    throw 'RemoteDebuggerProvisionV1 permits only None or IsolatedTestNet, without host inputs or expected power-off.'
+if (-not $guestSetupRequested -and ($PSBoundParameters.ContainsKey('GuestSetupArguments') -or $PSBoundParameters.ContainsKey('GuestSetupTimeoutSeconds'))) {
+    throw 'GuestSetupArguments and GuestSetupTimeoutSeconds require a guest setup executable.'
+}
+if ($guestSetupRequested -and ($NetworkProfile -notin @('None', 'IsolatedTestNet') -or $ReadOnlyHostInput.Count -gt 0 -or $AllowNetworkWithHostInputs -or $ExpectGuestPowerOff -or $systemPromptRequested)) {
+    throw 'Guest setup permits only None or IsolatedTestNet, without host inputs, expected power-off, or system-prompt acceptance.'
 }
 
-function Resolve-RemoteDebuggerClientFixture {
+function Resolve-GuestSetupClientExecutable {
     param(
         [Parameter(Mandatory = $true)] $Artifact,
         [Parameter(Mandatory = $true)] [string] $RelativePath,
-        [Parameter(Mandatory = $true)] [string] $ExpectedSha256
+        [Parameter(Mandatory = $true)] [string] $ExpectedSha256,
+        [string[]] $Arguments = @(),
+        [ValidateRange(5, 600)] [int] $TimeoutSeconds = 120
     )
 
-    if (-not $Artifact.PSIsContainer) { throw 'RemoteDebuggerProvisionV1 requires a directory artifact containing Lab and the signed fixture.' }
+    if (-not $Artifact.PSIsContainer) { throw 'Guest setup requires a directory artifact containing both the setup and application executables.' }
     if ($ExpectedSha256 -cnotmatch '^[A-Fa-f0-9]{64}$') { throw 'GuestSetupExecutableSha256 must be an exact SHA-256 hash.' }
     $relative = $RelativePath.Replace('/', '\')
     if ([string]::IsNullOrWhiteSpace($relative) -or $relative.Length -gt 240 -or [IO.Path]::IsPathRooted($relative) -or
         $relative.IndexOfAny([char[]](':*?"<>|' + [string][char]0)) -ge 0 -or $relative -match '[\x00-\x1F]' -or
         @($relative.Split('\') | Where-Object { $_ -in @('', '.', '..') -or $_.EndsWith('.') -or $_.EndsWith(' ') }).Count -gt 0 -or
-        [IO.Path]::GetFileName($relative) -cne 'RemoteDebugger.exe') {
-        throw 'The guest setup fixture must be a traversal-free relative path ending in RemoteDebugger.exe.'
+        -not [string]::Equals([IO.Path]::GetExtension($relative), '.exe', [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The guest setup executable must be a traversal-free relative path ending in .exe.'
     }
     $root = [IO.Path]::GetFullPath($Artifact.FullName).TrimEnd('\')
     $candidate = [IO.Path]::GetFullPath((Join-Path $root $relative))
@@ -93,7 +98,22 @@ function Resolve-RemoteDebuggerClientFixture {
     }
     $actual = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash
     if (-not [string]::Equals($actual, $ExpectedSha256, [StringComparison]::OrdinalIgnoreCase)) { throw 'The guest setup fixture hash differs from the requested exact bytes.' }
-    [pscustomobject][ordered]@{ FixtureRelativePath = $relative; ExpectedSha256 = $actual }
+    if (@($Arguments).Count -gt 16) { throw 'GuestSetupArguments accepts at most 16 values.' }
+    $totalArgumentLength = 0
+    foreach ($argument in @($Arguments)) {
+        if ($argument.Length -gt 1024 -or $argument -match '[\x00\r\n]') {
+            throw 'Each GuestSetupArguments value must be at most 1024 characters without NUL or line breaks.'
+        }
+        $totalArgumentLength += $argument.Length
+    }
+    if ($totalArgumentLength -gt 4096) { throw 'GuestSetupArguments exceeds the 4096-character aggregate limit.' }
+    [pscustomobject][ordered]@{
+        FormatVersion = 1
+        ExecutableRelativePath = $relative
+        ExecutableSha256 = $actual.ToUpperInvariant()
+        Arguments = @($Arguments)
+        TimeoutSeconds = $TimeoutSeconds
+    }
 }
 
 function Get-ValidatedKeyChord {
@@ -207,8 +227,8 @@ $networkContract = [ordered]@{
 
 $artifact = Get-Item -LiteralPath $ArtifactPath -ErrorAction Stop
 $guestSetupRequest = $null
-if ($GuestSetupProfile -eq 'RemoteDebuggerProvisionV1') {
-    $guestSetupRequest = Resolve-RemoteDebuggerClientFixture -Artifact $artifact -RelativePath $GuestSetupExecutableRelativePath -ExpectedSha256 $GuestSetupExecutableSha256
+if ($guestSetupRequested) {
+    $guestSetupRequest = Resolve-GuestSetupClientExecutable -Artifact $artifact -RelativePath $GuestSetupExecutableRelativePath -ExpectedSha256 $GuestSetupExecutableSha256 -Arguments @($GuestSetupArguments) -TimeoutSeconds $GuestSetupTimeoutSeconds
 }
 $requestsRoot = Join-Path $BrokerRoot 'Requests'
 $processingRoot = Join-Path $BrokerRoot 'Processing'
@@ -1276,6 +1296,9 @@ try {
         }
         $systemPromptExecutableHash = [string]$systemPromptExecutableEntry[0].Sha256
     }
+    if ($guestSetupRequest -and $expectedHarnessEvidence -notcontains 'broker-guest-setup.json') {
+        $expectedHarnessEvidence += 'broker-guest-setup.json'
+    }
     $payloadContentKey = Get-PayloadContentKey -Files $payloadFiles -Directories $payloadDirectories
     $payloadManifestPath = Join-Path $payloadManifestDirectory ($payloadContentKey + '.json')
     $payloadBytes = [long](($payloadFiles | Measure-Object -Property Length -Sum).Sum)
@@ -1463,7 +1486,7 @@ try {
     $queueDeadlineUtc = $createdUtc.AddSeconds($QueueTimeoutSeconds)
     $request = [ordered]@{
         RequestId = $requestId
-        Operation = if ($systemPromptRequested) { 'RunGuestJobSystemPromptsV1' } elseif ($guestSetupRequest) { 'RunGuestJobProvisionedV1' } elseif ($networkEnabled) { 'RunGuestJobNetworkV1' } else { 'RunGuestJob' }
+        Operation = if ($systemPromptRequested) { 'RunGuestJobSystemPromptsV1' } elseif ($guestSetupRequest) { 'RunGuestJobSetupV1' } elseif ($networkEnabled) { 'RunGuestJobNetworkV1' } else { 'RunGuestJob' }
         CreatedUtc = $createdUtc.ToString('o')
         QueueTimeoutSeconds = $QueueTimeoutSeconds
         ExecutionTimeoutSeconds = $ExecutionTimeoutSeconds
@@ -1489,7 +1512,7 @@ try {
         Network = $networkContract
         Job = $job
     }
-    if ($guestSetupRequest) { $request['RemoteDebuggerProvisionV1'] = $guestSetupRequest }
+    if ($guestSetupRequest) { $request['GuestSetup'] = $guestSetupRequest }
     if ($systemPromptContract) { $request['SystemPrompts'] = $systemPromptContract }
     if ($ExpectGuestPowerOff) {
         $request['ExpectGuestPowerOff'] = $true
@@ -2097,6 +2120,10 @@ try {
             $summary['SystemPrompts'] = if ($publishedPromptProperty) { $publishedPromptProperty.Value } else { $systemPromptContract }
             $summary['SystemPromptContractProven'] = [bool]$systemPromptContractProven
             $summary['SystemPromptContractEvidenceFailures'] = @($systemPromptContractEvidenceFailures)
+        }
+        if ($guestSetupRequest) {
+            $publishedGuestSetup = $brokerResult.PSObject.Properties['GuestSetup']
+            $summary['GuestSetup'] = if ($publishedGuestSetup) { $publishedGuestSetup.Value } else { $guestSetupRequest }
         }
         $summary | ConvertTo-Json -Depth 8
         if (-not $overallSucceeded) {

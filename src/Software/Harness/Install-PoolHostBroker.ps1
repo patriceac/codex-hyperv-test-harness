@@ -49,15 +49,8 @@ $installationMutationStarted = $false
 $credentialExistedBefore = $false
 $installCommitted = $false
 $rollbackSucceeded = $false
-$installedFiles = @('HostBroker.ps1', 'PayloadCache.ps1', 'HostInputShare.ps1', 'RequestNetwork.ps1', 'SystemPrompts.ps1', 'RemoteDebuggerProvisioning.ps1', 'RemoteDebuggerObservation.ps1', 'LiveEvidence.ps1', 'PoolCommon.ps1', 'PoolBroker.ps1', 'PoolLifecycle.ps1', 'HostWorker.ps1')
-$remoteDebuggerProvisionProfile = $null
-if ($layout.PSObject.Properties['RemoteDebuggerProvisionV1']) {
-    if ($null -eq $brokerInstanceId) { throw 'RemoteDebuggerProvisionV1 requires a dedicated BrokerInstanceId.' }
-    . (Join-Path $SourceRoot 'RemoteDebuggerProvisioning.ps1')
-    $remoteDebuggerProvisionProfile = $layout.RemoteDebuggerProvisionV1
-    $firstApprovedHash = @($remoteDebuggerProvisionProfile.ApprovedExecutableSha256) | Select-Object -First 1
-    $null = Resolve-RemoteDebuggerProvisionRequestV1 -RequestProfile ([pscustomobject]@{ FixtureRelativePath = 'RemoteDebugger.exe'; ExpectedSha256 = $firstApprovedHash }) -ConfigProfile $remoteDebuggerProvisionProfile -RequestId 'installer-policy-validation'
-}
+$installedFiles = @('HostBroker.ps1', 'PayloadCache.ps1', 'HostInputShare.ps1', 'RequestNetwork.ps1', 'SystemPrompts.ps1', 'GuestSetup.ps1', 'LiveEvidence.ps1', 'PoolCommon.ps1', 'PoolBroker.ps1', 'PoolLifecycle.ps1', 'HostWorker.ps1')
+$obsoleteFiles = @('RemoteDebuggerProvisioning.ps1', 'RemoteDebuggerObservation.ps1')
 $backedUpNames = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
 
 function New-FailClosedRequestNetworkPolicy {
@@ -296,6 +289,13 @@ try {
             [void]$backedUpNames.Add($name)
         }
     }
+    foreach ($name in $obsoleteFiles) {
+        $destination = Join-Path $BrokerRoot $name
+        if (Test-Path -LiteralPath $destination -PathType Leaf) {
+            Copy-Item -LiteralPath $destination -Destination (Join-Path $backupRoot $name) -Force
+            [void]$backedUpNames.Add($name)
+        }
+    }
     $configPath = Join-Path $privateRoot 'config.json'
     if (Test-Path -LiteralPath $configPath -PathType Leaf) {
         Copy-Item -LiteralPath $configPath -Destination (Join-Path $backupRoot 'config.json') -Force
@@ -315,6 +315,12 @@ try {
             throw "Staged hash mismatch for $name."
         }
         Move-Item -LiteralPath $staged -Destination $destination -Force
+    }
+    foreach ($name in $obsoleteFiles) {
+        $destination = Join-Path $BrokerRoot $name
+        if (Test-Path -LiteralPath $destination -PathType Leaf) {
+            Remove-Item -LiteralPath $destination -Force -ErrorAction Stop
+        }
     }
 
     if (-not (Test-Path -LiteralPath $credentialDestination -PathType Leaf)) {
@@ -363,9 +369,6 @@ try {
     }
     if ($null -ne $brokerInstanceId) {
         $config['BrokerInstanceId'] = $brokerInstanceId
-    }
-    if ($null -ne $remoteDebuggerProvisionProfile) {
-        $config['RemoteDebuggerProvisionV1'] = $remoteDebuggerProvisionProfile
     }
     $config | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $configPath -Encoding UTF8
     Set-BrokerAcl -Path $configPath -ClientMode None
@@ -472,6 +475,13 @@ catch {
                 }
                 elseif (-not $backedUpNames.Contains($name) -and (Test-Path -LiteralPath $destination -PathType Leaf)) {
                     Remove-Item -LiteralPath $destination -Force -ErrorAction Stop
+                }
+            }
+            foreach ($name in $obsoleteFiles) {
+                $destination = Join-Path $BrokerRoot $name
+                $backup = Join-Path $backupRoot $name
+                if (Test-Path -LiteralPath $backup -PathType Leaf) {
+                    Copy-Item -LiteralPath $backup -Destination $destination -Force
                 }
             }
             $configBackup = Join-Path $backupRoot 'config.json'

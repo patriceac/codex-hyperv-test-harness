@@ -472,33 +472,36 @@ try {
     }
     $scenarios.Add('network-host-input-auto-forced-vhdx')
 
-    $provisionArtifact = Join-Path $root 'provision-artifact'
-    New-Item -ItemType Directory -Path (Join-Path $provisionArtifact 'release') -Force | Out-Null
+    $provisionArtifact = Join-Path $root 'guest-setup-artifact'
+    New-Item -ItemType Directory -Path (Join-Path $provisionArtifact 'setup') -Force | Out-Null
     [IO.File]::WriteAllBytes((Join-Path $provisionArtifact 'Lab.exe'), [byte[]](0, 1, 2, 3))
-    $fixturePath = Join-Path $provisionArtifact 'release\RemoteDebugger.exe'
+    $fixturePath = Join-Path $provisionArtifact 'setup\Bootstrap.exe'
     [IO.File]::WriteAllBytes($fixturePath, [byte[]](4, 5, 6, 7))
     $provisionInvocation = $baseInvocation.Clone()
     $provisionInvocation.ArtifactPath = $provisionArtifact
     $provisionInvocation.ExecutableRelativePath = 'Lab.exe'
-    $provisionInvocation.GuestSetupProfile = 'RemoteDebuggerProvisionV1'
-    $provisionInvocation.GuestSetupExecutableRelativePath = 'release\RemoteDebugger.exe'
+    $provisionInvocation.GuestSetupExecutableRelativePath = 'setup\Bootstrap.exe'
     $provisionInvocation.GuestSetupExecutableSha256 = (Get-FileHash -LiteralPath $fixturePath -Algorithm SHA256).Hash
+    $provisionInvocation.GuestSetupArguments = @('configure', '--test-mode')
+    $provisionInvocation.GuestSetupTimeoutSeconds = 90
     foreach ($profile in @('None', 'IsolatedTestNet')) {
         $provisionInvocation.NetworkProfile = $profile
         if ($profile -eq 'IsolatedTestNet') { $provisionInvocation.NetworkCohort = 'provision-contract' }
         $provisionRequest = Get-QueuedRequest -Scenario "provisioned $profile contract" -InvocationParameters $provisionInvocation
-        Assert-Equal -Scenario 'provisioned operation fails closed on older brokers' -Actual $provisionRequest.Operation -Expected 'RunGuestJobProvisionedV1'
-        Assert-Equal -Scenario 'provisioned job still launches payload Lab' -Actual $provisionRequest.Job.executable -Expected '{PAYLOAD}\Lab.exe'
-        Assert-Equal -Scenario 'provisioned exact fixture path' -Actual $provisionRequest.RemoteDebuggerProvisionV1.FixtureRelativePath -Expected 'release\RemoteDebugger.exe'
-        Assert-Equal -Scenario 'provisioned exact fixture bytes' -Actual $provisionRequest.RemoteDebuggerProvisionV1.ExpectedSha256 -Expected $provisionInvocation.GuestSetupExecutableSha256
-        Assert-Equal -Scenario 'provisioned network profile preserved' -Actual $provisionRequest.Network.Profile -Expected $profile
-        Assert-Equal -Scenario 'provisioned schema is bounded' -Actual @($provisionRequest.RemoteDebuggerProvisionV1.PSObject.Properties).Count -Expected 2
+        Assert-Equal -Scenario 'guest setup operation fails closed on older brokers' -Actual $provisionRequest.Operation -Expected 'RunGuestJobSetupV1'
+        Assert-Equal -Scenario 'guest setup still launches payload Lab' -Actual $provisionRequest.Job.executable -Expected '{PAYLOAD}\Lab.exe'
+        Assert-Equal -Scenario 'guest setup exact executable path' -Actual $provisionRequest.GuestSetup.ExecutableRelativePath -Expected 'setup\Bootstrap.exe'
+        Assert-Equal -Scenario 'guest setup exact executable bytes' -Actual $provisionRequest.GuestSetup.ExecutableSha256 -Expected $provisionInvocation.GuestSetupExecutableSha256
+        Assert-Equal -Scenario 'guest setup arguments preserved' -Actual ($provisionRequest.GuestSetup.Arguments -join '|') -Expected 'configure|--test-mode'
+        Assert-Equal -Scenario 'guest setup timeout preserved' -Actual $provisionRequest.GuestSetup.TimeoutSeconds -Expected 90
+        Assert-Equal -Scenario 'guest setup network profile preserved' -Actual $provisionRequest.Network.Profile -Expected $profile
+        Assert-Equal -Scenario 'guest setup schema is bounded' -Actual @($provisionRequest.GuestSetup.PSObject.Properties).Count -Expected 5
         $scenarios.Add("provisioned-$profile-serialization")
     }
     $provisionInvocation.Remove('NetworkCohort')
     foreach ($forbiddenProfile in @('InternetOnly', 'TrustedLan')) {
         $provisionInvocation.NetworkProfile = $forbiddenProfile
-        Assert-Rejected -Scenario "provisioned $forbiddenProfile denied" -ExpectedMessage 'only None or IsolatedTestNet' -Operation { & $RunnerPath @provisionInvocation }
+        Assert-Rejected -Scenario "guest setup $forbiddenProfile denied" -ExpectedMessage 'only None or IsolatedTestNet' -Operation { & $RunnerPath @provisionInvocation }
     }
     $scenarios.Add('provisioned-runner-rejects-external-networks')
 

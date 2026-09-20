@@ -28,6 +28,7 @@ foreach ($retiredPath in @('scripts\Invoke-HostExecutableTest.ps1', 'scripts\Hos
 $requiredReferences = [ordered]@{
     'artifact-and-actions.md' = @('wait_result_file', 'AssertResultJsonPointer', 'send_keys')
     'network-and-host-inputs.md' = @('InternetOnly', 'AllowNetworkWithHostInputs', 'SelectedTransport')
+    'guest-setup.md' = @('GuestSetupExecutableSha256', 'RunGuestJobSetupV1', 'broker-guest-setup.json')
     'expected-guest-power-off.md' = @('ExpectGuestPowerOff', 'ResultFileNotPrePowerOff', 'ApplicationRelaunchedByHarnessAfterGuestPowerOff=false')
     'queue-observation-and-cancellation.md' = @('Capture-HyperVExecutableTestLiveEvidence.ps1', 'Cancel-HyperVExecutableTest.ps1', 'QueueTimedOut')
     'broker-pool-and-cache.md' = @('immutable VHDX generations', 'PayloadFilesHashed', 'ProcessCleanup')

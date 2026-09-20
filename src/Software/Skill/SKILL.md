@@ -23,6 +23,7 @@ Do not preload every reference.
 - For interaction actions, result assertions, reserved tokens, screenshots, or locked-host proof, read [artifact invocation and actions](references/artifact-and-actions.md).
 - For any auxiliary host input or non-default networking, read [network and host inputs](references/network-and-host-inputs.md) before constructing the request.
 - For an expected startup UAC prompt or Windows Firewall access prompt, read [system-prompt acceptance](references/system-prompts.md). Prompt handling is explicit, identity-bound, and VM-only.
+- For a bounded elevated executable that must finish before the normal application starts, read [request-scoped guest setup](references/guest-setup.md). The executable is payload-manifest bound; product commands and assertions remain in the product scenario.
 - For an application expected to shut down its disposable guest, read [expected guest power-off](references/expected-guest-power-off.md). That mode has a distinct no-replay evidence contract.
 - For shared queue use, a long request, live evidence, cancellation, or deadline behavior, read [queue, observation, and cancellation](references/queue-observation-and-cancellation.md).
 - For payload-cache behavior, pool internals, lifecycle recovery, or performance diagnosis, read [broker, pool, and cache internals](references/broker-pool-and-cache.md).
@@ -37,6 +38,7 @@ Use `scripts/Invoke-HyperVExecutableTest.ps1`.
 - Pass application arguments with `-Arguments`. In arguments and ordinary string-valued actions, `{PAYLOAD}` resolves to the attached payload root and `{OUTDIR}` to the persistent guest evidence directory. Do not assume guest drive letters.
 - Omit `-ActionsPath` for a basic launch-and-screenshot smoke test. Supply an actions JSON file for interaction.
 - General networking is opt-in. Omit `-NetworkProfile` or use `None` for a disconnected VM. Never substitute or create networking when the requested profile is unavailable.
+- Use `-GuestSetupExecutableRelativePath`, `-GuestSetupExecutableSha256`, `-GuestSetupArguments`, and `-GuestSetupTimeoutSeconds` only for a request-scoped elevated pre-launch executable. Do not encode product policy in the harness.
 - Add `-RequireHostLocked` only when the test specifically requires proof that the workstation remained locked. VM isolation itself does not require locking the host.
 - Queue and execution deadlines are independent. Their defaults are 30 and 15 minutes respectively; waiting in the FIFO queue does not consume the execution budget.
 

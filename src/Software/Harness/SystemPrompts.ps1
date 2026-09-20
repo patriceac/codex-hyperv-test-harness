@@ -89,9 +89,9 @@ function Resolve-SystemPromptPolicyV1 {
     }
 
     if ((Get-SystemPromptPropertyValue -Value $Request -Name 'ExpectGuestPowerOff') -eq $true -or
-        [string]$operation -eq 'RunGuestJobProvisionedV1' -or
-        $null -ne (Get-SystemPromptPropertyValue -Value $Request -Name 'RemoteDebuggerProvisionV1')) {
-        throw 'System-prompt acceptance cannot be combined with expected power-off or guest provisioning.'
+        [string]$operation -eq 'RunGuestJobSetupV1' -or
+        $null -ne (Get-SystemPromptPropertyValue -Value $Request -Name 'GuestSetup')) {
+        throw 'System-prompt acceptance cannot be combined with expected power-off or guest setup.'
     }
 
     $relativePath = ConvertTo-SystemPromptRelativePath -Value ([string](Get-SystemPromptPropertyValue -Value $propertyLookup -Name 'ExecutableRelativePath'))

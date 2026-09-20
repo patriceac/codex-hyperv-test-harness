@@ -269,14 +269,11 @@ if (-not (Test-Path -LiteralPath $systemPromptsModulePath -PathType Leaf)) {
     throw "System-prompts module not found: $systemPromptsModulePath"
 }
 . $systemPromptsModulePath
-$remoteDebuggerProvisionModulePath = Join-Path $PSScriptRoot 'RemoteDebuggerProvisioning.ps1'
-if (Test-Path -LiteralPath $remoteDebuggerProvisionModulePath -PathType Leaf) {
-    . $remoteDebuggerProvisionModulePath
+$guestSetupModulePath = Join-Path $PSScriptRoot 'GuestSetup.ps1'
+if (-not (Test-Path -LiteralPath $guestSetupModulePath -PathType Leaf)) {
+    throw "Guest-setup module not found: $guestSetupModulePath"
 }
-$remoteDebuggerObservationModulePath = Join-Path $PSScriptRoot 'RemoteDebuggerObservation.ps1'
-if (Test-Path -LiteralPath $remoteDebuggerObservationModulePath -PathType Leaf) {
-    . $remoteDebuggerObservationModulePath
-}
+. $guestSetupModulePath
 $liveEvidenceModulePath = Join-Path $PSScriptRoot 'LiveEvidence.ps1'
 if (-not (Test-Path -LiteralPath $liveEvidenceModulePath -PathType Leaf)) {
     throw "Live-evidence module not found: $liveEvidenceModulePath"
@@ -3332,6 +3329,8 @@ function Invoke-GuestRequest {
     $requestNetworkCleanupPerformed = $false
     $systemPromptPolicy = $null
     $systemPromptRuntime = $null
+    $guestSetupPolicy = $null
+    $guestSetupEvidence = $null
     $expectGuestPowerOff = $false
     $guestPowerOffRecoveryTimeoutSeconds = 180
     $expectedGuestPowerOffSubmissionStartedUtc = $null
@@ -3346,8 +3345,6 @@ function Invoke-GuestRequest {
     $applicationRelaunchedByHarnessAfterGuestPowerOff = $null
     $expectedGuestPowerOffContractSatisfied = $null
     $brokerCleanupStartedUtc = $null
-    $remoteDebuggerObservationSession = $null
-    $remoteDebuggerObservationJob = $null
     $poolMode = [bool]$Config.PoolEnabled
     $workerId = if ($poolMode) { [Nullable[int]]([int]$Config.PoolWorkerId) } else { $null }
     $guestSessionReconnects = 0
@@ -3475,6 +3472,7 @@ function Invoke-GuestRequest {
             throw 'Every external application-under-test must include canonical ArtifactPath payload metadata.'
         }
         $systemPromptPolicy = Resolve-SystemPromptPolicyV1 -Request $Request -PayloadManifest $payloadManifest
+        $guestSetupPolicy = Resolve-GuestSetupPolicyV1 -Request $Request -PayloadManifest $payloadManifest
         $hostInputNames = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
         $hostInputDefinitions = @($Request.HostInputs)
         if ($hostInputDefinitions.Count -gt 8) { throw 'A request may expose at most eight read-only host inputs.' }
@@ -3814,20 +3812,22 @@ function Invoke-GuestRequest {
             Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
             $requestNetworkHostPolicyCheckCount++
         }
-        if ([string]$Request.Operation -eq 'RunGuestJobProvisionedV1') {
-            $failureStage = 'ProvisioningGuest'
+        if ($guestSetupPolicy) {
+            $failureStage = 'RunningGuestSetup'
             Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
-            Write-RequestState -ResultRoot $RequestStateRoot -RequestId $requestId -Status 'PreparingGuest' -Message 'Provisioning the approved Remote Debugger fixture inside the disposable guest.' -CreatedUtc $createdUtc -ClaimedUtc $ClaimedUtc -ExecutionDeadlineUtc $executionDeadlineUtc -WorkerId $workerId
-            # GuestAgent recreates Outbox at launch. Store the protected bootstrap receipt separately;
-            # the medium-user Lab reads it and includes a copy with its collected evidence.
-            $guestProvisioningRoot = 'C:\CodexGuest\Provisioning\' + $requestId
-            $provisioningEvidence = Invoke-RemoteDebuggerProvisionV1 -Session $session -RequestProfile $Request.RemoteDebuggerProvisionV1 -ConfigProfile $Config.RemoteDebuggerProvisionV1 -GuestPayloadRoot $guestPayloadRoot -GuestOutputRoot $guestProvisioningRoot -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc -ActivityCheck {
-                Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
+            Write-RequestState -ResultRoot $RequestStateRoot -RequestId $requestId -Status 'PreparingGuest' -Message 'Running the request-bound elevated setup executable inside the disposable guest.' -CreatedUtc $createdUtc -ClaimedUtc $ClaimedUtc -ExecutionDeadlineUtc $executionDeadlineUtc -WorkerId $workerId
+            $guestSetupRoot = 'C:\ProgramData\CodexHarness\GuestSetup\' + $requestId
+            try {
+                $guestSetupEvidence = Invoke-GuestSetupV1 -Session $session -Policy $guestSetupPolicy -GuestPayloadRoot $guestPayloadRoot -GuestSetupRoot $guestSetupRoot -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc -ActivityCheck {
+                    Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
+                }
             }
-            Write-JsonAtomic -Path (Join-Path $ResultRoot 'broker-provisioning.json') -Value $provisioningEvidence
+            catch {
+                $failureKind = 'GuestSetupFailed'
+                throw
+            }
+            Write-JsonAtomic -Path (Join-Path $ResultRoot 'broker-guest-setup.json') -Value $guestSetupEvidence
             Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
-            $remoteDebuggerObservationSession = Open-GuestSessionReliable -VmName $vmName -Credential $credential -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
-            $remoteDebuggerObservationJob = Start-RemoteDebuggerObservationV1 -Session $remoteDebuggerObservationSession -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
         }
         $failureStage = 'SubmittingGuestJob'
         $guestJobPath = Join-Path $ResultRoot ($requestId + '.json')
@@ -4705,10 +4705,6 @@ function Invoke-GuestRequest {
     }
     finally {
         $brokerCleanupStartedUtc = [DateTime]::UtcNow.ToString('o')
-        if ($remoteDebuggerObservationJob -or $remoteDebuggerObservationSession) {
-            try { Stop-RemoteDebuggerObservationV1 -Job $remoteDebuggerObservationJob -Session $remoteDebuggerObservationSession }
-            catch { $evidenceWarnings.Add('Fixed Remote Debugger observation cleanup failed: ' + $_.Exception.Message) }
-        }
         if ($liveEvidenceContext) {
             try {
                 Complete-HostLiveEvidenceFailure -Context $liveEvidenceContext -Status 'RequestAlreadyTerminal' -FailureKind 'RequestAlreadyTerminal' -Message 'The request left its live application stage before capture publication completed.' -LifecycleStage 'StoppingVm' -ApplicationProcessId ([int]$liveEvidenceContext.Command.ExpectedApplicationProcessId)
@@ -5026,7 +5022,7 @@ function Invoke-GuestRequest {
             HostInputCleanup = $hostInputCleanup
             Network = [ordered]@{
                 ContractVersion = if ([string]$Request.Operation -eq 'RunGuestJobNetworkV1' -or
-                    ([string]$Request.Operation -in @('RunGuestJobProvisionedV1', 'RunGuestJobSystemPromptsV1') -and [string]$requestNetworkDefinition.EffectiveProfile -ne 'None')) { 1 } else { 0 }
+                    ([string]$Request.Operation -in @('RunGuestJobSetupV1', 'RunGuestJobSystemPromptsV1') -and [string]$requestNetworkDefinition.EffectiveProfile -ne 'None')) { 1 } else { 0 }
                 RequestedProfile = if ($requestNetworkDefinition) { [string]$requestNetworkDefinition.RequestedProfile } else { 'None' }
                 EffectiveProfile = if ($requestNetworkDefinition) { [string]$requestNetworkDefinition.EffectiveProfile } else { 'None' }
                 Cohort = if ($requestNetworkDefinition -and [string]$requestNetworkDefinition.EffectiveProfile -eq 'IsolatedTestNet') { [string]$requestNetworkDefinition.Cohort } else { $null }
@@ -5122,6 +5118,9 @@ function Invoke-GuestRequest {
         }
         if ($systemPromptPolicy) {
             $brokerResultValue['SystemPrompts'] = Get-SystemPromptEvidenceV1 -Runtime $systemPromptRuntime
+        }
+        if ($guestSetupPolicy) {
+            $brokerResultValue['GuestSetup'] = $guestSetupEvidence
         }
         if ($expectGuestPowerOff) {
             $brokerResultValue['ExpectGuestPowerOff'] = $true
