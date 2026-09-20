@@ -180,6 +180,99 @@ try {
     }
     $checks.Add('client-exact-identity-normalized')
     Assert-Rejected 'client-hash-drift-denied' { Resolve-GuestSetupClientExecutable -Artifact $artifact -RelativePath 'setup\Bootstrap.exe' -ExpectedSha256 ('0' * 64) } 'differs'
+
+    # Exercise the real completion/remoting/broker boundaries with an inert process.
+    # No executable, guest session, or host security configuration is used.
+    $setupAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $sourceRoot 'GuestSetup.ps1'), [ref]$tokens, [ref]$parseErrors)
+    if ($parseErrors.Count -gt 0) { throw $parseErrors[0].Message }
+    $completionAst = $setupAst.Find({ param($node)
+        $node -is [Management.Automation.Language.TryStatementAst] -and
+        $node.Body.Statements[0].Extent.Text.StartsWith('$stdoutTask =')
+    }, $true)
+    $completeSetup = [scriptblock]::Create($completionAst.Extent.Text)
+    $brokerAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $sourceRoot 'HostBroker.ps1'), [ref]$tokens, [ref]$parseErrors)
+    if ($parseErrors.Count -gt 0) { throw $parseErrors[0].Message }
+    $brokerSetupAst = $brokerAst.Find({ param($node)
+        $node -is [Management.Automation.Language.TryStatementAst] -and
+        $node.Body.Statements[0].Extent.Text.StartsWith('$guestSetupEvidence = Invoke-GuestSetupV1')
+    }, $true)
+    $brokerSetup = [scriptblock]::Create($brokerSetupAst.Extent.Text)
+    $writerAst = $brokerAst.Find({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Write-JsonAtomic'
+    }, $true)
+    . ([scriptblock]::Create($writerAst.Extent.Text))
+    $resultAst = $brokerAst.Find({ param($node)
+        $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Left.Extent.Text -ceq '$brokerResultValue[''GuestSetup'']'
+    }, $true)
+    $setTerminalEvidence = [scriptblock]::Create($resultAst.Extent.Text)
+    & {
+        function Invoke-Command { param($Session, $ScriptBlock, $ArgumentList, [switch] $AsJob, $ErrorAction) [pscustomobject]@{ State = 'Completed' } }
+        function Receive-Job { param($Job, $ErrorAction) $remoteEvidence }
+        function Remove-Job { param($Job, [switch] $Force, $ErrorAction) }
+        $session = [Runtime.Serialization.FormatterServices]::GetUninitializedObject([Management.Automation.Runspaces.PSSession])
+        $guestSetupPolicy = Resolve-GuestSetupPolicyV1 -Request (New-SetupRequest -WithSystemPrompts) -PayloadManifest $manifest
+        $guestPayloadRoot = Join-Path $testRoot 'payload'
+        $guestSetupRoot = Join-Path $testRoot 'guest-setup'
+        $requestId = 'executable-test-setup-contract'
+        $executionDeadlineUtc = [DateTime]::UtcNow.AddMinutes(5)
+        foreach ($exitCode in @(0, 2)) {
+            $process = [pscustomobject]@{
+                Id = 1234; ExitCode = $exitCode; Disposed = $false
+                StandardOutput = [pscustomobject]@{ Text = ('O' * 65537) }
+                StandardError = [pscustomobject]@{ Text = ('E' * 65537) }
+            }
+            foreach ($reader in @($process.StandardOutput, $process.StandardError)) {
+                $reader | Add-Member ScriptMethod ReadToEndAsync { [pscustomobject]@{ Result = $this.Text } }
+            }
+            $process | Add-Member ScriptMethod WaitForExit { if ($args.Count -gt 0) { $true } }
+            $process | Add-Member ScriptMethod Dispose { $this.Disposed = $true }
+            $SetupRoot = Join-Path $testRoot "guest-$exitCode"
+            $null = New-Item -ItemType Directory -Path $SetupRoot
+            $EvidenceFileName = 'guest-setup.json'
+            $RelativePath = $guestSetupPolicy.ExecutableRelativePath
+            $ExpectedSha256 = $guestSetupPolicy.ExecutableSha256
+            $stagedExecutable = Join-Path $SetupRoot 'Bootstrap.exe'
+            $stagedSha256 = $ExpectedSha256
+            $Arguments = $guestSetupPolicy.Arguments
+            $TimeoutSeconds = $guestSetupPolicy.TimeoutSeconds
+            $startedUtc = [DateTime]::UtcNow
+            $identity = [pscustomobject]@{ Name = 'TEST\GuestAdmin'; User = [pscustomobject]@{ Value = 'S-1-5-21-1-2-3-1001' } }
+            $remoteEvidence = & $completeSetup
+            if (-not $process.Disposed -or -not (Test-Path -LiteralPath (Join-Path $SetupRoot $EvidenceFileName))) { throw 'Guest completion did not persist evidence and dispose its process.' }
+
+            $ResultRoot = Join-Path $testRoot "result-$exitCode"
+            $guestSetupEvidence = $null; $failureKind = $null; $errorMessage = $null
+            try { . $brokerSetup } catch { $errorMessage = $_.Exception.Message }
+            if ($exitCode -eq 0) {
+                if ($errorMessage) { throw "Successful setup was rejected: $errorMessage" }
+            }
+            elseif ($failureKind -cne 'GuestSetupFailed' -or $errorMessage -cne 'GuestSetup executable returned exit code 2.') {
+                throw 'Nonzero setup lost its failure classification or exit-code message.'
+            }
+            $brokerResultValue = @{}
+            . $setTerminalEvidence
+            $saved = Get-Content -LiteralPath (Join-Path $ResultRoot 'broker-guest-setup.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($saved.ExitCode -ne $exitCode -or $saved.Succeeded -ne ($exitCode -eq 0) -or
+                $saved.ProcessId -ne 1234 -or $saved.Identity.Name -cne $identity.Name -or
+                $saved.ExecutableSha256 -cne $ExpectedSha256 -or $saved.StagedExecutableSha256 -cne $ExpectedSha256 -or
+                $saved.Stdout -cne ('O' * 65536) -or $saved.Stderr -cne ('E' * 65536) -or
+                -not $saved.OutputTruncated.Stdout -or -not $saved.OutputTruncated.Stderr -or
+                ($brokerResultValue.GuestSetup | ConvertTo-Json -Depth 8 -Compress) -cne ($saved | ConvertTo-Json -Depth 8 -Compress)) {
+                throw 'Broker evidence lost the bounded output, exit status, or process identity.'
+            }
+            $checks.Add("completed-setup-$exitCode-preserves-bounded-evidence")
+        }
+        $remoteEvidence.RequestId = 'another-request'
+        Assert-Rejected 'failed-setup-evidence-still-request-bound' {
+            Invoke-GuestSetupV1 -Session $session -Policy $guestSetupPolicy -GuestPayloadRoot $guestPayloadRoot -GuestSetupRoot $guestSetupRoot -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
+        } 'does not match'
+        $remoteEvidence.RequestId = $requestId
+        $remoteEvidence.Succeeded = $true
+        Assert-Rejected 'failed-setup-cannot-claim-success' {
+            Invoke-GuestSetupV1 -Session $session -Policy $guestSetupPolicy -GuestPayloadRoot $guestPayloadRoot -GuestSetupRoot $guestSetupRoot -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
+        } 'does not match'
+    }
 }
 finally {
     $resolvedRoot = [IO.Path]::GetFullPath($testRoot)

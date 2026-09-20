@@ -3827,12 +3827,14 @@ function Invoke-GuestRequest {
                 $guestSetupEvidence = Invoke-GuestSetupV1 -Session $session -Policy $guestSetupPolicy -GuestPayloadRoot $guestPayloadRoot -GuestSetupRoot $guestSetupRoot -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc -ActivityCheck {
                     Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
                 }
+                # Preserve normalized diagnostics before failing and recycling the disposable guest.
+                Write-JsonAtomic -Path (Join-Path $ResultRoot 'broker-guest-setup.json') -Value $guestSetupEvidence
+                if (-not $guestSetupEvidence.Succeeded) { throw "GuestSetup executable returned exit code $($guestSetupEvidence.ExitCode)." }
             }
             catch {
                 $failureKind = 'GuestSetupFailed'
                 throw
             }
-            Write-JsonAtomic -Path (Join-Path $ResultRoot 'broker-guest-setup.json') -Value $guestSetupEvidence
             Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
         }
         $failureStage = 'SubmittingGuestJob'

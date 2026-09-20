@@ -312,7 +312,6 @@ function Invoke-GuestSetupV1 {
                 [IO.File]::Move($temporaryEvidencePath, $evidencePath)
             }
             finally { if (Test-Path -LiteralPath $temporaryEvidencePath) { Remove-Item -LiteralPath $temporaryEvidencePath -Force } }
-            if ($process.ExitCode -ne 0) { throw "GuestSetup executable returned exit code $($process.ExitCode)." }
             [pscustomobject]$evidence
         }
         finally { $process.Dispose() }
@@ -351,7 +350,8 @@ function Invoke-GuestSetupV1 {
         })
         if ($results.Count -ne 1) { throw 'GuestSetup returned no normalized evidence.' }
         $evidence = $results[0]
-        if ([int]$evidence.FormatVersion -ne 1 -or -not [bool]$evidence.Succeeded -or [int]$evidence.ExitCode -ne 0 -or
+        if ([int]$evidence.FormatVersion -ne 1 -or $evidence.Succeeded -isnot [bool] -or
+            [bool]$evidence.Succeeded -ne ([int]$evidence.ExitCode -eq 0) -or
             -not [string]::Equals([string]$evidence.RequestId, $RequestId, [StringComparison]::Ordinal) -or
             -not [string]::Equals([string]$evidence.ExecutableRelativePath, [string]$Policy.ExecutableRelativePath, [StringComparison]::Ordinal) -or
             -not [string]::Equals([string]$evidence.ExecutableSha256, [string]$Policy.ExecutableSha256, [StringComparison]::Ordinal) -or
