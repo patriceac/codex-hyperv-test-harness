@@ -155,7 +155,7 @@ $brokerHealthy = $brokerProcessAlive -and $null -ne $heartbeatUtc -and ([DateTim
 $oldestQueuedSeconds = [double]0
 if ($queuedFiles.Count -gt 0) { $oldestQueuedSeconds = [double](($jobs | Where-Object OwnershipStatus -eq 'Queued' | Measure-Object AgeSeconds -Maximum).Maximum) }
 $repeatedFaults = @($poolWorkers | Where-Object { [int]$_.FaultRecoveryAttempts -ge 3 })
-$accountFaults = @($poolWorkers | Where-Object { $_.Status -notin @('Ready', 'Off', 'Leased', 'RunCompleted') -and [string]$_.LastFailureReason -match '^Guest(AuthenticationFailed|AccountPolicyInvalid):' })
+$accountFaults = @($poolWorkers | Where-Object { [int]$_.FaultRecoveryAttempts -gt 0 -and $_.Status -notin @('Ready', 'Off', 'Leased', 'RunCompleted') -and [string]$_.LastFailureReason -match '^Guest(AuthenticationFailed|AccountPolicyInvalid):' })
 $stalledLifecycles = @($poolWorkers | Where-Object {
     if ($_.Status -notin @('Starting', 'Recycling', 'Stopping') -or -not $_.ProcessStartUtc) { return $false }
     try { ([DateTime]::UtcNow - ([DateTime]$_.ProcessStartUtc).ToUniversalTime()).TotalSeconds -ge 300 }

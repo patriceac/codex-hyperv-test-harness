@@ -101,6 +101,11 @@ try {
     Write-TestJson -Path (Join-Path $root 'State\pool-state.json') -Value @{MaxWorkers=4;ReadyCount=0;Workers=$workers}
     Assert-True ((Read-QueueState -Root $root).HealthReasons -contains 'GuestAccountUnavailable') 'The first authentication failure was hidden until repeated retries.'
     $scenarios.Add('account-failure-is-detected-immediately')
+    $workers[0].Status = 'Starting'; $workers[0].FaultRecoveryAttempts = 0
+    $workers[0].ProcessStartUtc = [DateTime]::UtcNow.ToString('o')
+    Write-TestJson -Path (Join-Path $root 'State\pool-state.json') -Value @{MaxWorkers=4;ReadyCount=0;Workers=$workers}
+    Assert-True ((Read-QueueState -Root $root).PlatformHealthy) 'Historical authentication evidence raised a new alarm after successful recovery.'
+    $scenarios.Add('recovered-account-history-does-not-trigger-new-alarms')
 }
 finally {
     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
