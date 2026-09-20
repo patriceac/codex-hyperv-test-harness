@@ -1645,9 +1645,14 @@ function Wait-GuestSession {
     # disposable child reads that protected file itself.
     $null = $Credential
     $lastProbeError = 'No guest readiness response has been received.'
+    $throwReadinessDeadline = {
+        param($Cause)
+        if ($lastProbeError -like 'GuestAuthenticationFailed:*') { throw [Security.Authentication.AuthenticationException]::new($lastProbeError, $Cause) }
+        throw [TimeoutException]::new("Guest readiness deadline expired for $VmName. Last probe: $lastProbeError", $Cause)
+    }
     while ($true) {
         try { Assert-RequestActive -RequestId $RequestId -ExecutionDeadlineUtc $ExecutionDeadlineUtc }
-        catch [TimeoutException] { throw [TimeoutException]::new("Guest readiness deadline expired for $VmName. Last probe: $lastProbeError", $_.Exception) }
+        catch [TimeoutException] { & $throwReadinessDeadline $_.Exception }
         Write-BrokerState -Status 'StartingVm' -RequestId $RequestId -Message "Waiting for the interactive guest agent. $lastProbeError"
         $probeId = $RequestId + '-' + [Guid]::NewGuid().ToString('N')
         $probeOutputPath = Join-Path $probePath ($probeId + '.json')
@@ -1681,7 +1686,8 @@ function Wait-GuestSession {
                 if (-not $probeResult.Success) {
                     $lastProbeError = [string]$probeResult.Error
                     if ($probeResult.AuthenticationFailed -eq $true -or [string]$probeResult.ErrorFullyQualifiedId -match 'InvalidCredential') {
-                        throw [Security.Authentication.AuthenticationException]::new("GuestAuthenticationFailed: $VmName rejected the stored credential. Check the disposable account password expiry and credential identity. $lastProbeError")
+                        # PSDirect can reject credentials transiently while Windows is still booting.
+                        $lastProbeError = "GuestAuthenticationFailed: $VmName rejected the stored credential. Check the disposable account password expiry and credential identity. $lastProbeError"
                     }
                 }
                 else { $lastProbeError = 'The guest agent is absent, noninteractive, or has a stale heartbeat.' }
@@ -1711,7 +1717,7 @@ function Wait-GuestSession {
             throw
         }
         catch [TimeoutException] {
-            throw [TimeoutException]::new("Guest readiness deadline expired for $VmName. Last probe: $lastProbeError", $_.Exception)
+            & $throwReadinessDeadline $_.Exception
         }
         catch [Security.Authentication.AuthenticationException] {
             throw
@@ -1728,7 +1734,7 @@ function Wait-GuestSession {
             Remove-Item -LiteralPath ($probeOutputPath + '.tmp') -Force -ErrorAction SilentlyContinue
         }
         try { Assert-RequestActive -RequestId $RequestId -ExecutionDeadlineUtc $ExecutionDeadlineUtc }
-        catch [TimeoutException] { throw [TimeoutException]::new("Guest readiness deadline expired for $VmName. Last probe: $lastProbeError", $_.Exception) }
+        catch [TimeoutException] { & $throwReadinessDeadline $_.Exception }
         Start-Sleep -Seconds 2
     }
 }

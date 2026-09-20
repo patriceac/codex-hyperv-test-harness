@@ -16,7 +16,7 @@ $script:stopped = 0
 $script:mode = 'Ready'
 function Assert-RequestActive {
     param($RequestId, $ExecutionDeadlineUtc)
-    if ($script:stopped -gt 0) { throw [TimeoutException]::new('Synthetic overall deadline.') }
+    if ($script:stopped -ge $(if ($script:mode -eq 'TransientAuthentication') { 2 } else { 1 })) { throw [TimeoutException]::new('Synthetic overall deadline.') }
 }
 function Write-BrokerState { param($Status, $RequestId, $Message) }
 function Stop-GuestProbeProcess { param($Process, $LeasePath) $script:stopped++ }
@@ -25,7 +25,8 @@ function Start-GuestSessionProbe {
     if ($script:mode -ne 'Hung') {
         $state = @{Ready=$true;UserInteractive=$true;HeartbeatUtc=[DateTime]::UtcNow.ToString('o');GuestAccountPolicyHealthy=($script:mode -ne 'AccountPolicy')}
         if ($script:mode -eq 'Stale') { $state.HeartbeatUtc = [DateTime]::UtcNow.AddDays(-1).ToString('o') }
-        @{Success=($script:mode -ne 'Authentication');State=$state;Error='The credential is invalid.';ErrorFullyQualifiedId='PSSessionStateBroken';AuthenticationFailed=($script:mode -eq 'Authentication')} |
+        $authenticationFailed = $script:mode -eq 'Authentication' -or ($script:mode -eq 'TransientAuthentication' -and $script:stopped -eq 0)
+        @{Success=(-not $authenticationFailed);State=$state;Error='The credential is invalid.';ErrorFullyQualifiedId='PSSessionStateBroken';AuthenticationFailed=$authenticationFailed} |
             ConvertTo-Json | Set-Content -LiteralPath $OutputPath -Encoding UTF8
     }
     $process = [pscustomobject]@{HasExited=($script:mode -ne 'Hung');ExitCode=0}
@@ -35,17 +36,18 @@ function Start-GuestSessionProbe {
 $credential = New-Object Management.Automation.PSCredential('Synthetic', (ConvertTo-SecureString 'synthetic' -AsPlainText -Force))
 $scenarios = @()
 try {
-    foreach ($case in @('Ready', 'Authentication', 'AccountPolicy', 'Stale', 'Hung')) {
+    foreach ($case in @('Ready', 'Authentication', 'TransientAuthentication', 'AccountPolicy', 'Stale', 'Hung')) {
         $script:mode = $case; $script:stopped = 0; $failure = $null
         $started = [DateTime]::UtcNow
         try { $result = Wait-GuestSession -VmName 'Synthetic' -Credential $credential -NotBeforeUtc $started -RequestId 'synthetic' -ExecutionDeadlineUtc $started.AddMinutes(4) -ProbeTimeoutSeconds 1 }
         catch { $failure = $_.Exception }
-        if ($case -eq 'Ready') { Assert-True ($null -eq $failure -and $result.Ready) 'Fresh interactive readiness was rejected.' }
+        if ($case -in @('Ready','TransientAuthentication')) { Assert-True ($null -eq $failure -and $result.Ready) 'Fresh interactive readiness was rejected after a recoverable boot-time probe.' }
         elseif ($case -eq 'Authentication') { Assert-True ($failure -is [Security.Authentication.AuthenticationException] -and $failure.Message -like 'GuestAuthenticationFailed:*') 'Invalid credentials were hidden as a generic timeout.' }
         elseif ($case -eq 'AccountPolicy') { Assert-True ($failure -is [Security.Authentication.AuthenticationException] -and $failure.Message -like 'GuestAccountPolicyInvalid:*') 'An expiring automation account was accepted.' }
         elseif ($case -eq 'Stale') { Assert-True ($failure -is [TimeoutException] -and $failure.Message -like '*stale heartbeat*') 'Stale readiness lost its diagnostic or was accepted.' }
         else { Assert-True ($failure -is [TimeoutException] -and $failure.Message -like '*probe exceeded 1 seconds*' -and ([DateTime]::UtcNow-$started).TotalSeconds -lt 5) 'A hung probe consumed the overall readiness budget.' }
-        Assert-True ($script:stopped -eq 1 -and @(Get-ChildItem -LiteralPath $probePath -File).Count -eq 0) 'Probe process/output cleanup did not run.'
+        $expectedProbes = if ($case -eq 'TransientAuthentication') { 2 } else { 1 }
+        Assert-True ($script:stopped -eq $expectedProbes -and @(Get-ChildItem -LiteralPath $probePath -File).Count -eq 0) 'Probe process/output cleanup did not run.'
         $scenarios += $case
     }
     . (Join-Path $SourceRoot 'PoolCommon.ps1')
