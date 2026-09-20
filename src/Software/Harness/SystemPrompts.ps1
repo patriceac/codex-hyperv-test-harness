@@ -426,7 +426,8 @@ function Remove-SystemPromptQueryUserBlockRulesV1 {
     $rulesJson = ConvertTo-Json -Compress -Depth 8 -InputObject @($Rules)
     @(Invoke-Command -Session $Session -ErrorAction Stop -ScriptBlock {
         param($Path, $RulesJson)
-        $requestedRules = @($RulesJson | ConvertFrom-Json)
+        $parsedRules = $RulesJson | ConvertFrom-Json
+        $requestedRules = @($parsedRules)
         foreach ($requested in $requestedRules) {
             $name = [string]$requested.Name
             $nameMatch = [regex]::Match($name, '^(?<Protocol>TCP|UDP) Query User\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}.+$', [Text.RegularExpressions.RegexOptions]::CultureInvariant)

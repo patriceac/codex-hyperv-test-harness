@@ -111,6 +111,10 @@ $firewallPlan = Resolve-SystemPromptFirewallRulePlanV1 -Rules @($expectedAllow, 
     -RequestId 'system-prompt-test' -ExecutablePath $exactExecutable -Profiles @('Private')
 Assert-True (@($firewallPlan.ExpectedAllowRules).Count -eq 1 -and @($firewallPlan.QueryUserBlockRules).Count -eq 2) 'Exact firewall reconciliation did not isolate the broker allow and exact-app Query User blocks.'
 Assert-True (@($firewallPlan.QueryUserBlockRules | Where-Object { [string]$_.Program -eq 'D:\Payload\other.exe' }).Count -eq 0) 'Firewall reconciliation selected an unrelated application rule for removal.'
+$queryBlocksJson = ConvertTo-Json -Compress -Depth 8 -InputObject @($firewallPlan.QueryUserBlockRules)
+$parsedQueryBlocks = $queryBlocksJson | ConvertFrom-Json
+$roundTrippedQueryBlocks = @($parsedQueryBlocks)
+Assert-True ($roundTrippedQueryBlocks.Count -eq 2 -and [string]$roundTrippedQueryBlocks[0].Name -like 'TCP Query User*' -and [string]$roundTrippedQueryBlocks[1].Name -like 'UDP Query User*') 'Two Query User rules collapsed into one space-joined identity under Windows PowerShell 5.1.'
 
 $finalFirewallPlan = Resolve-SystemPromptFirewallRulePlanV1 -Rules @($expectedAllow, $unrelatedBlock) `
     -RequestId 'system-prompt-test' -ExecutablePath $exactExecutable -Profiles @('Private')
@@ -218,6 +222,7 @@ Assert-True ($moduleText.Contains("[TimeSpan]::FromSeconds(2)") -and $moduleText
 Assert-True ($moduleText.Contains('Waiting for the Windows Firewall prompt to finish rendering.')) 'Firewall authorization does not wait for its prompt UI to render.'
 Assert-True ($moduleText.Contains('The exact test executable already has firewall rules; prompt acceptance would be ambiguous.')) 'Firewall authorization no longer fails closed on pre-existing exact-application rules.'
 Assert-True ($moduleText.Contains('stable exact allow state without inbound block rules')) 'Firewall authorization no longer proves a stable post-dismissal allow-only state.'
+Assert-True ($moduleText.Contains('$parsedRules = $RulesJson | ConvertFrom-Json') -and $moduleText.Contains('$requestedRules = @($parsedRules)')) 'Query User removal does not preserve multiple JSON rules under Windows PowerShell 5.1.'
 Assert-True ($moduleText.Contains('$remainingRules = @(Get-NetFirewallRule -PolicyStore PersistentStore -ErrorAction Stop')) 'Post-removal Query User verification can suppress a PersistentStore read failure.'
 Assert-True ($workerText.Contains('ErrorFullyQualifiedId = $terminalErrorFullyQualifiedId') -and $workerText.Contains('ErrorScriptStackTrace = $terminalErrorScriptStackTrace')) 'Pool-worker fallback results do not preserve the original failure diagnostics.'
 Assert-True ($networkText.Contains("'RunGuestJobSystemPromptsV1'") -and $networkText.Contains("'RunGuestJobSetupSystemPromptsV1'")) 'Request-network validation does not accept both versioned system-prompt operations.'
