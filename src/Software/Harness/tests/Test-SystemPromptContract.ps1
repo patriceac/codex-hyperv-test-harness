@@ -14,6 +14,38 @@ function Copy-JsonObject {
     $Value | ConvertTo-Json -Depth 20 | ConvertFrom-Json
 }
 
+function New-TestFirewallRule {
+    param(
+        [string] $Name,
+        [string] $Program,
+        [string] $Action,
+        [string] $Protocol,
+        [string] $Profile = 'Any',
+        [string] $Direction = 'Inbound',
+        [string] $Enabled = 'True',
+        [int] $ApplicationFilterCount = 1,
+        [int] $MatchingApplicationFilterCount = 1,
+        [int] $PortFilterCount = 1,
+        [string] $PolicyStoreSourceType = 'Local',
+        [string] $DisplayName = $Name
+    )
+
+    [pscustomobject][ordered]@{
+        Name = $Name
+        DisplayName = $DisplayName
+        Direction = $Direction
+        Action = $Action
+        Enabled = $Enabled
+        Profile = $Profile
+        Program = $Program
+        ApplicationFilterCount = $ApplicationFilterCount
+        MatchingApplicationFilterCount = $MatchingApplicationFilterCount
+        Protocol = $Protocol
+        PortFilterCount = $PortFilterCount
+        PolicyStoreSourceType = $PolicyStoreSourceType
+    }
+}
+
 function Assert-Rejected {
     param([scriptblock] $Operation, [string] $ExpectedMessage, [string] $Scenario)
     $actual = $null
@@ -64,6 +96,48 @@ $combinedRequest | Add-Member -NotePropertyName GuestSetup -NotePropertyValue ([
 $combinedPolicy = Resolve-SystemPromptPolicyV1 -Request $combinedRequest -PayloadManifest $manifest
 Assert-True ($combinedPolicy.ExecutableSha256 -ceq $hash -and (@($combinedPolicy.Sequence) -join ',') -ceq 'Uac,WindowsFirewall') 'Combined guest-setup/system-prompt policy changed the exact application prompt identity.'
 $scenarios.Add('combined-operation-preserves-application-prompt-identity')
+
+$exactExecutable = 'D:\Payload\bin\app.exe'
+$expectedRuleName = 'CodexHarness-system-prompt-test-Private'
+$expectedAllow = New-TestFirewallRule -Name $expectedRuleName -DisplayName 'Codex Harness system-prompt-test Private' `
+    -Program $exactExecutable -Action Allow -Protocol Any -Profile Private
+$tcpQueryBlock = New-TestFirewallRule -Name 'TCP Query User{01234567-89AB-CDEF-0123-456789ABCDEF}D:\Payload\bin\app.exe' `
+    -Program $exactExecutable -Action Block -Protocol TCP
+$udpQueryBlock = New-TestFirewallRule -Name 'UDP Query User{FEDCBA98-7654-3210-FEDC-BA9876543210}D:\Payload\bin\app.exe' `
+    -Program $exactExecutable -Action Block -Protocol UDP
+$unrelatedBlock = New-TestFirewallRule -Name 'UDP Query User{AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}D:\Payload\other.exe' `
+    -Program 'D:\Payload\other.exe' -Action Block -Protocol UDP
+$firewallPlan = Resolve-SystemPromptFirewallRulePlanV1 -Rules @($expectedAllow, $tcpQueryBlock, $udpQueryBlock, $unrelatedBlock) `
+    -RequestId 'system-prompt-test' -ExecutablePath $exactExecutable -Profiles @('Private')
+Assert-True (@($firewallPlan.ExpectedAllowRules).Count -eq 1 -and @($firewallPlan.QueryUserBlockRules).Count -eq 2) 'Exact firewall reconciliation did not isolate the broker allow and exact-app Query User blocks.'
+Assert-True (@($firewallPlan.QueryUserBlockRules | Where-Object { [string]$_.Program -eq 'D:\Payload\other.exe' }).Count -eq 0) 'Firewall reconciliation selected an unrelated application rule for removal.'
+
+$finalFirewallPlan = Resolve-SystemPromptFirewallRulePlanV1 -Rules @($expectedAllow, $unrelatedBlock) `
+    -RequestId 'system-prompt-test' -ExecutablePath $exactExecutable -Profiles @('Private')
+Assert-True (@($finalFirewallPlan.ExpectedAllowRules).Count -eq 1 -and @($finalFirewallPlan.QueryUserBlockRules).Count -eq 0) 'Final firewall reconciliation did not prove an exact allow-only application state.'
+
+Assert-Rejected -Scenario 'duplicate-broker-allow' -ExpectedMessage 'exactly one broker-owned' -Operation {
+    Resolve-SystemPromptFirewallRulePlanV1 -Rules @($expectedAllow, (Copy-JsonObject $expectedAllow)) `
+        -RequestId 'system-prompt-test' -ExecutablePath $exactExecutable -Profiles @('Private')
+}
+$unexpectedBlock = New-TestFirewallRule -Name 'ThirdPartyBlock' -Program $exactExecutable -Action Block -Protocol UDP
+Assert-Rejected -Scenario 'non-query-user-block' -ExpectedMessage 'unexpected or ambiguous' -Operation {
+    Resolve-SystemPromptFirewallRulePlanV1 -Rules @($expectedAllow, $unexpectedBlock) `
+        -RequestId 'system-prompt-test' -ExecutablePath $exactExecutable -Profiles @('Private')
+}
+$ambiguousQueryBlock = Copy-JsonObject $tcpQueryBlock
+$ambiguousQueryBlock.ApplicationFilterCount = 2
+Assert-Rejected -Scenario 'ambiguous-query-user-block' -ExpectedMessage 'unexpected or ambiguous' -Operation {
+    Resolve-SystemPromptFirewallRulePlanV1 -Rules @($expectedAllow, $ambiguousQueryBlock) `
+        -RequestId 'system-prompt-test' -ExecutablePath $exactExecutable -Profiles @('Private')
+}
+$protocolMismatch = Copy-JsonObject $tcpQueryBlock
+$protocolMismatch.Protocol = 'UDP'
+Assert-Rejected -Scenario 'query-user-protocol-mismatch' -ExpectedMessage 'unexpected or ambiguous' -Operation {
+    Resolve-SystemPromptFirewallRulePlanV1 -Rules @($expectedAllow, $protocolMismatch) `
+        -RequestId 'system-prompt-test' -ExecutablePath $exactExecutable -Profiles @('Private')
+}
+$scenarios.Add('firewall-query-user-reconciliation-is-exact-and-fail-closed')
 
 $runtime = [pscustomobject][ordered]@{
     Policy = $policy
@@ -126,6 +200,11 @@ foreach ($required in @(
     'AllowUserPorts',
     'DisabledInterfaceAliases',
     'New-NetFirewallRule',
+    'Remove-NetFirewallRule',
+    'PersistentStore',
+    'Query User',
+    'RemovedQueryUserBlockRules',
+    'ExactApplicationInboundBlockRuleCount',
     'ExactInboundFirewallRules',
     'UAC acceptance did not produce the exact hashed executable with an elevated token.'
 )) {
@@ -137,6 +216,9 @@ Assert-True ($moduleText.Contains('if ($bytes.Length -lt $pixelBytes)') -and $mo
 Assert-True (-not $moduleText.Contains("Caption -eq 'Virtual Machine'")) 'System-prompt VM lookup still depends on localized Hyper-V Caption text.'
 Assert-True ($moduleText.Contains("[TimeSpan]::FromSeconds(2)") -and $moduleText.Contains('Start-Sleep -Milliseconds 250')) 'UAC input is not delayed until the consent UI can render and process focus changes.'
 Assert-True ($moduleText.Contains('Waiting for the Windows Firewall prompt to finish rendering.')) 'Firewall authorization does not wait for its prompt UI to render.'
+Assert-True ($moduleText.Contains('The exact test executable already has firewall rules; prompt acceptance would be ambiguous.')) 'Firewall authorization no longer fails closed on pre-existing exact-application rules.'
+Assert-True ($moduleText.Contains('stable exact allow state without inbound block rules')) 'Firewall authorization no longer proves a stable post-dismissal allow-only state.'
+Assert-True ($moduleText.Contains('$remainingRules = @(Get-NetFirewallRule -PolicyStore PersistentStore -ErrorAction Stop')) 'Post-removal Query User verification can suppress a PersistentStore read failure.'
 Assert-True ($workerText.Contains('ErrorFullyQualifiedId = $terminalErrorFullyQualifiedId') -and $workerText.Contains('ErrorScriptStackTrace = $terminalErrorScriptStackTrace')) 'Pool-worker fallback results do not preserve the original failure diagnostics.'
 Assert-True ($networkText.Contains("'RunGuestJobSystemPromptsV1'") -and $networkText.Contains("'RunGuestJobSetupSystemPromptsV1'")) 'Request-network validation does not accept both versioned system-prompt operations.'
 Assert-True ($installerText.Contains("'SystemPrompts.ps1'")) 'Broker installation does not copy and hash SystemPrompts.ps1.'

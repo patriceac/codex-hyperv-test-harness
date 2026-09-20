@@ -1953,15 +1953,37 @@ try {
                             }
                         }
                         elseif ($expectedKind -eq 'WindowsFirewall') {
-                            if ([string]$acceptance.AuthorizationMethod -cne 'ExactInboundFirewallRules' -or
+                            $blockCountProperty = @($acceptance.PSObject.Properties | Where-Object { $_.Name -ceq 'ExactApplicationInboundBlockRuleCount' }) | Select-Object -First 1
+                            $removedBlocksProperty = @($acceptance.PSObject.Properties | Where-Object { $_.Name -ceq 'RemovedQueryUserBlockRules' }) | Select-Object -First 1
+                            if ([string]$acceptance.AuthorizationMethod -cne 'ExactInboundFirewallRulesWithQueryUserReconciliation' -or
                                 (@($acceptance.FirewallProfiles) -join '|') -cne ($expectedProfiles -join '|') -or
-                                @($acceptance.FirewallRules).Count -ne @($expectedProfiles).Count) {
-                                $systemPromptContractEvidenceFailures += 'Windows Firewall acceptance does not prove every exact requested profile rule.'
+                                @($acceptance.FirewallRules).Count -ne @($expectedProfiles).Count -or
+                                -not $blockCountProperty -or [int]$blockCountProperty.Value -ne 0 -or -not $removedBlocksProperty) {
+                                $systemPromptContractEvidenceFailures += 'Windows Firewall acceptance does not prove every exact requested profile rule and a zero-block final state.'
                             }
+                            $seenProfiles = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
                             foreach ($rule in @($acceptance.FirewallRules)) {
-                                if ([string]$rule.Direction -cne 'Inbound' -or [string]$rule.Action -cne 'Allow' -or
+                                if ([string]$rule.Name -cne ('CodexHarness-' + $requestId + '-' + [string]$rule.Profile) -or
+                                    [string]$rule.DisplayName -cne ('Codex Harness ' + $requestId + ' ' + [string]$rule.Profile) -or
+                                    [string]$rule.Direction -cne 'Inbound' -or [string]$rule.Action -cne 'Allow' -or
+                                    [string]$rule.Enabled -cne 'True' -or [string]$rule.Protocol -cne 'Any' -or
+                                    [string]$rule.PolicyStoreSourceType -cne 'Local' -or
+                                    [int]$rule.ApplicationFilterCount -ne 1 -or [int]$rule.MatchingApplicationFilterCount -ne 1 -or
+                                    [int]$rule.PortFilterCount -ne 1 -or
+                                    [string]$rule.Profile -notin $expectedProfiles -or -not $seenProfiles.Add([string]$rule.Profile) -or
                                     -not [string]::Equals([string]$rule.Program, [string]$acceptance.ObservedExecutablePath, [StringComparison]::OrdinalIgnoreCase)) {
                                     $systemPromptContractEvidenceFailures += 'Windows Firewall acceptance contains a broad or mismatched rule.'
+                                }
+                            }
+                            $seenRemovedNames = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+                            foreach ($rule in @($acceptance.RemovedQueryUserBlockRules)) {
+                                $queryName = [regex]::Match([string]$rule.Name, '^(?<Protocol>TCP|UDP) Query User\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}.+$', [Text.RegularExpressions.RegexOptions]::CultureInvariant)
+                                if (-not $queryName.Success -or -not $seenRemovedNames.Add([string]$rule.Name) -or
+                                    [string]$rule.Direction -cne 'Inbound' -or [string]$rule.Action -cne 'Block' -or
+                                    [string]$rule.Enabled -cne 'True' -or [string]$rule.PolicyStoreSourceType -cne 'Local' -or
+                                    -not [string]::Equals([string]$rule.Protocol, [string]$queryName.Groups['Protocol'].Value, [StringComparison]::OrdinalIgnoreCase) -or
+                                    -not [string]::Equals([string]$rule.Program, [string]$acceptance.ObservedExecutablePath, [StringComparison]::OrdinalIgnoreCase)) {
+                                    $systemPromptContractEvidenceFailures += 'Windows Firewall acceptance contains an ambiguous Query User block reconciliation record.'
                                 }
                             }
                         }

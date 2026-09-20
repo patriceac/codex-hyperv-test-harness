@@ -96,6 +96,12 @@ if ($acceptanceSource -match '\.Parameters\.ActionsPath' -or
     $acceptanceSource -notmatch "Parameters\['ActionsPath'\]") {
     throw "Release acceptance does not handle the expected-power-off test's absent optional ActionsPath safely."
 }
+if ($acceptanceSource -notmatch 'ExactInboundFirewallRulesWithQueryUserReconciliation' -or
+    $acceptanceSource -notmatch 'ExactApplicationInboundBlockRuleCount' -or
+    $acceptanceSource -notmatch 'RemovedQueryUserBlockRules' -or
+    $acceptanceSource -match 'RemovedQueryUserBlockRules\)\.Count\s*-lt\s*1') {
+    throw 'Release acceptance does not prove post-dismissal Query User reconciliation and a final exact allow-only state.'
+}
 $scenarios.Add('five-path-isolated-acceptance-is-exactly-bound')
 
 if ($acceptanceSource -notmatch "Invoke-PoolAuditUnderMaintenance -Name 'pre-acceptance-audit'" -or

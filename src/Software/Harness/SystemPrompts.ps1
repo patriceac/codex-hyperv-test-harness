@@ -330,21 +330,143 @@ function Get-SystemPromptFirewallRulesV1 {
 
     @(Invoke-Command -Session $Session -ErrorAction Stop -ScriptBlock {
         param($Path)
-        foreach ($rule in @(Get-NetFirewallRule -PolicyStore ActiveStore -ErrorAction Stop | Where-Object {
-            [string]$_.Direction -eq 'Inbound' -and [string]$_.Enabled -eq 'True'
-        })) {
-            $application = $rule | Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue
-            if ($application -and [string]::Equals([string]$application.Program, $Path, [StringComparison]::OrdinalIgnoreCase)) {
-                [pscustomobject][ordered]@{
-                    Name = [string]$rule.Name
-                    DisplayName = [string]$rule.DisplayName
-                    Action = [string]$rule.Action
-                    Profile = [string]$rule.Profile
-                    Program = [string]$application.Program
+        $exactApplicationFilters = @(Get-NetFirewallApplicationFilter -PolicyStore ActiveStore -ErrorAction Stop | Where-Object {
+            [string]::Equals([string]$_.Program, $Path, [StringComparison]::OrdinalIgnoreCase)
+        })
+        foreach ($exactApplicationFilter in $exactApplicationFilters) {
+            $associatedRules = @(Get-NetFirewallRule -PolicyStore ActiveStore `
+                -AssociatedNetFirewallApplicationFilter $exactApplicationFilter -ErrorAction Stop)
+            foreach ($rule in $associatedRules) {
+                $applications = @($rule | Get-NetFirewallApplicationFilter -ErrorAction Stop)
+                $matchingApplications = @($applications | Where-Object {
+                    [string]::Equals([string]$_.Program, $Path, [StringComparison]::OrdinalIgnoreCase)
+                })
+                if ($matchingApplications.Count -gt 0) {
+                    $ports = @($rule | Get-NetFirewallPortFilter -ErrorAction Stop)
+                    [pscustomobject][ordered]@{
+                        Name = [string]$rule.Name
+                        DisplayName = [string]$rule.DisplayName
+                        Direction = [string]$rule.Direction
+                        Action = [string]$rule.Action
+                        Enabled = [string]$rule.Enabled
+                        Profile = [string]$rule.Profile
+                        Program = [string]$matchingApplications[0].Program
+                        ApplicationFilterCount = $applications.Count
+                        MatchingApplicationFilterCount = $matchingApplications.Count
+                        Protocol = if ($ports.Count -eq 1) { [string]$ports[0].Protocol } else { $null }
+                        PortFilterCount = $ports.Count
+                        PolicyStoreSourceType = [string]$rule.PolicyStoreSourceType
+                    }
                 }
             }
         }
     } -ArgumentList $ExecutablePath)
+}
+
+function Resolve-SystemPromptFirewallRulePlanV1 {
+    param(
+        [object[]] $Rules,
+        [Parameter(Mandatory = $true)] [string] $RequestId,
+        [Parameter(Mandatory = $true)] [string] $ExecutablePath,
+        [Parameter(Mandatory = $true)] [string[]] $Profiles
+    )
+
+    $exactRules = @($Rules | Where-Object {
+        [string]::Equals([string]$_.Program, $ExecutablePath, [StringComparison]::OrdinalIgnoreCase)
+    })
+    $expectedRules = New-Object Collections.Generic.List[object]
+    $expectedNames = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach ($profile in @($Profiles)) {
+        $name = 'CodexHarness-' + $RequestId + '-' + $profile
+        $null = $expectedNames.Add($name)
+        $matches = @($exactRules | Where-Object { [string]$_.Name -ceq $name })
+        if ($matches.Count -ne 1) {
+            throw "Windows Firewall acceptance requires exactly one broker-owned $profile allow rule for the exact executable."
+        }
+        $rule = $matches[0]
+        if ([string]$rule.DisplayName -cne ('Codex Harness ' + $RequestId + ' ' + $profile) -or
+            [string]$rule.Direction -cne 'Inbound' -or [string]$rule.Action -cne 'Allow' -or
+            [string]$rule.Enabled -cne 'True' -or [string]$rule.Profile -cne $profile -or
+            [int]$rule.ApplicationFilterCount -ne 1 -or [int]$rule.MatchingApplicationFilterCount -ne 1 -or
+            [int]$rule.PortFilterCount -ne 1 -or [string]$rule.Protocol -cne 'Any' -or
+            [string]$rule.PolicyStoreSourceType -cne 'Local') {
+            throw "The broker-owned $profile firewall rule no longer has its exact requested allow state."
+        }
+        $expectedRules.Add($rule)
+    }
+
+    $queryUserBlocks = New-Object Collections.Generic.List[object]
+    foreach ($rule in @($exactRules | Where-Object { -not $expectedNames.Contains([string]$_.Name) })) {
+        $match = [regex]::Match([string]$rule.Name, '^(?<Protocol>TCP|UDP) Query User\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}.+$', [Text.RegularExpressions.RegexOptions]::CultureInvariant)
+        if (-not $match.Success -or [string]$rule.Direction -cne 'Inbound' -or
+            [string]$rule.Action -cne 'Block' -or [string]$rule.Enabled -cne 'True' -or
+            [int]$rule.ApplicationFilterCount -ne 1 -or [int]$rule.MatchingApplicationFilterCount -ne 1 -or
+            [int]$rule.PortFilterCount -ne 1 -or
+            -not [string]::Equals([string]$rule.Protocol, [string]$match.Groups['Protocol'].Value, [StringComparison]::OrdinalIgnoreCase) -or
+            [string]$rule.PolicyStoreSourceType -cne 'Local') {
+            throw 'Windows Firewall acceptance found an unexpected or ambiguous rule for the exact executable.'
+        }
+        $queryUserBlocks.Add($rule)
+    }
+
+    [pscustomobject][ordered]@{
+        ExpectedAllowRules = $expectedRules.ToArray()
+        QueryUserBlockRules = $queryUserBlocks.ToArray()
+    }
+}
+
+function Remove-SystemPromptQueryUserBlockRulesV1 {
+    param(
+        [Parameter(Mandatory = $true)] [Management.Automation.Runspaces.PSSession] $Session,
+        [Parameter(Mandatory = $true)] [string] $ExecutablePath,
+        [object[]] $Rules
+    )
+
+    if (@($Rules).Count -eq 0) { return @() }
+    $rulesJson = ConvertTo-Json -Compress -Depth 8 -InputObject @($Rules)
+    @(Invoke-Command -Session $Session -ErrorAction Stop -ScriptBlock {
+        param($Path, $RulesJson)
+        $requestedRules = @($RulesJson | ConvertFrom-Json)
+        foreach ($requested in $requestedRules) {
+            $name = [string]$requested.Name
+            $nameMatch = [regex]::Match($name, '^(?<Protocol>TCP|UDP) Query User\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}.+$', [Text.RegularExpressions.RegexOptions]::CultureInvariant)
+            if (-not $nameMatch.Success) { throw "Refusing to remove a non-Query-User firewall rule: $name" }
+
+            $persistentRules = @(Get-NetFirewallRule -PolicyStore PersistentStore -Name $name -ErrorAction SilentlyContinue)
+            if ($persistentRules.Count -ne 1) { throw "Query User firewall rule did not resolve uniquely in PersistentStore: $name" }
+            $rule = $persistentRules[0]
+            $applications = @($rule | Get-NetFirewallApplicationFilter -ErrorAction Stop)
+            $ports = @($rule | Get-NetFirewallPortFilter -ErrorAction Stop)
+            if ([string]$rule.Name -cne $name -or [string]$rule.Direction -cne 'Inbound' -or
+                [string]$rule.Action -cne 'Block' -or [string]$rule.Enabled -cne 'True' -or
+                [string]$rule.PolicyStoreSourceType -cne 'Local' -or
+                $applications.Count -ne 1 -or -not [string]::Equals([string]$applications[0].Program, $Path, [StringComparison]::OrdinalIgnoreCase) -or
+                $ports.Count -ne 1 -or
+                -not [string]::Equals([string]$ports[0].Protocol, [string]$nameMatch.Groups['Protocol'].Value, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "Query User firewall rule changed before bounded removal: $name"
+            }
+
+            $evidence = [pscustomobject][ordered]@{
+                Name = [string]$rule.Name
+                DisplayName = [string]$rule.DisplayName
+                Direction = [string]$rule.Direction
+                Action = [string]$rule.Action
+                Enabled = [string]$rule.Enabled
+                Profile = [string]$rule.Profile
+                Program = [string]$applications[0].Program
+                Protocol = [string]$ports[0].Protocol
+                PolicyStoreSourceType = [string]$rule.PolicyStoreSourceType
+            }
+            $rule | Remove-NetFirewallRule -Confirm:$false -ErrorAction Stop
+            $remainingRules = @(Get-NetFirewallRule -PolicyStore PersistentStore -ErrorAction Stop | Where-Object {
+                [string]$_.Name -ceq $name
+            })
+            if ($remainingRules.Count -ne 0) {
+                throw "Query User firewall rule remained after bounded removal: $name"
+            }
+            $evidence
+        }
+    } -ArgumentList $ExecutablePath, $rulesJson)
 }
 
 function Prepare-SystemPromptFirewallProfilesV1 {
@@ -437,7 +559,7 @@ function New-SystemPromptRuntimeV1 {
     $firewallProfileReadiness = @()
     if ($Policy.AcceptWindowsFirewall) {
         $priorRules = @(Get-SystemPromptFirewallRulesV1 -Session $Session -ExecutablePath $GuestExecutablePath)
-        if ($priorRules.Count -ne 0) { throw 'The exact test executable already has active inbound firewall rules; prompt acceptance would be ambiguous.' }
+        if ($priorRules.Count -ne 0) { throw 'The exact test executable already has firewall rules; prompt acceptance would be ambiguous.' }
         $firewallProfileReadiness = @(Prepare-SystemPromptFirewallProfilesV1 -Session $Session -Profiles @($Policy.FirewallProfiles))
     }
 
@@ -560,6 +682,52 @@ function Invoke-SystemPromptServiceV1 {
         if (@($verified.FirewallProcesses | Where-Object { [int]$_.ProcessId -eq [int]$matches[0].ProcessId }).Count -ne 0) {
             throw 'The Windows Firewall prompt remained active after exact authorization and dismissal.'
         }
+
+        # Windows creates exact-application Query User block rules when its stale
+        # notification is cancelled. Reconcile only those new, locally generated
+        # rules and require a stable exact allow-only state before claiming success.
+        $removedQueryUserBlocks = New-Object Collections.Generic.List[object]
+        $removedNames = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+        $cleanSinceUtc = $null
+        $reconciliationDeadlineUtc = [DateTime]::UtcNow.AddSeconds(10)
+        if ($reconciliationDeadlineUtc -gt [DateTime]$Runtime.PromptDeadlineUtc) {
+            $reconciliationDeadlineUtc = [DateTime]$Runtime.PromptDeadlineUtc
+        }
+        $finalFirewallPlan = $null
+        do {
+            if ($ActivityCheck) { & $ActivityCheck }
+            $currentRules = @(Get-SystemPromptFirewallRulesV1 -Session $Session -ExecutablePath $Runtime.GuestExecutablePath)
+            $currentPlan = Resolve-SystemPromptFirewallRulePlanV1 -Rules $currentRules -RequestId $Runtime.RequestId `
+                -ExecutablePath $Runtime.GuestExecutablePath -Profiles @($Runtime.Policy.FirewallProfiles)
+            $newBlocks = @($currentPlan.QueryUserBlockRules | Where-Object { -not $removedNames.Contains([string]$_.Name) })
+            if ($newBlocks.Count -gt 0) {
+                $removed = @(Remove-SystemPromptQueryUserBlockRulesV1 -Session $Session -ExecutablePath $Runtime.GuestExecutablePath -Rules $newBlocks)
+                if ($removed.Count -ne $newBlocks.Count) {
+                    throw 'Windows Firewall acceptance did not remove every exact Query User block rule.'
+                }
+                foreach ($rule in $removed) {
+                    $null = $removedNames.Add([string]$rule.Name)
+                    $removedQueryUserBlocks.Add($rule)
+                }
+                $cleanSinceUtc = $null
+            }
+            elseif (@($currentPlan.QueryUserBlockRules).Count -gt 0) {
+                $cleanSinceUtc = $null
+            }
+            elseif ($null -eq $cleanSinceUtc) {
+                $cleanSinceUtc = [DateTime]::UtcNow
+                $finalFirewallPlan = $currentPlan
+            }
+            elseif ([DateTime]::UtcNow - $cleanSinceUtc -ge [TimeSpan]::FromSeconds(2)) {
+                $finalFirewallPlan = $currentPlan
+                break
+            }
+            Start-Sleep -Milliseconds 250
+        } while ([DateTime]::UtcNow -lt $reconciliationDeadlineUtc)
+        if ($null -eq $cleanSinceUtc -or [DateTime]::UtcNow - $cleanSinceUtc -lt [TimeSpan]::FromSeconds(2) -or
+            $null -eq $finalFirewallPlan -or @($finalFirewallPlan.QueryUserBlockRules).Count -ne 0) {
+            throw 'Windows Firewall acceptance did not reach a stable exact allow state without inbound block rules.'
+        }
         $null = Save-SystemPromptVmFramebuffer -VmName $Runtime.VmName -Path (Join-Path $Runtime.ResultRoot $afterName)
         $Runtime.Acceptances.Add([pscustomobject][ordered]@{
             Kind = 'WindowsFirewall'
@@ -571,8 +739,10 @@ function Invoke-SystemPromptServiceV1 {
             ExpectedSha256 = [string]$Runtime.Policy.ExecutableSha256
             ObservedSha256 = [string]$observation.Application.Sha256
             FirewallProfiles = @($Runtime.Policy.FirewallProfiles)
-            FirewallRules = @($rules)
-            AuthorizationMethod = 'ExactInboundFirewallRules'
+            FirewallRules = @($finalFirewallPlan.ExpectedAllowRules)
+            RemovedQueryUserBlockRules = $removedQueryUserBlocks.ToArray()
+            ExactApplicationInboundBlockRuleCount = 0
+            AuthorizationMethod = 'ExactInboundFirewallRulesWithQueryUserReconciliation'
             AcceptedUtc = $acceptedUtc.ToString('o')
             BeforeScreenshot = $beforeName
             AfterScreenshot = $afterName

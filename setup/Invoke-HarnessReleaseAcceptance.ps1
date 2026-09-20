@@ -421,6 +421,23 @@ if (-not [bool]$systemPrompts.SystemPromptContractProven -or
     (@($systemPrompts.SystemPrompts.RequestedKinds) -join ',') -cne 'Uac,WindowsFirewall') {
     throw 'System-prompt acceptance did not prove ordered UAC and Windows Firewall authorization.'
 }
+$firewallAcceptances = @($systemPrompts.SystemPrompts.Acceptances | Where-Object { [string]$_.Kind -eq 'WindowsFirewall' })
+$firewallAcceptanceBlockCountProperty = if ($firewallAcceptances.Count -eq 1) {
+    @($firewallAcceptances[0].PSObject.Properties | Where-Object { $_.Name -ceq 'ExactApplicationInboundBlockRuleCount' }) | Select-Object -First 1
+} else { $null }
+$firewallAcceptanceRemovedBlocksProperty = if ($firewallAcceptances.Count -eq 1) {
+    @($firewallAcceptances[0].PSObject.Properties | Where-Object { $_.Name -ceq 'RemovedQueryUserBlockRules' }) | Select-Object -First 1
+} else { $null }
+if ($firewallAcceptances.Count -ne 1 -or -not $firewallAcceptanceBlockCountProperty -or -not $firewallAcceptanceRemovedBlocksProperty -or
+    [string]$firewallAcceptances[0].AuthorizationMethod -cne 'ExactInboundFirewallRulesWithQueryUserReconciliation' -or
+    [int]$firewallAcceptanceBlockCountProperty.Value -ne 0 -or
+    @($firewallAcceptances[0].FirewallRules).Count -ne @($systemPrompts.SystemPrompts.FirewallProfiles).Count -or
+    @($firewallAcceptances[0].RemovedQueryUserBlockRules | Where-Object {
+        [string]$_.Name -notlike '*Query User*' -or [string]$_.Action -cne 'Block' -or
+        [string]$_.Direction -cne 'Inbound' -or [string]$_.PolicyStoreSourceType -cne 'Local'
+    }).Count -ne 0) {
+    throw 'System-prompt acceptance did not prove bounded Query User block reconciliation and a final exact allow-only state.'
+}
 foreach ($fileName in @('system-prompt-uac-before.png', 'system-prompt-uac-after.png', 'system-prompt-firewall-before.png', 'system-prompt-firewall-after.png')) {
     if (-not (Test-Path -LiteralPath (Join-Path ([string]$systemPrompts.ResultPath) $fileName) -PathType Leaf)) {
         throw "System-prompt acceptance did not return $fileName."
