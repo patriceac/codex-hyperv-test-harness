@@ -67,7 +67,7 @@ function Resize-Partition {
 function Add-PartitionAccessPath {
     [CmdletBinding()]
     param([int] $DiskNumber, [int] $PartitionNumber, [string] $AccessPath)
-    if ($script:partitionSize -ne $script:maximumSize) { throw 'Payload partition was mounted before capacity expansion.' }
+    if (($script:maximumSize - $script:partitionSize) -ge [long]1MB) { throw 'Payload partition was mounted before capacity expansion.' }
     $script:accessPathCount++
 }
 
@@ -80,12 +80,13 @@ try {
 
     $script:resizeCount = 0
     $script:accessPathCount = 0
+    $script:partitionSize = $script:maximumSize - [long]512KB
     $null = Mount-PayloadVhdForSync -VhdxPath (Join-Path $testRoot 'already-sized.vhdx') -PayloadId ('B' * 64)
     if ($script:resizeCount -ne 0 -or $script:accessPathCount -ne 1) {
         throw 'An already full-size payload partition should mount without another resize.'
     }
 
-    [pscustomobject]@{ Success = $true; ScenarioCount = 2; Scenarios = @('expanded-before-mount', 'already-sized-noop') } | ConvertTo-Json -Depth 4
+    [pscustomobject]@{ Success = $true; ScenarioCount = 2; Scenarios = @('expanded-before-mount', 'sub-megabyte-noop') } | ConvertTo-Json -Depth 4
 }
 finally {
     $resolvedRoot = [IO.Path]::GetFullPath($testRoot)

@@ -380,7 +380,7 @@ function Mount-PayloadVhdForSync {
         }
         $partitionNumber = [int]$partition.PartitionNumber
         $supportedSize = Get-PartitionSupportedSize -DiskNumber $diskNumber -PartitionNumber $partitionNumber -ErrorAction Stop
-        if ([long]$supportedSize.SizeMax -gt [long]$partition.Size) {
+        if (([long]$supportedSize.SizeMax - [long]$partition.Size) -ge [long]1MB) {
             Resize-Partition -DiskNumber $diskNumber -PartitionNumber $partitionNumber -Size ([long]$supportedSize.SizeMax) -ErrorAction Stop | Out-Null
         }
         Add-PartitionAccessPath -DiskNumber $diskNumber -PartitionNumber $partitionNumber -AccessPath $accessPath -ErrorAction Stop | Out-Null
