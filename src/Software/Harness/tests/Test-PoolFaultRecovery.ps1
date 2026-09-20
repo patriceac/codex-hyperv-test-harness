@@ -245,6 +245,34 @@ finally {
     }
 }
 
+& {
+    # Exercise one real broker iteration without filesystem or VM operations.
+    foreach ($stub in @(
+        'New-Item', 'Test-Path', 'Recover-PoolBrokerState', 'Recover-OrphanedHostInputResources',
+        'Invoke-WithRequestNetworkLifecycleMutex', 'Reap-PoolProcesses', 'Reconcile-PoolRecoveryRequests',
+        'Complete-PoolQueuedTerminalRequests', 'Write-PoolQueuePositions', 'Route-LiveEvidenceRequests',
+        'Reconcile-LiveEvidenceCommands', 'Assign-PoolRequests', 'Ensure-PoolDemandCapacity',
+        'Ensure-PoolWarmSpareInvariant', 'Queue-FaultedPoolWorkerRecovery', 'Queue-ExpiredPoolWorkersForStop',
+        'Start-PendingPoolLifecycles', 'Test-PoolPayloadCleanupDue', 'Write-PoolBrokerSnapshot', 'Get-PoolQueuedFiles'
+    )) { Set-Item -Path ('Function:' + $stub) -Value {} }
+    function Write-BrokerState { param($Status, $Message) $script:observedBrokerStatus = $Status }
+    function Start-Sleep { throw [OperationCanceledException]::new('Synthetic iteration complete.') }
+    $maintenancePath = 'SyntheticMaintenance'
+    $script:states = @(New-SyntheticFaultState -WorkerId 1 -Status Recycling)
+    $script:states[0] | Add-Member -NotePropertyName LastFailureReason -NotePropertyValue 'GuestAuthenticationFailed: historical failure'
+    foreach ($attempts in 0..1) {
+        $script:states[0].FaultRecoveryAttempts = $attempts
+        $script:observedBrokerStatus = $null
+        try { Invoke-PoolBrokerLoop -Config $Config }
+        catch [OperationCanceledException] {
+            Assert-True ($_.Exception.Message -eq 'Synthetic iteration complete.') 'The broker failed before completing its status write.'
+        }
+        $expected = if ($attempts -eq 0) { 'Idle' } else { 'PoolDegraded' }
+        Assert-True ($script:observedBrokerStatus -eq $expected) "The broker reported $script:observedBrokerStatus for $attempts current account failures."
+        $scenarios.Add(('broker-account-status-requires-current-failure-' + $attempts))
+    }
+}
+
 [pscustomobject][ordered]@{
     Success = $true
     ScenarioCount = $scenarios.Count

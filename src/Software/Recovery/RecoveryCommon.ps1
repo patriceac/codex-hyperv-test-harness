@@ -289,7 +289,7 @@ function Copy-CodexRecoveryFileIncremental {
     $destination = Assert-CodexPathWithin -Path (Join-Path $bundle $relative) -Parent $bundle
     if (Test-Path -LiteralPath $destination) { throw "Incremental recovery destination already exists: $destination" }
 
-    $sourceItem = Get-Item -LiteralPath $source
+    $sourceItem = Get-Item -LiteralPath $source -Force
     $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
     $reused = $false
     $reuseFailure = $null
@@ -300,7 +300,7 @@ function Copy-CodexRecoveryFileIncremental {
         if ([long]$priorEntry.Length -eq [long]$sourceItem.Length -and
             [string]::Equals([string]$priorEntry.Sha256, $sourceHash, [StringComparison]::OrdinalIgnoreCase) -and
             (Test-Path -LiteralPath $priorPath -PathType Leaf)) {
-            $priorItem = Get-Item -LiteralPath $priorPath
+            $priorItem = Get-Item -LiteralPath $priorPath -Force
             if ([long]$priorItem.Length -eq [long]$sourceItem.Length) {
                 $priorHash = (Get-FileHash -LiteralPath $priorPath -Algorithm SHA256).Hash
                 if ([string]::Equals($priorHash, $sourceHash, [StringComparison]::OrdinalIgnoreCase)) {
@@ -433,7 +433,7 @@ function Test-CodexRecoveryBundleIntegrity {
             $failures.Add("Missing file: $relative")
             continue
         }
-        $item = Get-Item -LiteralPath $path
+        $item = Get-Item -LiteralPath $path -Force
         if ([long]$item.Length -ne [long]$entry.Length) {
             $failures.Add("Length mismatch: $relative")
             continue

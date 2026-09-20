@@ -1342,7 +1342,7 @@ function Invoke-PoolBrokerLoop {
         $queued = @(Get-PoolQueuedFiles).Count
         $faults = @($states | Where-Object {
             [int]$_.FaultRecoveryAttempts -ge 3 -or
-            ($_.Status -notin @('Ready', 'Off', 'Leased', 'RunCompleted') -and [string]$_.LastFailureReason -match '^Guest(AuthenticationFailed|AccountPolicyInvalid):')
+            ([int]$_.FaultRecoveryAttempts -gt 0 -and $_.Status -notin @('Ready', 'Off', 'Leased', 'RunCompleted') -and [string]$_.LastFailureReason -match '^Guest(AuthenticationFailed|AccountPolicyInvalid):')
         })
         $status = if ($maintenance) { 'Maintenance' } elseif ($faults.Count -gt 0) { 'PoolDegraded' } elseif ($active -gt 0) { 'PoolActive' } elseif ($ready -gt 0) { 'PoolWarm' } else { 'Idle' }
         Write-BrokerState -Status $status -Message ("Pool: active=$active ready=$ready queued=$queued failing=$($faults.Count).")

@@ -90,6 +90,17 @@ try {
     Assert-True ((Get-CodexFileIdentity (Join-Path $priorRoot 'Software\changed.txt')).Value -cne (Get-CodexFileIdentity (Join-Path $deltaRoot 'Software\changed.txt')).Value) 'Changed software unexpectedly shares prior storage.'
     $scenarios.Add('incremental-tree-links-unchanged-and-copies-changed-files')
 
+    foreach ($hiddenPath in @((Join-Path $priorRoot 'Software\same.txt'), (Join-Path $sourceRoot 'same.txt'), (Join-Path $sourceRoot 'changed.txt'))) {
+        [IO.File]::SetAttributes($hiddenPath, [IO.FileAttributes]::Hidden -bor [IO.FileAttributes]::System)
+    }
+    $hiddenRoot = Join-Path $testRoot 'hidden-delta'
+    $hiddenResults = @(Copy-CodexRecoveryTreeIncremental -SourceRoot $sourceRoot -DestinationBundleRoot $hiddenRoot -BundlePrefix 'Software' -PriorBundleRoot $priorRoot -PriorFileMap $priorMap)
+    Assert-True ($hiddenResults.Count -eq 2 -and @($hiddenResults | Where-Object ReusedByHardLink).Count -eq 1) 'Hidden/system files were omitted or did not use both copy and reuse paths.'
+    [void](Write-TestManifest -BundleRoot $hiddenRoot -BundleId 'hidden-bundle')
+    $hiddenIntegrity = Test-CodexRecoveryBundleIntegrity -BundleRoot $hiddenRoot
+    Assert-True ($hiddenIntegrity.Success -and $hiddenIntegrity.HashedFiles -eq 2) 'Hidden/system recovery files failed complete content verification.'
+    $scenarios.Add('hidden-system-files-copy-reuse-and-verify')
+
     $corruptPriorRoot = Join-Path $testRoot 'corrupt-prior'
     $corruptSource = Join-Path $testRoot 'corrupt-source\value.txt'
     $corruptDeltaRoot = Join-Path $testRoot 'corrupt-delta'
