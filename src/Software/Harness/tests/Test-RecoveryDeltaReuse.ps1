@@ -121,6 +121,24 @@ try {
     Assert-True (-not [bool]$identityFailure.Success -and (@($identityFailure.Failures) -join '; ') -match 'hard-link identity mismatch') 'A byte-identical but physically independent baseline was accepted as trusted reuse.'
     $scenarios.Add('trusted-baseline-verification-requires-shared-file-identity')
 
+    $deployAst = [Management.Automation.Language.Parser]::ParseFile($deployPath, [ref]$null, [ref]$null)
+    $readinessAst = $deployAst.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-RecoveryReusePlanReadiness' }, $true)
+    . ([scriptblock]::Create($readinessAst.Extent.Text))
+    $reuseRoot = Join-Path $testRoot 'reuse'
+    New-Item -ItemType Directory -Path (Join-Path $reuseRoot 'Recovery') -Force | Out-Null
+    Copy-Item -LiteralPath $trustedRoot -Destination (Join-Path $reuseRoot 'Recovery\Current') -Recurse
+    Write-CodexJsonAtomic -Path (Join-Path $reuseRoot 'Recovery\last-verification.json') -Value @{
+        Success = $true; BundleId = $trustedManifest.BundleId; ContentHashesSkipped = $false
+        VerifiedFiles = $trustedManifest.FileCount; VerifiedBytes = $trustedManifest.TotalBytes
+    }
+    $poolPath = Join-Path $reuseRoot 'Software\Harness\pool-definition.json'
+    Write-CodexJsonAtomic -Path $poolPath -Value @{ SourceCheckpointId = $trustedManifest.BaselineCheckpointId }
+    Assert-True ([bool](Get-RecoveryReusePlanReadiness -Root $reuseRoot).Ready) 'An unchanged, verified baseline was not reusable.'
+    Write-CodexJsonAtomic -Path $poolPath -Value @{ SourceCheckpointId = [Guid]::NewGuid().ToString() }
+    $changedCheckpoint = Get-RecoveryReusePlanReadiness -Root $reuseRoot
+    Assert-True (-not [bool]$changedCheckpoint.Ready -and $changedCheckpoint.Reason -match 'current pool checkpoint') 'A fix-forward release planned reuse of the baseline from before guest promotion.'
+    $scenarios.Add('fix-forward-recovery-rejects-an-older-baseline-checkpoint')
+
     $builder = Get-Content -LiteralPath $builderPath -Raw
     $wrapper = Get-Content -LiteralPath $wrapperPath -Raw
     Assert-True ($builder -match "ValidateSet\('FullExport','ReuseCurrent'\)" -and $builder -match 'BaselineExportDisposition' -and $builder -match 'Get-MatchingRecoveryReceipt') 'Recovery builder does not expose the fail-closed reuse contract.'

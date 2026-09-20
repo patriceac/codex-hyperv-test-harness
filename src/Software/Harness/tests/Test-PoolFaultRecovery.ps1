@@ -210,6 +210,41 @@ Assert-True (
 ) 'Pool startup can replay an expected-power-off request or leave a same-ID queued duplicate live when its worker-state mapping is lost.'
 $scenarios.Add('causal-poweroff-worker-crash-publishes-terminal-failure')
 
+$fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('codex-pool-generation-' + [Guid]::NewGuid().ToString('N'))
+try {
+    New-Item -ItemType Directory -Path (Join-Path $fixtureRoot 'Private') -Force | Out-Null
+    @{ BrokerInstanceId = [IO.Path]::GetFileName($fixtureRoot) } | ConvertTo-Json | Set-Content (Join-Path $fixtureRoot 'Private\config.json')
+    $generation = [DateTime]::Parse('2026-09-20T22:28:00Z').ToUniversalTime()
+    $poolConfig = [pscustomobject]@{ PoolCreatedUtc = $generation.ToString('o'); PoolWorkers = @(1..4 | ForEach-Object { [pscustomobject]@{ WorkerId = $_; VmName = "Synthetic-$_" } }) }
+    foreach ($id in 1..4) {
+        $updated = if ($id -eq 1 -or $id -eq 4) { $generation.AddMinutes(-1) } elseif ($id -eq 2) { $generation } else { $generation.AddMinutes(1) }
+        Write-PoolJsonAtomic -Path (Get-PoolWorkerStatePath -BrokerRoot $fixtureRoot -WorkerId $id) -Value @{
+            WorkerId = $id; VmName = "Synthetic-$id"; Status = 'Faulted'; OsClean = $false; UpdatedUtc = $updated.ToString('o')
+            LastError = 'GuestAuthenticationFailed'; LastFailureReason = 'GuestAuthenticationFailed'; FaultRecoveryAttempts = 12
+        }
+    }
+    $poolConfig.PoolWorkers = @($poolConfig.PoolWorkers | Where-Object WorkerId -ne 4)
+    Initialize-PoolWorkerStates -BrokerRoot $fixtureRoot -Config $poolConfig
+    $replaced = Read-PoolWorkerState -BrokerRoot $fixtureRoot -WorkerId 1
+    Assert-True ($replaced.Status -eq 'Off' -and $replaced.OsClean -and $replaced.FaultRecoveryAttempts -eq 0 -and $null -eq $replaced.LastFailureReason) 'A rebuilt pool inherited the discarded worker failure.'
+    $scenarios.Add('rebuilt-pool-discards-previous-worker-failures')
+    foreach ($id in 2..3) {
+        $preserved = Read-PoolWorkerState -BrokerRoot $fixtureRoot -WorkerId $id
+        Assert-True ($preserved.Status -eq 'Faulted' -and $preserved.FaultRecoveryAttempts -eq 12) 'A current-generation worker failure was erased.'
+    }
+    $scenarios.Add('current-pool-worker-failures-are-preserved')
+    Initialize-PoolWorkerStates -BrokerRoot $fixtureRoot -Config ([pscustomobject]@{ PoolWorkers = @([pscustomobject]@{ WorkerId = 4; VmName = 'Synthetic-4' }) })
+    Assert-True ((Read-PoolWorkerState -BrokerRoot $fixtureRoot -WorkerId 4).Status -eq 'Faulted') 'A legacy configuration reset state without proof of a pool rebuild.'
+    $scenarios.Add('legacy-pool-state-is-preserved-without-generation')
+}
+finally {
+    if (Test-Path -LiteralPath $fixtureRoot) {
+        $resolvedFixture = (Resolve-Path -LiteralPath $fixtureRoot).Path
+        if ($resolvedFixture -ne [IO.Path]::GetFullPath($fixtureRoot) -or -not $resolvedFixture.StartsWith((Join-Path ([IO.Path]::GetTempPath()) 'codex-pool-generation-'), [StringComparison]::OrdinalIgnoreCase)) { throw 'Unexpected pool fixture cleanup path.' }
+        Remove-Item -LiteralPath $resolvedFixture -Recurse -Force
+    }
+}
+
 [pscustomobject][ordered]@{
     Success = $true
     ScenarioCount = $scenarios.Count

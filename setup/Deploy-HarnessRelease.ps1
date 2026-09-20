@@ -270,6 +270,10 @@ function Get-RecoveryReusePlanReadiness {
         if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw 'Recovery\Current\manifest.json is missing.' }
         $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
         if ([int]$manifest.FormatVersion -ne 1 -or [string]::IsNullOrWhiteSpace([string]$manifest.BundleId)) { throw 'Recovery\Current has an unsupported manifest.' }
+        $poolDefinition = Get-Content -LiteralPath (Join-Path $Root 'Software\Harness\pool-definition.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ([string]::IsNullOrWhiteSpace([string]$poolDefinition.SourceCheckpointId) -or [string]$poolDefinition.SourceCheckpointId -ne [string]$manifest.BaselineCheckpointId) {
+            throw 'Recovery\Current predates the current pool checkpoint; a full baseline export is required.'
+        }
         $entries = @($manifest.Files)
         if ([int]$manifest.FileCount -ne $entries.Count -or [long]$manifest.TotalBytes -ne [long](($entries | Measure-Object -Property Length -Sum).Sum)) {
             throw 'Recovery\Current manifest counts are inconsistent.'

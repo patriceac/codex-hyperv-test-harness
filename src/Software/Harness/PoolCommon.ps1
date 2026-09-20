@@ -215,6 +215,11 @@ function Initialize-PoolWorkerStates {
     foreach ($worker in @($Config.PoolWorkers | Sort-Object { [int]$_.WorkerId })) {
         $workerId = [int]$worker.WorkerId
         $current = Read-PoolWorkerState -BrokerRoot $BrokerRoot -WorkerId $workerId
+        # Records predating a rebuilt pool describe discarded OS disks.
+        if ($current -and $Config.PoolCreatedUtc -and ([DateTime]$current.UpdatedUtc).ToUniversalTime() -lt ([DateTime]$Config.PoolCreatedUtc).ToUniversalTime()) {
+            Remove-Item -LiteralPath (Get-PoolWorkerStatePath -BrokerRoot $BrokerRoot -WorkerId $workerId) -Force -ErrorAction Stop
+            $current = $null
+        }
         if (-not $current) {
             Update-PoolWorkerState -BrokerRoot $BrokerRoot -WorkerId $workerId -Patch ([ordered]@{
                 VmName = [string]$worker.VmName

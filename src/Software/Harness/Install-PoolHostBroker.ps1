@@ -355,6 +355,7 @@ try {
         PoolFaultRecoveryMaxSeconds = 600
         PoolRoot = [string]$definition.PoolRoot
         PoolBaseVhdx = [string]$definition.BaseVhdx
+        PoolCreatedUtc = [string]$definition.CreatedUtc
         PoolWorkers = @($definition.Workers)
         PayloadCacheMaxAgeDays = 30
         PayloadCacheMaxBytes = [long]64GB
