@@ -38,7 +38,7 @@ Use `scripts/Invoke-HyperVExecutableTest.ps1`.
 - Pass application arguments with `-Arguments`. In arguments and ordinary string-valued actions, `{PAYLOAD}` resolves to the attached payload root and `{OUTDIR}` to the persistent guest evidence directory. Do not assume guest drive letters.
 - Omit `-ActionsPath` for a basic launch-and-screenshot smoke test. Supply an actions JSON file for interaction.
 - General networking is opt-in. Omit `-NetworkProfile` or use `None` for a disconnected VM. Never substitute or create networking when the requested profile is unavailable.
-- Use `-GuestSetupExecutableRelativePath`, `-GuestSetupExecutableSha256`, `-GuestSetupArguments`, and `-GuestSetupTimeoutSeconds` only for a request-scoped elevated pre-launch executable. Do not encode product policy in the harness.
+- Use `-GuestSetupExecutableRelativePath`, `-GuestSetupExecutableSha256`, `-GuestSetupArguments`, and `-GuestSetupTimeoutSeconds` only for a request-scoped elevated pre-launch executable. It may precede explicitly requested prompt handling for the normal application. Do not encode product policy in the harness.
 - Add `-RequireHostLocked` only when the test specifically requires proof that the workstation remained locked. VM isolation itself does not require locking the host.
 - Queue and execution deadlines are independent. Their defaults are 30 and 15 minutes respectively; waiting in the FIFO queue does not consume the execution budget.
 

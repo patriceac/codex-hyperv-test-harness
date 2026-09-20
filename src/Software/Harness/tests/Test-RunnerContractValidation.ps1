@@ -498,6 +498,23 @@ try {
         Assert-Equal -Scenario 'guest setup schema is bounded' -Actual @($provisionRequest.GuestSetup.PSObject.Properties).Count -Expected 5
         $scenarios.Add("provisioned-$profile-serialization")
     }
+
+    $combinedProvisionInvocation = $provisionInvocation.Clone()
+    $combinedProvisionInvocation.AcceptWindowsFirewallPrompt = $true
+    $combinedProvisionInvocation.WindowsFirewallProfiles = @('Private')
+    $combinedProvisionInvocation.SystemPromptTimeoutSeconds = 75
+    $combinedProvisionRequest = Get-QueuedRequest -Scenario 'guest setup with firewall prompt contract' -InvocationParameters $combinedProvisionInvocation
+    Assert-Equal -Scenario 'combined operation fails closed on older brokers' -Actual $combinedProvisionRequest.Operation -Expected 'RunGuestJobSetupSystemPromptsV1'
+    Assert-Equal -Scenario 'combined operation preserves setup identity' -Actual $combinedProvisionRequest.GuestSetup.ExecutableSha256 -Expected $provisionInvocation.GuestSetupExecutableSha256
+    Assert-Equal -Scenario 'combined operation preserves application identity' -Actual $combinedProvisionRequest.SystemPrompts.ExecutableSha256 -Expected ((Get-FileHash -LiteralPath (Join-Path $provisionArtifact 'Lab.exe') -Algorithm SHA256).Hash)
+    Assert-Equal -Scenario 'combined operation preserves isolated network' -Actual $combinedProvisionRequest.Network.Profile -Expected 'IsolatedTestNet'
+    if ($combinedProvisionRequest.SystemPrompts.AcceptWindowsFirewall -isnot [bool] -or
+        -not [bool]$combinedProvisionRequest.SystemPrompts.AcceptWindowsFirewall -or
+        (@($combinedProvisionRequest.SystemPrompts.FirewallProfiles) -join ',') -cne 'Private') {
+        throw 'Combined guest setup and Windows Firewall acceptance did not retain its bounded prompt contract.'
+    }
+    $scenarios.Add('guest-setup-and-system-prompts-use-distinct-versioned-operation')
+
     $provisionInvocation.Remove('NetworkCohort')
     foreach ($forbiddenProfile in @('InternetOnly', 'TrustedLan')) {
         $provisionInvocation.NetworkProfile = $forbiddenProfile

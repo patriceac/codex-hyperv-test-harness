@@ -692,6 +692,36 @@ Assert-True (-not (Test-RequestNetworkOwnerAlive -State ([pscustomobject]@{ Owne
 Assert-True (Test-RequestNetworkLeaseActive -State ([pscustomobject]@{ Status = 'Connected'; OwnerProcessId = $PID; OwnerProcessStartUtc = $ownerStartUtc })) 'A live Connected lease was not treated as active.'
 Assert-True (-not (Test-RequestNetworkLeaseActive -State ([pscustomobject]@{ Status = 'CleanupFailed'; OwnerProcessId = $PID; OwnerProcessStartUtc = $ownerStartUtc }))) 'A live CleanupFailed lease was incorrectly treated as active.'
 
+$leaseReadModel = @{
+    Attempts = 0
+    FailUntil = 2
+    Json = ([ordered]@{ RequestId = 'transient-lease' } | ConvertTo-Json -Compress)
+}
+$leaseReadResult = & {
+    param($Model)
+    function Get-Content {
+        [CmdletBinding()]
+        param([switch] $Raw, [string] $LiteralPath, [string] $Encoding)
+        $Model.Attempts++
+        if ($Model.Attempts -le $Model.FailUntil) { throw [IO.IOException]::new('Synthetic lease contention.') }
+        $Model.Json
+    }
+    Read-RequestNetworkLeaseJson -Path 'synthetic-lease.json' -Attempts 4 -DelayMilliseconds 10
+} $leaseReadModel
+Assert-True ($leaseReadModel.Attempts -eq 3 -and [string]$leaseReadResult.RequestId -ceq 'transient-lease') 'Transient request-network lease contention was not retried to a stable JSON document.'
+$leaseReadFailure = & {
+    param($Json)
+    function Get-Content {
+        [CmdletBinding()]
+        param([switch] $Raw, [string] $LiteralPath, [string] $Encoding)
+        throw [IO.IOException]::new('Persistent synthetic lease contention.')
+    }
+    try { Read-RequestNetworkLeaseJson -Path 'synthetic-lease.json' -Attempts 2 -DelayMilliseconds 10 | Out-Null; $null }
+    catch { $_.Exception.Message }
+} $leaseReadModel.Json
+Assert-True ([string]$leaseReadFailure -like '*Could not read a stable request-network lease after 2 attempts*' -and $moduleText.Contains('Read-RequestNetworkLeaseJson -Path $leasePath')) 'Persistent lease contention did not fail closed or inventory bypassed the bounded reader.'
+$scenarios.Add('lease-contention-is-retried-and-fails-closed')
+
 $leaseRoot = Join-Path ([IO.Path]::GetTempPath()) ('codex-request-network-safety-' + [Guid]::NewGuid().ToString('N'))
 $leaseStateRoot = Get-RequestNetworkLeaseRoot -BrokerRoot $leaseRoot
 New-Item -ItemType Directory -Force -Path $leaseStateRoot | Out-Null

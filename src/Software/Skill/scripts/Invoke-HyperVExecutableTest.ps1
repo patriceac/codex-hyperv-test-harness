@@ -65,8 +65,8 @@ if ($guestSetupRequested -and (-not $PSBoundParameters.ContainsKey('GuestSetupEx
 if (-not $guestSetupRequested -and ($PSBoundParameters.ContainsKey('GuestSetupArguments') -or $PSBoundParameters.ContainsKey('GuestSetupTimeoutSeconds'))) {
     throw 'GuestSetupArguments and GuestSetupTimeoutSeconds require a guest setup executable.'
 }
-if ($guestSetupRequested -and ($NetworkProfile -notin @('None', 'IsolatedTestNet') -or $ReadOnlyHostInput.Count -gt 0 -or $AllowNetworkWithHostInputs -or $ExpectGuestPowerOff -or $systemPromptRequested)) {
-    throw 'Guest setup permits only None or IsolatedTestNet, without host inputs, expected power-off, or system-prompt acceptance.'
+if ($guestSetupRequested -and ($NetworkProfile -notin @('None', 'IsolatedTestNet') -or $ReadOnlyHostInput.Count -gt 0 -or $AllowNetworkWithHostInputs -or $ExpectGuestPowerOff)) {
+    throw 'Guest setup permits only None or IsolatedTestNet, without host inputs or expected power-off.'
 }
 
 function Resolve-GuestSetupClientExecutable {
@@ -1486,7 +1486,7 @@ try {
     $queueDeadlineUtc = $createdUtc.AddSeconds($QueueTimeoutSeconds)
     $request = [ordered]@{
         RequestId = $requestId
-        Operation = if ($systemPromptRequested) { 'RunGuestJobSystemPromptsV1' } elseif ($guestSetupRequest) { 'RunGuestJobSetupV1' } elseif ($networkEnabled) { 'RunGuestJobNetworkV1' } else { 'RunGuestJob' }
+        Operation = if ($guestSetupRequest -and $systemPromptRequested) { 'RunGuestJobSetupSystemPromptsV1' } elseif ($systemPromptRequested) { 'RunGuestJobSystemPromptsV1' } elseif ($guestSetupRequest) { 'RunGuestJobSetupV1' } elseif ($networkEnabled) { 'RunGuestJobNetworkV1' } else { 'RunGuestJob' }
         CreatedUtc = $createdUtc.ToString('o')
         QueueTimeoutSeconds = $QueueTimeoutSeconds
         ExecutionTimeoutSeconds = $ExecutionTimeoutSeconds

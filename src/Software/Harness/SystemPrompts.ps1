@@ -49,11 +49,19 @@ function Resolve-SystemPromptPolicyV1 {
     if ($null -ne $propertyLookup -and -not $exactProperty) {
         throw 'The top-level system-prompt property name must use exact case: SystemPrompts.'
     }
-    if ($operation -ne 'RunGuestJobSystemPromptsV1') {
-        if ($null -ne $propertyLookup) { throw 'SystemPrompts requires the versioned RunGuestJobSystemPromptsV1 operation.' }
+    $supportedOperations = @('RunGuestJobSystemPromptsV1', 'RunGuestJobSetupSystemPromptsV1')
+    if ($operation -notin $supportedOperations) {
+        if ($null -ne $propertyLookup) { throw 'SystemPrompts requires the versioned system-prompt operation.' }
         return $null
     }
-    if ($null -eq $propertyLookup) { throw 'RunGuestJobSystemPromptsV1 requires SystemPrompts.' }
+    if ($null -eq $propertyLookup) { throw "$operation requires SystemPrompts." }
+    $guestSetup = Get-SystemPromptPropertyValue -Value $Request -Name 'GuestSetup'
+    if ($operation -eq 'RunGuestJobSetupSystemPromptsV1' -and $null -eq $guestSetup) {
+        throw 'RunGuestJobSetupSystemPromptsV1 requires GuestSetup.'
+    }
+    if ($operation -eq 'RunGuestJobSystemPromptsV1' -and $null -ne $guestSetup) {
+        throw 'Guest setup and system prompts require RunGuestJobSetupSystemPromptsV1.'
+    }
     if ($null -eq $PayloadManifest) { throw 'System-prompt acceptance requires a canonical application payload manifest.' }
 
     $allowed = @(
@@ -88,10 +96,8 @@ function Resolve-SystemPromptPolicyV1 {
         throw 'SystemPrompts must enable at least one supported prompt kind.'
     }
 
-    if ((Get-SystemPromptPropertyValue -Value $Request -Name 'ExpectGuestPowerOff') -eq $true -or
-        [string]$operation -eq 'RunGuestJobSetupV1' -or
-        $null -ne (Get-SystemPromptPropertyValue -Value $Request -Name 'GuestSetup')) {
-        throw 'System-prompt acceptance cannot be combined with expected power-off or guest setup.'
+    if ((Get-SystemPromptPropertyValue -Value $Request -Name 'ExpectGuestPowerOff') -eq $true) {
+        throw 'System-prompt acceptance cannot be combined with expected power-off.'
     }
 
     $relativePath = ConvertTo-SystemPromptRelativePath -Value ([string](Get-SystemPromptPropertyValue -Value $propertyLookup -Name 'ExecutableRelativePath'))

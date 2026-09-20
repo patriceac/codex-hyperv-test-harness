@@ -25,6 +25,7 @@ function Assert-True {
 }
 
 Import-NamedFunction -Path (Join-Path $SourceRoot 'HostWorker.ps1') -Name 'Test-WorkerCaptureRetryAllowed'
+Import-NamedFunction -Path (Join-Path $SourceRoot 'HostBroker.ps1') -Name 'Copy-GuestJobForExecution'
 $captureFailure = [pscustomobject]@{ Success = $false; FailureKind = 'CaptureInfrastructure' }
 Assert-True (Test-WorkerCaptureRetryAllowed -AttemptResult $captureFailure -RetryCount 0 -CancellationRequested $false) 'The first capture infrastructure failure was not retryable.'
 Assert-True (-not (Test-WorkerCaptureRetryAllowed -AttemptResult $captureFailure -RetryCount 1 -CancellationRequested $false)) 'A second capture infrastructure failure was incorrectly retryable.'
@@ -32,6 +33,17 @@ Assert-True (-not (Test-WorkerCaptureRetryAllowed -AttemptResult $captureFailure
 Assert-True (-not (Test-WorkerCaptureRetryAllowed -AttemptResult $captureFailure -RetryCount 0 -CancellationRequested $false -ExpectGuestPowerOff $true)) 'An expected-power-off application could be relaunched after a capture infrastructure failure.'
 Assert-True (-not (Test-WorkerCaptureRetryAllowed -AttemptResult ([pscustomobject]@{ Success = $false; FailureKind = 'TestAssertion' }) -RetryCount 0 -CancellationRequested $false)) 'An application test failure was incorrectly treated as capture infrastructure.'
 Assert-True (-not (Test-WorkerCaptureRetryAllowed -AttemptResult ([pscustomobject]@{ Success = $true; FailureKind = $null }) -RetryCount 0 -CancellationRequested $false)) 'A successful attempt was incorrectly retryable.'
+
+$requestJob = [pscustomobject][ordered]@{
+    id = 'synthetic-capture-retry'
+    executable = '{PAYLOAD}\bin\app.exe'
+    arguments = '--output "{OUTDIR}\result.json"'
+    actions = @([pscustomobject]@{ type = 'wait_result_file'; path = '{OUTDIR}\result.json' })
+}
+$executionJob = Copy-GuestJobForExecution -Job $requestJob
+$executionJob.executable = 'E:\bin\app.exe'
+$executionJob.actions[0].path = 'C:\CodexGuest\Outbox\synthetic-capture-retry\result.json'
+Assert-True ($requestJob.executable -ceq '{PAYLOAD}\bin\app.exe' -and $requestJob.actions[0].path -ceq '{OUTDIR}\result.json') 'Execution-time token expansion mutated the canonical request used for capture-infrastructure retry.'
 
 $root = Join-Path ([IO.Path]::GetTempPath()) ('codex-capture-routing-' + [Guid]::NewGuid().ToString('N'))
 $script:BrokerRoot = $root
@@ -145,7 +157,7 @@ finally {
 
 [pscustomobject][ordered]@{
     Success = $true
-    ScenarioCount = 7
+    ScenarioCount = 8
     Scenarios = @(
         'first-capture-failure-retryable',
         'retry-bounded-to-one',
@@ -153,6 +165,7 @@ finally {
         'expected-poweroff-disables-capture-retry',
         'test-failure-not-retried',
         'success-not-retried',
+        'execution-job-expansion-does-not-mutate-retry-request',
         'retry-requeued-before-worker-recycle'
     )
 } | ConvertTo-Json -Depth 8

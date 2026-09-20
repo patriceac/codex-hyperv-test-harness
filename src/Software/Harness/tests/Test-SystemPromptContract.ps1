@@ -58,6 +58,13 @@ Assert-True ((@($policy.Sequence) -join ',') -ceq 'Uac,WindowsFirewall') 'System
 Assert-True ([string]$policy.ExecutableSha256 -ceq $hash -and (@($policy.FirewallProfiles) -join ',') -ceq 'Private') 'System-prompt policy did not retain exact executable and firewall identity.'
 $scenarios.Add('valid-versioned-policy')
 
+$combinedRequest = Copy-JsonObject $request
+$combinedRequest.Operation = 'RunGuestJobSetupSystemPromptsV1'
+$combinedRequest | Add-Member -NotePropertyName GuestSetup -NotePropertyValue ([pscustomobject]@{ FormatVersion = 1 })
+$combinedPolicy = Resolve-SystemPromptPolicyV1 -Request $combinedRequest -PayloadManifest $manifest
+Assert-True ($combinedPolicy.ExecutableSha256 -ceq $hash -and (@($combinedPolicy.Sequence) -join ',') -ceq 'Uac,WindowsFirewall') 'Combined guest-setup/system-prompt policy changed the exact application prompt identity.'
+$scenarios.Add('combined-operation-preserves-application-prompt-identity')
+
 $runtime = [pscustomobject][ordered]@{
     Policy = $policy
     Complete = $false
@@ -82,6 +89,8 @@ $scenarios.Add('legacy-request-unchanged')
 foreach ($case in @(
     @{ Name = 'wrong-operation'; Message = 'requires the versioned'; Mutate = { param($v) $v.Operation = 'RunGuestJob' } },
     @{ Name = 'missing-contract'; Message = 'requires SystemPrompts'; Mutate = { param($v) $v.PSObject.Properties.Remove('SystemPrompts') } },
+    @{ Name = 'combined-missing-setup'; Message = 'requires GuestSetup'; Mutate = { param($v) $v.Operation = 'RunGuestJobSetupSystemPromptsV1' } },
+    @{ Name = 'old-operation-rejects-setup'; Message = 'require RunGuestJobSetupSystemPromptsV1'; Mutate = { param($v) $v | Add-Member -NotePropertyName GuestSetup -NotePropertyValue ([pscustomobject]@{ FormatVersion = 1 }) } },
     @{ Name = 'unknown-property'; Message = 'unsupported properties'; Mutate = { param($v) $v.SystemPrompts | Add-Member script 'bad' } },
     @{ Name = 'false-flags'; Message = 'at least one'; Mutate = { param($v) $v.SystemPrompts.AcceptUac = $false; $v.SystemPrompts.AcceptWindowsFirewall = $false; $v.SystemPrompts.FirewallProfiles = @() } },
     @{ Name = 'short-timeout'; Message = 'between 5 and 600'; Mutate = { param($v) $v.SystemPrompts.PromptTimeoutSeconds = 4 } },
@@ -129,9 +138,14 @@ Assert-True (-not $moduleText.Contains("Caption -eq 'Virtual Machine'")) 'System
 Assert-True ($moduleText.Contains("[TimeSpan]::FromSeconds(2)") -and $moduleText.Contains('Start-Sleep -Milliseconds 250')) 'UAC input is not delayed until the consent UI can render and process focus changes.'
 Assert-True ($moduleText.Contains('Waiting for the Windows Firewall prompt to finish rendering.')) 'Firewall authorization does not wait for its prompt UI to render.'
 Assert-True ($workerText.Contains('ErrorFullyQualifiedId = $terminalErrorFullyQualifiedId') -and $workerText.Contains('ErrorScriptStackTrace = $terminalErrorScriptStackTrace')) 'Pool-worker fallback results do not preserve the original failure diagnostics.'
-Assert-True ($networkText.Contains("'RunGuestJobSystemPromptsV1'")) 'Request-network validation does not accept the versioned system-prompt operation.'
+Assert-True ($networkText.Contains("'RunGuestJobSystemPromptsV1'") -and $networkText.Contains("'RunGuestJobSetupSystemPromptsV1'")) 'Request-network validation does not accept both versioned system-prompt operations.'
 Assert-True ($installerText.Contains("'SystemPrompts.ps1'")) 'Broker installation does not copy and hash SystemPrompts.ps1.'
-Assert-True ($runnerText.Contains('[switch] $AcceptUacPrompt') -and $runnerText.Contains('[switch] $AcceptWindowsFirewallPrompt') -and $runnerText.Contains("'RunGuestJobSystemPromptsV1'")) 'Runner does not expose and serialize both bounded prompt capabilities.'
+Assert-True ($runnerText.Contains('[switch] $AcceptUacPrompt') -and $runnerText.Contains('[switch] $AcceptWindowsFirewallPrompt') -and $runnerText.Contains("'RunGuestJobSystemPromptsV1'") -and $runnerText.Contains("'RunGuestJobSetupSystemPromptsV1'")) 'Runner does not expose and serialize both bounded prompt capabilities or their setup composition.'
+$runtimeIndex = $brokerText.IndexOf('New-SystemPromptRuntimeV1')
+$setupIndex = $brokerText.IndexOf('Invoke-GuestSetupV1')
+$submitIndex = $brokerText.IndexOf("`$failureStage = 'SubmittingGuestJob'")
+$serviceIndex = $brokerText.IndexOf('Invoke-SystemPromptServiceV1')
+Assert-True ($runtimeIndex -ge 0 -and $setupIndex -gt $runtimeIndex -and $submitIndex -gt $setupIndex -and $serviceIndex -gt $submitIndex) 'The broker no longer prepares prompt policy, completes guest setup, submits the application, and services prompts in that order.'
 $scenarios.Add('host-secure-desktop-firewall-and-propagation-contract')
 
 $nativeSource = [regex]::Match($moduleText, "Add-Type -TypeDefinition @'\r?\n(?<source>[\s\S]*?)\r?\n'@")

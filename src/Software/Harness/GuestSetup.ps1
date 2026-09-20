@@ -57,11 +57,19 @@ function Resolve-GuestSetupPolicyV1 {
     if ($null -ne $profile -and -not $exactProperty) {
         throw 'The top-level guest-setup property name must use exact case: GuestSetup.'
     }
-    if ($operation -ne 'RunGuestJobSetupV1') {
-        if ($null -ne $profile) { throw 'GuestSetup requires the versioned RunGuestJobSetupV1 operation.' }
+    $supportedOperations = @('RunGuestJobSetupV1', 'RunGuestJobSetupSystemPromptsV1')
+    if ($operation -notin $supportedOperations) {
+        if ($null -ne $profile) { throw 'GuestSetup requires the versioned guest-setup operation.' }
         return $null
     }
-    if ($null -eq $profile) { throw 'RunGuestJobSetupV1 requires GuestSetup.' }
+    if ($null -eq $profile) { throw "$operation requires GuestSetup." }
+    $systemPrompts = Get-GuestSetupPropertyValue -Value $Request -Name 'SystemPrompts'
+    if ($operation -eq 'RunGuestJobSetupSystemPromptsV1' -and $null -eq $systemPrompts) {
+        throw 'RunGuestJobSetupSystemPromptsV1 requires SystemPrompts.'
+    }
+    if ($operation -eq 'RunGuestJobSetupV1' -and $null -ne $systemPrompts) {
+        throw 'Guest setup and system prompts require RunGuestJobSetupSystemPromptsV1.'
+    }
     if ($null -eq $PayloadManifest) { throw 'GuestSetup requires a canonical application payload manifest.' }
 
     $allowed = @('FormatVersion', 'ExecutableRelativePath', 'ExecutableSha256', 'Arguments', 'TimeoutSeconds')

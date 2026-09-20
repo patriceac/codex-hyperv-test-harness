@@ -3268,6 +3268,12 @@ function Invoke-HostLiveEvidenceService {
     }
 }
 
+function Copy-GuestJobForExecution {
+    param([Parameter(Mandatory = $true)] $Job)
+
+    ConvertFrom-Json -InputObject (ConvertTo-Json -InputObject $Job -Depth 20 -Compress)
+}
+
 function Invoke-GuestRequest {
     param(
         [Parameter(Mandatory = $true)] $Request,
@@ -3706,7 +3712,7 @@ function Invoke-GuestRequest {
         }
         $failureStage = 'ValidatingGuestJob'
         Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
-        $job = $Request.Job
+        $job = Copy-GuestJobForExecution -Job $Request.Job
         if ([string]$job.id -ne $requestId) {
             throw 'Guest job id must exactly match RequestId.'
         }
@@ -5022,7 +5028,7 @@ function Invoke-GuestRequest {
             HostInputCleanup = $hostInputCleanup
             Network = [ordered]@{
                 ContractVersion = if ([string]$Request.Operation -eq 'RunGuestJobNetworkV1' -or
-                    ([string]$Request.Operation -in @('RunGuestJobSetupV1', 'RunGuestJobSystemPromptsV1') -and [string]$requestNetworkDefinition.EffectiveProfile -ne 'None')) { 1 } else { 0 }
+                    ([string]$Request.Operation -in @('RunGuestJobSetupV1', 'RunGuestJobSystemPromptsV1', 'RunGuestJobSetupSystemPromptsV1') -and [string]$requestNetworkDefinition.EffectiveProfile -ne 'None')) { 1 } else { 0 }
                 RequestedProfile = if ($requestNetworkDefinition) { [string]$requestNetworkDefinition.RequestedProfile } else { 'None' }
                 EffectiveProfile = if ($requestNetworkDefinition) { [string]$requestNetworkDefinition.EffectiveProfile } else { 'None' }
                 Cohort = if ($requestNetworkDefinition -and [string]$requestNetworkDefinition.EffectiveProfile -eq 'IsolatedTestNet') { [string]$requestNetworkDefinition.Cohort } else { $null }

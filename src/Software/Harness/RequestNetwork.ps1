@@ -4,6 +4,26 @@ function Get-RequestNetworkLeaseRoot {
     Join-Path $BrokerRoot 'State\NetworkLeases'
 }
 
+function Read-RequestNetworkLeaseJson {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Path,
+        [ValidateRange(1, 20)] [int] $Attempts = 10,
+        [ValidateRange(10, 1000)] [int] $DelayMilliseconds = 50
+    )
+
+    $lastError = $null
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        try {
+            return Get-Content -Raw -LiteralPath $Path -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        }
+        catch {
+            $lastError = $_
+            if ($attempt -lt $Attempts) { Start-Sleep -Milliseconds $DelayMilliseconds }
+        }
+    }
+    throw [IO.InvalidDataException]::new("Could not read a stable request-network lease after $Attempts attempts: $Path", $lastError.Exception)
+}
+
 function Get-RequestNetworkLeaseInventory {
     param([Parameter(Mandatory = $true)] [string] $BrokerRoot)
 
@@ -17,7 +37,7 @@ function Get-RequestNetworkLeaseInventory {
         Get-ChildItem -LiteralPath $leaseRoot -Filter '*.json' -File -ErrorAction Stop | ForEach-Object {
             $leasePath = $_.FullName
             try {
-                $state = Get-Content -Raw -LiteralPath $leasePath -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                $state = Read-RequestNetworkLeaseJson -Path $leasePath
                 if ($null -eq $state) { throw 'The lease record is empty.' }
                 foreach ($field in @('RequestId', 'VmName', 'VmId', 'AdapterName', 'Status', 'OwnerProcessId', 'OwnerProcessStartUtc')) {
                     $property = $state.PSObject.Properties[$field]
@@ -800,11 +820,11 @@ function Resolve-RequestNetworkProfile {
     $hasGuestSetup = @(Get-RequestNetworkObjectPropertyNames -Value $Request) -contains 'GuestSetup'
     $systemPrompts = Get-RequestNetworkObjectPropertyValue -Value $Request -Name 'SystemPrompts'
     $hasSystemPrompts = @(Get-RequestNetworkObjectPropertyNames -Value $Request) -contains 'SystemPrompts'
-    if ($operation -ne 'RunGuestJobSetupV1' -and $hasGuestSetup) {
-        throw 'GuestSetup requires the versioned RunGuestJobSetupV1 operation.'
+    if ($operation -notin @('RunGuestJobSetupV1', 'RunGuestJobSetupSystemPromptsV1') -and $hasGuestSetup) {
+        throw 'GuestSetup requires the versioned guest-setup operation.'
     }
-    if ($operation -ne 'RunGuestJobSystemPromptsV1' -and $hasSystemPrompts) {
-        throw 'SystemPrompts requires the versioned RunGuestJobSystemPromptsV1 operation.'
+    if ($operation -notin @('RunGuestJobSystemPromptsV1', 'RunGuestJobSetupSystemPromptsV1') -and $hasSystemPrompts) {
+        throw 'SystemPrompts requires the versioned system-prompt operation.'
     }
 
     if ($operation -eq 'RunGuestJob') {
@@ -822,8 +842,11 @@ function Resolve-RequestNetworkProfile {
         if ($profile -ne 'None' -and -not $network) { throw 'A system-prompt request with network access requires an explicit Network object.' }
         if ($hasGuestSetup) { throw 'System-prompt jobs cannot include guest setup.' }
     }
-    elseif ($operation -eq 'RunGuestJobSetupV1') {
-        if (-not $hasGuestSetup -or -not $guestSetup) { throw 'RunGuestJobSetupV1 requires GuestSetup.' }
+    elseif ($operation -in @('RunGuestJobSetupV1', 'RunGuestJobSetupSystemPromptsV1')) {
+        if (-not $hasGuestSetup -or -not $guestSetup) { throw "$operation requires GuestSetup." }
+        if ($operation -eq 'RunGuestJobSetupSystemPromptsV1' -and (-not $hasSystemPrompts -or -not $systemPrompts)) {
+            throw 'RunGuestJobSetupSystemPromptsV1 requires SystemPrompts.'
+        }
         if ($profile -notin @('None', 'IsolatedTestNet')) { throw 'Guest-setup jobs permit only None or IsolatedTestNet.' }
         foreach ($requiredFlag in @('ResetToBaseline', 'StopAfter')) {
             $flag = Get-RequestNetworkObjectPropertyValue -Value $Request -Name $requiredFlag

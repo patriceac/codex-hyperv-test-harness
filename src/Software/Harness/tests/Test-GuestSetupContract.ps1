@@ -7,6 +7,7 @@ $sourceRoot = Split-Path -Parent $PSScriptRoot
 $runnerPath = Join-Path (Split-Path -Parent $sourceRoot) 'Skill\scripts\Invoke-HyperVExecutableTest.ps1'
 . (Join-Path $sourceRoot 'RequestNetwork.ps1')
 . (Join-Path $sourceRoot 'GuestSetup.ps1')
+. (Join-Path $sourceRoot 'SystemPrompts.ps1')
 $checks = New-Object Collections.Generic.List[string]
 
 function Assert-Rejected {
@@ -20,10 +21,13 @@ function Assert-Rejected {
 }
 
 function New-SetupRequest {
-    param([string] $Profile = 'None')
-    [pscustomobject]@{
+    param(
+        [string] $Profile = 'None',
+        [switch] $WithSystemPrompts
+    )
+    $request = [pscustomobject]@{
         RequestId = 'executable-test-setup-contract'
-        Operation = 'RunGuestJobSetupV1'
+        Operation = if ($WithSystemPrompts) { 'RunGuestJobSetupSystemPromptsV1' } else { 'RunGuestJobSetupV1' }
         ResetToBaseline = $true
         StopAfter = $true
         GuestSetup = [pscustomobject]@{
@@ -34,16 +38,31 @@ function New-SetupRequest {
             TimeoutSeconds = 120
         }
         HostInputs = @()
-        Job = [pscustomobject]@{}
+        Job = [pscustomobject]@{ executable = '{PAYLOAD}\app.exe' }
         Network = [pscustomobject]@{
             Profile = $Profile
             Cohort = if ($Profile -eq 'IsolatedTestNet') { 'generic-setup-contract' } else { $null }
             AllowHostInputs = $false
         }
     }
+    if ($WithSystemPrompts) {
+        $request | Add-Member -NotePropertyName SystemPrompts -NotePropertyValue ([pscustomobject][ordered]@{
+            FormatVersion = 1
+            AcceptUac = $false
+            AcceptWindowsFirewall = $true
+            PromptTimeoutSeconds = 120
+            ExecutableRelativePath = 'app.exe'
+            ExecutableSha256 = ('B' * 64)
+            FirewallProfiles = @('Private')
+        })
+    }
+    $request
 }
 
-$manifest = [pscustomobject]@{ Files = @([pscustomobject]@{ RelativePath = 'setup/Bootstrap.exe'; Sha256 = ('A' * 64) }) }
+$manifest = [pscustomobject]@{ Files = @(
+    [pscustomobject]@{ RelativePath = 'setup/Bootstrap.exe'; Sha256 = ('A' * 64) },
+    [pscustomobject]@{ RelativePath = 'app.exe'; Sha256 = ('B' * 64) }
+) }
 $config = [pscustomobject]@{ RequestNetworkPolicy = Get-RequestNetworkDefaultPolicy }
 $request = New-SetupRequest
 $resolved = Resolve-GuestSetupPolicyV1 -Request $request -PayloadManifest $manifest
@@ -71,7 +90,32 @@ foreach ($profile in @('None', 'IsolatedTestNet')) {
     $network = Resolve-RequestNetworkProfile -Request (New-SetupRequest -Profile $profile) -Config $config
     if ($network.EffectiveProfile -ne $profile) { throw "Guest setup did not preserve $profile." }
     $checks.Add("network-$profile")
+
+    $combined = New-SetupRequest -Profile $profile -WithSystemPrompts
+    $combinedNetwork = Resolve-RequestNetworkProfile -Request $combined -Config $config
+    $combinedSetup = Resolve-GuestSetupPolicyV1 -Request $combined -PayloadManifest $manifest
+    $combinedPrompts = Resolve-SystemPromptPolicyV1 -Request $combined -PayloadManifest $manifest
+    if ($combinedNetwork.EffectiveProfile -ne $profile -or
+        $combinedSetup.ExecutableSha256 -cne ('A' * 64) -or
+        $combinedPrompts.ExecutableSha256 -cne ('B' * 64) -or
+        (@($combinedPrompts.Sequence) -join ',') -cne 'WindowsFirewall') {
+        throw "Combined guest setup and prompt policy did not preserve $profile and both exact identities."
+    }
+    $checks.Add("combined-system-prompts-$profile")
 }
+
+$request = New-SetupRequest
+$request.Operation = 'RunGuestJobSetupSystemPromptsV1'
+Assert-Rejected 'combined-requires-system-prompts' { Resolve-GuestSetupPolicyV1 -Request $request -PayloadManifest $manifest } 'requires SystemPrompts'
+$request = New-SetupRequest -WithSystemPrompts
+$request.PSObject.Properties.Remove('GuestSetup')
+Assert-Rejected 'combined-requires-guest-setup' { Resolve-SystemPromptPolicyV1 -Request $request -PayloadManifest $manifest } 'requires GuestSetup'
+$request = New-SetupRequest -WithSystemPrompts
+$request.Operation = 'RunGuestJobSetupV1'
+Assert-Rejected 'setup-only-operation-rejects-prompts' { Resolve-GuestSetupPolicyV1 -Request $request -PayloadManifest $manifest } 'require RunGuestJobSetupSystemPromptsV1'
+$request = New-SetupRequest -WithSystemPrompts
+$request.Operation = 'RunGuestJobSystemPromptsV1'
+Assert-Rejected 'prompt-only-operation-rejects-setup' { Resolve-SystemPromptPolicyV1 -Request $request -PayloadManifest $manifest } 'require RunGuestJobSetupSystemPromptsV1'
 
 $request = New-SetupRequest
 $request.Operation = 'RunGuestJob'
