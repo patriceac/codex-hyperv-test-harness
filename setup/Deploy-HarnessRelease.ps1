@@ -335,7 +335,7 @@ function New-ReleasePlan {
     $operations = New-Object Collections.Generic.List[string]
     $operations.Add('Qualify the exact committed source with the complete deterministic suite and public-payload audit.')
     $operations.Add('Stage and publish source through Install.ps1 without creating recovery or running duplicate smoke acceptance.')
-    if ($guestUpdateRequired) { $operations.Add('Replace the guest harness in the canonical baseline and rebuild the disposable pool exactly once.') }
+    if ($guestUpdateRequired) { $operations.Add('Replace the guest harness, verify the disposable account cannot expire in the canonical baseline, and rebuild the disposable pool exactly once.') }
     else { $operations.Add('Refresh the disposable pool exactly once from the unchanged canonical baseline.') }
     $operations.Add('Run legacy launch, accented-name UI Automation, bounded keyboard, expected-guest-power-off, and verified system-prompt acceptance in isolated workers.')
     if ($recoveryBaselineExportMode -eq 'ReuseCurrent') {

@@ -133,6 +133,7 @@ Export-ModuleMember -Function Invoke-GuestLiveEvidenceHeartbeat
     }
     $script:guestBootTimeUtc = $null
     $script:statePath = Join-Path $recoveryRoot 'agent-state.json'
+    $guestAccountPolicyHealthy = $true
     Write-AgentState -Status 'SyntheticBootState'
     $firstAgentState = Get-Content -Raw -LiteralPath $script:statePath | ConvertFrom-Json
     $script:syntheticCurrentBootUtc = [DateTime]'2026-08-31T01:00:00Z'

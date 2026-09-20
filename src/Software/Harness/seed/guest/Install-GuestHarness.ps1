@@ -1,6 +1,9 @@
 $ErrorActionPreference = 'Stop'
 
 $agentRoot = 'C:\CodexGuest'
+# The sealed image must remain usable beyond Windows' default password age.
+Get-LocalUser -SID ([Security.Principal.WindowsIdentity]::GetCurrent().User) |
+    Set-LocalUser -PasswordNeverExpires $true -AccountNeverExpires
 $seedVolume = Get-Volume -FileSystemLabel 'CODEXSEED' -ErrorAction Stop | Select-Object -First 1
 $seedRoot = $seedVolume.DriveLetter + ':\guest'
 

@@ -159,6 +159,9 @@ if ($sendKeys.Count -ne 1 -or [string]$sendKeys[0].keys -cne 'WIN+LEFT' -or [int
 $scenarios.Add('keyboard-proof-captures-before-and-after-exact-chord')
 
 $deploy = Get-Content -LiteralPath $deployPath -Raw
+if ($deploy -notmatch 'verify the disposable account cannot expire') {
+    throw 'The immutable release plan omits guest account expiry protection.'
+}
 if ($deploy -notmatch [regex]::Escape("Run legacy launch, accented-name UI Automation, bounded keyboard, expected-guest-power-off, and verified system-prompt acceptance in isolated workers.")) {
     throw 'The immutable release plan does not describe all five isolated acceptance paths.'
 }

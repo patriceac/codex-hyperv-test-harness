@@ -956,17 +956,22 @@ function Ensure-PoolDemandCapacity {
     $queued = Get-PoolQueuedFiles
     if ($queued.Count -eq 0) { return }
     $states = Get-PoolWorkerStates -BrokerRoot $BrokerRoot -Config $Config
-    $potential = @($states | Where-Object { $_.Status -in @('Ready', 'Starting', 'StartQueued', 'Recycling', 'RecycleQueued') })
-    if ($potential.Count -gt 0) { return }
-    $candidate = @($states | Where-Object { $_.Status -eq 'Off' -and [bool]$_.OsClean } | Sort-Object { [int]$_.WorkerId }) | Select-Object -First 1
-    if (-not $candidate) {
+    # Failed recovery attempts must not keep clean, unused workers asleep.
+    $potential = @($states | Where-Object {
+        ($_.Status -eq 'Ready' -and [bool]$_.OsClean) -or
+        ($_.Status -in @('Starting', 'StartQueued', 'Recycling', 'RecycleQueued') -and [int]$_.FaultRecoveryAttempts -eq 0)
+    })
+    $needed = [Math]::Max(0, [Math]::Min($queued.Count, [int]$Config.PoolMaxWorkers) - $potential.Count)
+    if ($needed -eq 0) { return }
+    $candidates = @($states | Where-Object { $_.Status -eq 'Off' -and [bool]$_.OsClean } | Sort-Object { [int]$_.WorkerId } | Select-Object -First $needed)
+    foreach ($candidate in $candidates) {
+        Set-PoolLifecycleQueued -State $candidate -Mode Start -IdleDeadlineUtc (Get-PoolIdleDeadline -Config $Config -FromUtc ([DateTime]::UtcNow)).ToString('o')
+    }
+    if ($candidates.Count -eq 0 -and $potential.Count -eq 0) {
         $candidate = @($states | Where-Object { Test-PoolWorkerFaultRecoveryEligible -State $_ } | Sort-Object { [int]$_.WorkerId }) | Select-Object -First 1
         if ($candidate) {
             Set-PoolLifecycleQueued -State $candidate -Mode Recycle -IdleDeadlineUtc (Get-PoolIdleDeadline -Config $Config -FromUtc ([DateTime]::UtcNow)).ToString('o')
         }
-    }
-    else {
-        Set-PoolLifecycleQueued -State $candidate -Mode Start -IdleDeadlineUtc (Get-PoolIdleDeadline -Config $Config -FromUtc ([DateTime]::UtcNow)).ToString('o')
     }
 }
 
@@ -1335,8 +1340,12 @@ function Invoke-PoolBrokerLoop {
         $active = @($states | Where-Object Status -in @('Leased', 'RunCompleted')).Count
         $ready = @($states | Where-Object Status -eq 'Ready').Count
         $queued = @(Get-PoolQueuedFiles).Count
-        $status = if ($maintenance) { 'Maintenance' } elseif ($active -gt 0) { 'PoolActive' } elseif ($ready -gt 0) { 'PoolWarm' } else { 'Idle' }
-        Write-BrokerState -Status $status -Message ("Pool: active=$active ready=$ready queued=$queued.")
+        $faults = @($states | Where-Object {
+            [int]$_.FaultRecoveryAttempts -ge 3 -or
+            ($_.Status -notin @('Ready', 'Off', 'Leased', 'RunCompleted') -and [string]$_.LastFailureReason -match '^Guest(AuthenticationFailed|AccountPolicyInvalid):')
+        })
+        $status = if ($maintenance) { 'Maintenance' } elseif ($faults.Count -gt 0) { 'PoolDegraded' } elseif ($active -gt 0) { 'PoolActive' } elseif ($ready -gt 0) { 'PoolWarm' } else { 'Idle' }
+        Write-BrokerState -Status $status -Message ("Pool: active=$active ready=$ready queued=$queued failing=$($faults.Count).")
         Start-Sleep -Milliseconds 300
     }
 }

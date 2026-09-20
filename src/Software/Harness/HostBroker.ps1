@@ -1362,12 +1362,20 @@ try {
 }
 catch {
     $exitCode = 1
+    $probeFailure = $_
+    $authenticationFailed = $false
+    try {
+        $resources = New-Object Resources.ResourceManager('RemotingErrorIdStrings', [Management.Automation.PSObject].Assembly)
+        $authenticationFailed = $probeFailure.Exception -is [Management.Automation.Remoting.PSDirectException] -and
+            $probeFailure.Exception.Message -eq $resources.GetString('InvalidCredential', [Globalization.CultureInfo]::CurrentUICulture)
+    } catch { }
     $result = [ordered]@{
         Success = $false
         State = $null
-        Error = $_.Exception.Message
-        ErrorType = $_.Exception.GetType().FullName
-        ErrorFullyQualifiedId = $_.FullyQualifiedErrorId
+        AuthenticationFailed = [bool]$authenticationFailed
+        Error = $probeFailure.Exception.Message
+        ErrorType = $probeFailure.Exception.GetType().FullName
+        ErrorFullyQualifiedId = $probeFailure.FullyQualifiedErrorId
     }
 }
 $temporaryPath = $outputPath + '.tmp'
@@ -1628,16 +1636,19 @@ function Wait-GuestSession {
         [Parameter(Mandatory = $true)] [DateTime] $NotBeforeUtc,
         [Parameter(Mandatory = $true)] [string] $RequestId,
         [Parameter(Mandatory = $true)] [DateTime] $ExecutionDeadlineUtc,
-        [switch] $RequireCurrentGuestBootTime
+        [switch] $RequireCurrentGuestBootTime,
+        [ValidateRange(1, 60)] [int] $ProbeTimeoutSeconds = 15
     )
 
     # Credential is retained in the signature so callers cannot accidentally
     # bypass the same validated credential path used for later PSSessions. The
     # disposable child reads that protected file itself.
     $null = $Credential
+    $lastProbeError = 'No guest readiness response has been received.'
     while ($true) {
-        Assert-RequestActive -RequestId $RequestId -ExecutionDeadlineUtc $ExecutionDeadlineUtc
-        Write-BrokerState -Status 'StartingVm' -RequestId $RequestId -Message 'Waiting for the interactive guest agent.'
+        try { Assert-RequestActive -RequestId $RequestId -ExecutionDeadlineUtc $ExecutionDeadlineUtc }
+        catch [TimeoutException] { throw [TimeoutException]::new("Guest readiness deadline expired for $VmName. Last probe: $lastProbeError", $_.Exception) }
+        Write-BrokerState -Status 'StartingVm' -RequestId $RequestId -Message "Waiting for the interactive guest agent. $lastProbeError"
         $probeId = $RequestId + '-' + [Guid]::NewGuid().ToString('N')
         $probeOutputPath = Join-Path $probePath ($probeId + '.json')
         $probe = $null
@@ -1646,6 +1657,7 @@ function Wait-GuestSession {
             # a disposable process so the single queue worker remains able to
             # enforce cancellation and execution deadlines.
             $probe = Start-GuestSessionProbe -VmName $VmName -OutputPath $probeOutputPath
+            $probeDeadlineUtc = [DateTime]::UtcNow.AddSeconds($ProbeTimeoutSeconds)
             $nextProbeHeartbeatUtc = [DateTime]::MinValue
             while ($true) {
                 Assert-RequestActive -RequestId $RequestId -ExecutionDeadlineUtc $ExecutionDeadlineUtc
@@ -1657,13 +1669,27 @@ function Wait-GuestSession {
                 if ($probe.Process.HasExited) {
                     break
                 }
+                if ([DateTime]::UtcNow -ge $probeDeadlineUtc) {
+                    $lastProbeError = "PowerShell Direct readiness probe exceeded $ProbeTimeoutSeconds seconds."
+                    break
+                }
                 Start-Sleep -Milliseconds 200
             }
             if (Test-Path -LiteralPath $probeOutputPath -PathType Leaf) {
                 $probeResult = Get-Content -Raw -LiteralPath $probeOutputPath -Encoding UTF8 | ConvertFrom-Json
                 $guestState = $probeResult.State
+                if (-not $probeResult.Success) {
+                    $lastProbeError = [string]$probeResult.Error
+                    if ($probeResult.AuthenticationFailed -eq $true -or [string]$probeResult.ErrorFullyQualifiedId -match 'InvalidCredential') {
+                        throw [Security.Authentication.AuthenticationException]::new("GuestAuthenticationFailed: $VmName rejected the stored credential. Check the disposable account password expiry and credential identity. $lastProbeError")
+                    }
+                }
+                else { $lastProbeError = 'The guest agent is absent, noninteractive, or has a stale heartbeat.' }
                 if ($probeResult.Success -and $guestState -and $guestState.Ready -and $guestState.UserInteractive) {
-                    $heartbeat = [DateTime]::Parse([string]$guestState.HeartbeatUtc).ToUniversalTime()
+                    if ($guestState.PSObject.Properties['GuestAccountPolicyHealthy'] -and -not $guestState.GuestAccountPolicyHealthy) {
+                        throw [Security.Authentication.AuthenticationException]::new("GuestAccountPolicyInvalid: $VmName has an expiring or disabled automation account; refresh the canonical baseline.")
+                    }
+                    $heartbeat = ([DateTime]$guestState.HeartbeatUtc).ToUniversalTime()
                     $guestBootIsFresh = Test-GuestSessionBootIdentity -GuestState $guestState -CurrentGuestBootTimeUtc $probeResult.CurrentGuestBootTimeUtc -Required ([bool]$RequireCurrentGuestBootTime)
                     $heartbeatIsFresh = if ($RequireCurrentGuestBootTime) {
                         try {
@@ -1679,15 +1705,20 @@ function Wait-GuestSession {
                     }
                 }
             }
+            elseif ($probe.Process.HasExited) { $lastProbeError = "Readiness probe exited without diagnostics (exit code $($probe.Process.ExitCode))." }
         }
         catch [OperationCanceledException] {
             throw
         }
         catch [TimeoutException] {
+            throw [TimeoutException]::new("Guest readiness deadline expired for $VmName. Last probe: $lastProbeError", $_.Exception)
+        }
+        catch [Security.Authentication.AuthenticationException] {
             throw
         }
         catch {
             # PowerShell Direct and the autologon session take time to become ready.
+            $lastProbeError = $_.Exception.Message
         }
         finally {
             if ($probe) {
@@ -1696,7 +1727,8 @@ function Wait-GuestSession {
             Remove-Item -LiteralPath $probeOutputPath -Force -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath ($probeOutputPath + '.tmp') -Force -ErrorAction SilentlyContinue
         }
-        Assert-RequestActive -RequestId $RequestId -ExecutionDeadlineUtc $ExecutionDeadlineUtc
+        try { Assert-RequestActive -RequestId $RequestId -ExecutionDeadlineUtc $ExecutionDeadlineUtc }
+        catch [TimeoutException] { throw [TimeoutException]::new("Guest readiness deadline expired for $VmName. Last probe: $lastProbeError", $_.Exception) }
         Start-Sleep -Seconds 2
     }
 }

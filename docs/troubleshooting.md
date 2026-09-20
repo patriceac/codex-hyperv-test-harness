@@ -22,6 +22,14 @@ The installer stops instead of guessing ownership. Inspect the named VM. Use `-F
 
 Use the runtime queue script and request state. `Assigned` means the broker claimed work, not that the application is running. Look for payload staging, VM preparation, guest-agent readiness, and `ApplicationRunning`. Cancellation and execution timeouts remain authoritative.
 
+## Repeated recycling or an apparently healthy stalled pool
+
+Use `Get-HyperVExecutableTestQueue.ps1` and check `PlatformHealthy`, `PlatformStatus`, and `HealthReasons`. `BrokerHealthy` means only that the broker process and heartbeat are alive. `QueuedDemandStalled` detects queued work with no active or ready worker after 120 seconds. Three consecutive lifecycle failures, a lifecycle running beyond 300 seconds, and an authentication/account-policy failure also report degradation. An idle off pool is healthy; intentional maintenance suppresses demand and repeated-recovery alarms, but not orphaned work or an overlong lifecycle.
+
+`LastFailureReason` survives the next recycle attempt. Readiness probes retry a stuck PowerShell Direct connection after 15 seconds and preserve the final cause. `GuestAuthenticationFailed` requires checking the stored credential identity and the disposable guest account; repeated OS recreation cannot repair an expired password. Such failures back off to the configured maximum instead of rapidly rebooting identical disks. An already-expired legacy account requires the managed baseline's Windows password-change screen to be completed with its protected credential before PowerShell Direct can resume. Keep the same credential, then let the canonical release update set and verify the account's non-expiring policy, replace the workers, and refresh recovery. Never change host-wide password policy or patch individual workers as a durable repair.
+
+Regression guardrails cover queued demand behind failed recyclers, duplicate-start prevention, normal cold/idle/maintenance states, immediate account-failure detection, bounded readiness probes, diagnostic retention, and account policy in both provisioning and baseline promotion. Release acceptance must still pass in real isolated guests; synthetic tests alone do not establish pool health.
+
 ## Physical screen
 
 Normal native tests never use the host keyboard, mouse, or desktop. VM evidence is captured from the interactive guest session, so locking the physical host is compatible as long as the host does not sleep.

@@ -84,6 +84,7 @@ function Get-GuestHarnessBaselineUpdatePlan {
         Queue = [ordered]@{ Queued = $queued; Processing = $processing; LiveQueued = $liveQueued; LiveProcessing = $liveProcessing }
         Source = @(Get-GuestHarnessSourceInventory)
         PersistentChanges = @(
+            'Keep only the disposable guest automation account and its password non-expiring; preserve the existing credential.',
             'Install the reviewed guest-agent and live-evidence module into the canonical clean baseline.',
             'Transactionally replace the canonical clean checkpoint after preserving the prior checkpoint until promotion succeeds.',
             "Force-recreate only the $([int]$poolDefinition.PoolSize) pool workers named by the installed pool definition from the new checkpoint.",
@@ -252,6 +253,8 @@ try {
         Copy-Item -LiteralPath $GuestSupervisorSource -Destination 'C:\CodexGuest' -ToSession $session -Force
         Copy-Item -LiteralPath $GuestLiveEvidenceSource -Destination 'C:\CodexGuest' -ToSession $session -Force
         Invoke-Command -Session $session -ScriptBlock {
+            Get-LocalUser -SID ([Security.Principal.WindowsIdentity]::GetCurrent().User) |
+                Set-LocalUser -PasswordNeverExpires $true -AccountNeverExpires
             foreach ($directoryName in @('Inbox', 'Processing', 'Completed', 'Outbox', 'Payloads', 'Transfer', 'LiveEvidence')) {
                 $directory = Join-Path 'C:\CodexGuest' $directoryName
                 if (Test-Path -LiteralPath $directory) {
@@ -263,7 +266,9 @@ try {
             New-ItemProperty -LiteralPath $runKey -Name CodexGuestAgent -PropertyType String -Value $supervisorCommand -Force | Out-Null
         }
         $guestHarness = Invoke-Command -Session $session -ScriptBlock {
+            $account = Get-LocalUser -SID ([Security.Principal.WindowsIdentity]::GetCurrent().User)
             [ordered]@{
+                AccountPolicyHealthy = $account.Enabled -and $null -eq $account.PasswordExpires -and $null -eq $account.AccountExpires
                 GuestAgentSha256 = (Get-FileHash -LiteralPath 'C:\CodexGuest\GuestAgent.ps1' -Algorithm SHA256).Hash
                 GuestSupervisorSha256 = (Get-FileHash -LiteralPath 'C:\CodexGuest\GuestAgentSupervisor.ps1' -Algorithm SHA256).Hash
                 GuestLiveEvidenceSha256 = (Get-FileHash -LiteralPath 'C:\CodexGuest\GuestLiveEvidence.ps1' -Algorithm SHA256).Hash
@@ -271,6 +276,7 @@ try {
             }
         }
         $sourceHash = (Get-FileHash -LiteralPath $GuestAgentSource -Algorithm SHA256).Hash
+        if (-not $guestHarness.AccountPolicyHealthy) { throw 'The disposable guest automation account still expires or is disabled.' }
         $supervisorSourceHash = (Get-FileHash -LiteralPath $GuestSupervisorSource -Algorithm SHA256).Hash
         $liveEvidenceSourceHash = (Get-FileHash -LiteralPath $GuestLiveEvidenceSource -Algorithm SHA256).Hash
         if ($guestHarness.GuestAgentSha256 -ne $sourceHash) {
@@ -357,6 +363,7 @@ try {
     }
 
     Write-UpdateResult -Success $true -Message 'Updated guest agent is installed in the clean baseline and the configured pool was rebuilt from it.' -Details @{
+        GuestAccountPolicyHealthy = [bool]$guestHarness.AccountPolicyHealthy
         GuestAgentSha256 = $sourceHash
         GuestSupervisorSha256 = $supervisorSourceHash
         GuestLiveEvidenceSha256 = $liveEvidenceSourceHash

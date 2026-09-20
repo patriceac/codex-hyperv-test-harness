@@ -1,9 +1,10 @@
 [CmdletBinding()]
 param(
-    [string] $SourceRoot = (Split-Path -Parent $PSScriptRoot)
+    [string] $SourceRoot
 )
 
 $ErrorActionPreference = 'Stop'
+if ([string]::IsNullOrWhiteSpace($SourceRoot)) { $SourceRoot = Split-Path -Parent $PSScriptRoot }
 $BrokerRoot = 'SyntheticBroker'
 $Config = [pscustomobject]@{
     PoolMaxWorkers = 4
@@ -11,10 +12,13 @@ $Config = [pscustomobject]@{
     PoolIdleTimeoutSeconds = 600
 }
 
+. (Join-Path $SourceRoot 'PoolCommon.ps1')
 . (Join-Path $SourceRoot 'PoolBroker.ps1')
 
 $script:states = @()
 $script:lifecycleCalls = New-Object Collections.Generic.List[object]
+$script:queued = @()
+function Get-PoolQueuedFiles { @($script:queued) }
 
 function Get-PoolWorkerStates {
     param([string] $BrokerRoot, $Config)
@@ -80,6 +84,8 @@ function New-SyntheticState {
         ProcessStartUtc = $null
         RequestId = if ($Status -in @('Leased', 'RunCompleted')) { 'request-' + $WorkerId } else { $null }
         LastError = $null
+        FaultRecoveryAttempts = 0
+        FaultRecoveryNotBeforeUtc = $null
     }
 }
 
@@ -178,6 +184,38 @@ Reset-SyntheticPool -States @(
 $fullSummary = Get-PoolWarmSpareSummary -States $script:states
 Assert-True ($fullSummary.RequiredCount -eq 0 -and $fullSummary.Satisfied) 'A fully leased four-worker pool incorrectly required a fifth VM.'
 $scenarios.Add('four-worker-cap-needs-no-impossible-spare')
+
+$script:queued = @(1, 2, 3)
+Reset-SyntheticPool -States @((New-SyntheticState 1 'Recycling'), (New-SyntheticState 2 'Recycling'), (New-SyntheticState 3 'Off'), (New-SyntheticState 4 'Off'))
+$script:states[0].FaultRecoveryAttempts = 5
+$script:states[1].FaultRecoveryAttempts = 4
+Ensure-PoolDemandCapacity
+Assert-True ($script:lifecycleCalls.Count -eq 2 -and ($script:lifecycleCalls.WorkerId -join ',') -eq '3,4' -and @($script:lifecycleCalls | Where-Object Mode -ne 'Start').Count -eq 0) 'Repeated recycling blocked clean spare workers despite queued demand.'
+Ensure-PoolDemandCapacity
+Assert-True ($script:lifecycleCalls.Count -eq 2) 'The next scheduler pass duplicated queued starts.'
+$scenarios.Add('failed-recycling-does-not-block-clean-demand-capacity')
+
+Reset-SyntheticPool -States @((New-SyntheticState 1 'Off'), (New-SyntheticState 2 'Off'), (New-SyntheticState 3 'Off'), (New-SyntheticState 4 'Off'))
+Ensure-PoolDemandCapacity
+Assert-True ($script:lifecycleCalls.Count -eq 3) 'Cold demand did not queue one start per waiting request.'
+$scenarios.Add('cold-demand-scales-with-queue')
+
+$script:queued = @(1)
+Reset-SyntheticPool -States @((New-SyntheticState 1 'Recycling'), (New-SyntheticState 2 'Off'), (New-SyntheticState 3 'Off'), (New-SyntheticState 4 'Off'))
+Ensure-PoolDemandCapacity
+Assert-True ($script:lifecycleCalls.Count -eq 0) 'A normal first recycle caused unnecessary cold startup.'
+$script:queued = @()
+$script:states[0].FaultRecoveryAttempts = 5
+Ensure-PoolDemandCapacity
+Assert-True ($script:lifecycleCalls.Count -eq 0) 'No queued demand should start spare workers.'
+$scenarios.Add('normal-recycle-and-empty-queue-do-not-overprovision')
+
+$script:queued = @(1)
+Reset-SyntheticPool -States @((New-SyntheticState 1 'Faulted' $false))
+$script:states[0].FaultRecoveryNotBeforeUtc = [DateTime]::UtcNow.AddMinutes(5).ToString('o')
+Ensure-PoolDemandCapacity
+Assert-True ($script:lifecycleCalls.Count -eq 0) 'Queued demand bypassed fault backoff.'
+$scenarios.Add('demand-respects-recovery-backoff')
 
 [pscustomobject][ordered]@{
     Success = $true

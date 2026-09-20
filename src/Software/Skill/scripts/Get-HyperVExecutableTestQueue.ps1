@@ -70,7 +70,7 @@ function Get-RequestDetails {
     else { 'Assigned by the broker; per-request lifecycle details are not yet available.' }
 
     $queueDeadlineUtc = $createdUtc.AddSeconds($queueTimeoutSeconds)
-    [ordered]@{
+    [pscustomobject][ordered]@{
         RequestId = $requestId
         OwnershipStatus = $Status
         Status = $effectiveStatus
@@ -151,6 +151,28 @@ for ($index = 0; $index -lt $queuedFiles.Count; $index++) {
     $jobs += Get-RequestDetails -File $queuedFiles[$index] -Status 'Queued' -Position ($index + 1)
 }
 
+$brokerHealthy = $brokerProcessAlive -and $null -ne $heartbeatUtc -and ([DateTime]::UtcNow - $heartbeatUtc).TotalSeconds -lt 300
+$oldestQueuedSeconds = [double]0
+if ($queuedFiles.Count -gt 0) { $oldestQueuedSeconds = [double](($jobs | Where-Object OwnershipStatus -eq 'Queued' | Measure-Object AgeSeconds -Maximum).Maximum) }
+$repeatedFaults = @($poolWorkers | Where-Object { [int]$_.FaultRecoveryAttempts -ge 3 })
+$accountFaults = @($poolWorkers | Where-Object { $_.Status -notin @('Ready', 'Off', 'Leased', 'RunCompleted') -and [string]$_.LastFailureReason -match '^Guest(AuthenticationFailed|AccountPolicyInvalid):' })
+$stalledLifecycles = @($poolWorkers | Where-Object {
+    if ($_.Status -notin @('Starting', 'Recycling', 'Stopping') -or -not $_.ProcessStartUtc) { return $false }
+    try { ([DateTime]::UtcNow - ([DateTime]$_.ProcessStartUtc).ToUniversalTime()).TotalSeconds -ge 300 }
+    catch { $true }
+})
+$demandStalled = -not $maintenanceActive -and $queuedFiles.Count -gt 0 -and $processingFiles.Count -eq 0 -and $poolReadyWarmSpareCount -eq 0 -and $oldestQueuedSeconds -ge 120
+$healthReasons = @()
+if (-not $brokerHealthy) { $healthReasons += 'BrokerUnavailable' }
+$poolStateFresh = $false
+try { $poolStateFresh = $poolState -and $poolState.UpdatedUtc -and ([DateTime]::UtcNow - ([DateTime]$poolState.UpdatedUtc).ToUniversalTime()).TotalSeconds -lt 300 } catch { }
+if (-not $poolStateFresh -or $poolWorkers.Count -ne $poolMaxWorkers) { $healthReasons += 'PoolStateUnavailable' }
+if ($orphanedProcessing -or $processingFiles.Count -gt $poolMaxWorkers -or $warmSpareInvariantViolation) { $healthReasons += 'PoolInvariantViolation' }
+if ($demandStalled) { $healthReasons += 'QueuedDemandStalled' }
+if (-not $maintenanceActive -and $repeatedFaults.Count -gt 0) { $healthReasons += 'RepeatedLifecycleFailure' }
+if (-not $maintenanceActive -and $accountFaults.Count -gt 0) { $healthReasons += 'GuestAccountUnavailable' }
+if ($stalledLifecycles.Count -gt 0) { $healthReasons += 'LifecycleDeadlineExceeded' }
+
 [ordered]@{
     BrokerStatus = if ($brokerState) { [string]$brokerState.Status } else { 'Unknown' }
     BrokerRequestId = if ($brokerState) { [string]$brokerState.RequestId } else { $null }
@@ -160,7 +182,14 @@ for ($index = 0; $index -lt $queuedFiles.Count; $index++) {
     # Some Hyper-V operations are synchronously blocking. Distinguish a stale
     # progress heartbeat from a dead broker process instead of conflating them.
     BrokerHeartbeatStale = $null -eq $heartbeatUtc -or ([DateTime]::UtcNow - $heartbeatUtc).TotalSeconds -ge 45
-    BrokerHealthy = $brokerProcessAlive -and $null -ne $heartbeatUtc -and ([DateTime]::UtcNow - $heartbeatUtc).TotalSeconds -lt 300
+    BrokerHealthy = [bool]$brokerHealthy
+    PlatformHealthy = $healthReasons.Count -eq 0 -and -not $maintenanceActive
+    PlatformStatus = if ($healthReasons.Count -gt 0) { 'Degraded' } elseif ($maintenanceActive) { 'Maintenance' } else { 'Healthy' }
+    HealthReasons = @($healthReasons)
+    QueuedDemandStalled = [bool]$demandStalled
+    OldestQueuedSeconds = $oldestQueuedSeconds
+    RepeatedFailureWorkerIds = @($repeatedFaults | ForEach-Object { [int]$_.WorkerId })
+    StalledLifecycleWorkerIds = @($stalledLifecycles | ForEach-Object { [int]$_.WorkerId })
     ActiveCount = $processingFiles.Count
     QueueDepth = $queuedFiles.Count
     OrphanedProcessing = $orphanedProcessing

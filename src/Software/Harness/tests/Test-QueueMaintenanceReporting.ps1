@@ -1,12 +1,14 @@
 [CmdletBinding()]
 param(
-    [string] $QueueScript = (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'Skill\scripts\Get-HyperVExecutableTestQueue.ps1')
+    [string] $QueueScript
 )
 
 $ErrorActionPreference = 'Stop'
+if ([string]::IsNullOrWhiteSpace($QueueScript)) { $QueueScript = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'Skill\scripts\Get-HyperVExecutableTestQueue.ps1' }
 
 function Write-TestJson {
     param([string] $Path, $Value)
+    if ($Path -like '*pool-state.json') { $Value['UpdatedUtc'] = [DateTime]::UtcNow.ToString('o') }
     $Value | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $Path -Encoding UTF8
 }
 
@@ -64,6 +66,41 @@ try {
     $orphaned = Read-QueueState -Root $root
     Assert-True ($orphaned.MaintenanceActive -and $orphaned.OrphanedProcessing -and $orphaned.InvariantViolation) 'Maintenance incorrectly suppressed an orphaned-processing violation.'
     $scenarios.Add('maintenance-keeps-unrelated-alarms')
+
+    Remove-Item -LiteralPath (Join-Path $root 'Processing\orphaned-request.json'), (Join-Path $root 'State\maintenance.json')
+    $workers = @(1..4 | ForEach-Object { [ordered]@{WorkerId=$_;Status='Off';OsClean=$true;FaultRecoveryAttempts=0} })
+    $workers[0].Status = 'Recycling'; $workers[0].FaultRecoveryAttempts = 6
+    $workers[1].Status = 'Faulted'; $workers[1].FaultRecoveryAttempts = 5
+    Write-TestJson -Path (Join-Path $root 'State\pool-state.json') -Value @{MaxWorkers=4;ReadyCount=0;Workers=$workers}
+    Write-TestJson -Path (Join-Path $root 'Requests\waiting.json') -Value @{CreatedUtc=[DateTime]::UtcNow.AddMinutes(-3).ToString('o')}
+    $degraded = Read-QueueState -Root $root
+    Assert-True ($degraded.BrokerHealthy -and -not $degraded.PlatformHealthy -and $degraded.QueuedDemandStalled -and $degraded.HealthReasons -contains 'RepeatedLifecycleFailure') 'A live heartbeat hid failed recycling and stalled demand.'
+    $scenarios.Add('live-broker-does-not-hide-degraded-pool')
+
+    $workers[0].Status = 'Starting'; $workers[0].FaultRecoveryAttempts = 0
+    $workers[1].Status = 'Off'; $workers[1].FaultRecoveryAttempts = 0
+    Write-TestJson -Path (Join-Path $root 'State\pool-state.json') -Value @{MaxWorkers=4;ReadyCount=0;Workers=$workers}
+    Write-TestJson -Path (Join-Path $root 'Requests\waiting.json') -Value @{CreatedUtc=[DateTime]::UtcNow.ToString('o')}
+    $starting = Read-QueueState -Root $root
+    Assert-True ($starting.PlatformHealthy -and -not $starting.QueuedDemandStalled) 'Normal bounded cold startup raised a stall alarm.'
+    Remove-Item -LiteralPath (Join-Path $root 'Requests\waiting.json')
+    $workers[0].Status = 'Off'
+    Write-TestJson -Path (Join-Path $root 'State\pool-state.json') -Value @{MaxWorkers=4;ReadyCount=0;Workers=$workers}
+    Assert-True ((Read-QueueState -Root $root).PlatformHealthy) 'An idle off pool was incorrectly degraded.'
+    $scenarios.Add('normal-startup-and-idle-pool-remain-healthy')
+
+    $workers[0].Status = 'Recycling'
+    $workers[0].ProcessStartUtc = [DateTime]::UtcNow.AddMinutes(-6).ToString('o')
+    Write-TestJson -Path (Join-Path $root 'State\pool-state.json') -Value @{MaxWorkers=4;ReadyCount=0;Workers=$workers}
+    $stuck = Read-QueueState -Root $root
+    Assert-True (-not $stuck.PlatformHealthy -and $stuck.HealthReasons -contains 'LifecycleDeadlineExceeded') 'A stuck lifecycle escaped detection without queued demand.'
+    $scenarios.Add('lifecycle-stall-is-detected-without-demand')
+
+    $workers[0].Status = 'Faulted'; $workers[0].FaultRecoveryAttempts = 1
+    $workers[0].LastFailureReason = 'GuestAuthenticationFailed: expired synthetic account'
+    Write-TestJson -Path (Join-Path $root 'State\pool-state.json') -Value @{MaxWorkers=4;ReadyCount=0;Workers=$workers}
+    Assert-True ((Read-QueueState -Root $root).HealthReasons -contains 'GuestAccountUnavailable') 'The first authentication failure was hidden until repeated retries.'
+    $scenarios.Add('account-failure-is-detected-immediately')
 }
 finally {
     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue

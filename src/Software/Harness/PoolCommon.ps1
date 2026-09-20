@@ -326,6 +326,10 @@ function New-PoolFaultStatePatch {
     $attempt = if ($State -and $State.FaultRecoveryAttempts) { [int]$State.FaultRecoveryAttempts + 1 } else { 1 }
     $workerId = if ($State -and $State.WorkerId) { [int]$State.WorkerId } else { 1 }
     $delaySeconds = Get-PoolFaultRecoveryDelaySeconds -Config $Config -Attempt $attempt -WorkerId $workerId
+    if ($ErrorMessage -match '^Guest(AuthenticationFailed|AccountPolicyInvalid):') {
+        # Recreating the same sealed disk cannot repair an account policy.
+        $delaySeconds = Get-PoolFaultRecoveryDelaySeconds -Config $Config -Attempt 50 -WorkerId $workerId
+    }
     [ordered]@{
         Status = 'Faulted'
         PendingLifecycleMode = $null
@@ -337,6 +341,7 @@ function New-PoolFaultStatePatch {
         IdleDeadlineUtc = $null
         OsClean = $false
         LastError = $ErrorMessage
+        LastFailureReason = $ErrorMessage
         LastFailureUtc = $FailureUtc.ToUniversalTime().ToString('o')
         FaultRecoveryAttempts = $attempt
         FaultRecoveryNotBeforeUtc = $FailureUtc.ToUniversalTime().AddSeconds($delaySeconds).ToString('o')

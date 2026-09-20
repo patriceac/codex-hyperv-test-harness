@@ -187,6 +187,8 @@ $completedPath = Join-Path $agentRoot 'Completed'
 $outboxPath = Join-Path $agentRoot 'Outbox'
 $statePath = Join-Path $agentRoot 'agent-state.json'
 $guestBootTimeUtc = $null
+$guestAccount = Get-LocalUser -SID ([Security.Principal.WindowsIdentity]::GetCurrent().User)
+$guestAccountPolicyHealthy = $guestAccount.Enabled -and $null -eq $guestAccount.PasswordExpires -and $null -eq $guestAccount.AccountExpires
 
 foreach ($path in @($inboxPath, $processingPath, $completedPath, $outboxPath)) {
     New-Item -ItemType Directory -Force -Path $path | Out-Null
@@ -263,6 +265,7 @@ function Write-AgentState {
         UserInteractive = [Environment]::UserInteractive
         MachineName = $env:COMPUTERNAME
         GuestBootTimeUtc = (Get-CachedGuestBootTimeUtc)
+        GuestAccountPolicyHealthy = [bool]$guestAccountPolicyHealthy
     })
 }
 
