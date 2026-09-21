@@ -45,11 +45,12 @@ function Get-GuestPrebootEvidence {
         [int]$type.KeyProtectorType
     })
     $policy = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -ErrorAction Stop
-    $banner = -not [string]::IsNullOrWhiteSpace([string]$policy.legalnoticecaption) -or -not [string]::IsNullOrWhiteSpace([string]$policy.legalnoticetext)
+    $banner = -not [string]::IsNullOrWhiteSpace(([string]$policy.legalnoticecaption).Trim([char]0)) -or -not [string]::IsNullOrWhiteSpace(([string]$policy.legalnoticetext).Trim([char]0))
     $smartCard = [int]$policy.scforceoption -ne 0
     $unencrypted = [int]$conversion.ConversionStatus -eq 0
     $tpmOnly = [int]$conversion.ConversionStatus -eq 1 -and [int]$protection.ProtectionStatus -eq 1 -and $types -contains 1 -and @($types | Where-Object { $_ -notin @(1, 3) }).Count -eq 0
-    [pscustomobject]@{ Unencrypted = $unencrypted; TpmOnly = $tpmOnly; ConversionStatus = [int]$conversion.ConversionStatus; ProtectionStatus = [int]$protection.ProtectionStatus; ProtectorTypes = $types; LoginBannerPresent = $banner; SmartCardRequired = $smartCard; UnattendedPrebootSupported = ($unencrypted -or $tpmOnly) -and -not $banner -and -not $smartCard }
+    $clearKeyOnly = [int]$conversion.ConversionStatus -eq 1 -and [int]$protection.ProtectionStatus -eq 0 -and $ids.PSObject.Properties.Name -contains 'VolumeKeyProtectorID' -and $types.Count -eq 0
+    [pscustomobject]@{ Unencrypted = $unencrypted; TpmOnly = $tpmOnly; ClearKeyOnly = $clearKeyOnly; ConversionStatus = [int]$conversion.ConversionStatus; ProtectionStatus = [int]$protection.ProtectionStatus; ProtectorTypes = $types; LoginBannerPresent = $banner; SmartCardRequired = $smartCard; UnattendedPrebootSupported = ($unencrypted -or $tpmOnly -or $clearKeyOnly) -and -not $banner -and -not $smartCard }
 }
 
 function Initialize-GuestPowerTest {
@@ -59,7 +60,7 @@ function Initialize-GuestPowerTest {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $preboot = Get-GuestPrebootEvidence
     if ($CleanSignIn) {
-        if (-not $preboot.UnattendedPrebootSupported) { throw 'Guest does not positively support unattended preboot.' }
+        if (-not $preboot.UnattendedPrebootSupported) { throw "Guest does not positively support unattended preboot: conversion=$($preboot.ConversionStatus), protection=$($preboot.ProtectionStatus), protectors=[$($preboot.ProtectorTypes -join ',')], banner=$($preboot.LoginBannerPresent), smartCard=$($preboot.SmartCardRequired)." }
         $winlogon = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
         Set-ItemProperty $winlogon AutoAdminLogon '0' -ErrorAction Stop
         foreach ($name in @('DefaultPassword', 'AutoLogonCount', 'ForceAutoLogon')) { Remove-ItemProperty $winlogon $name -ErrorAction SilentlyContinue }

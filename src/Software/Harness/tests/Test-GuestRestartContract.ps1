@@ -36,6 +36,36 @@ Check 'credential-opt-in-permitted' ($null -ne (Resolve-GuestRestartPlan $bad $m
 
 # Exercise the actual coordinator with synthetic independent guest observations.
 # Host/VM side effects are replaced here, never on a real worker.
+& {
+    $tokens = $null; $errors = $null
+    $guestAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'seed\guest\GuestPowerTest.ps1'), [ref]$tokens, [ref]$errors)
+    $definition = $guestAst.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-GuestPrebootEvidence' }, $true)
+    . ([scriptblock]::Create($definition.Extent.Text))
+    function Get-CimInstance { [pscustomobject]@{ DriveLetter = 'C:' } }
+    function Get-ItemProperty { [pscustomobject]@{ legalnoticecaption = $case.Banner; legalnoticetext = $case.BannerText; scforceoption = $case.SmartCard } }
+    function Invoke-CimMethod {
+        param($InputObject, $MethodName, $Arguments)
+        switch ($MethodName) {
+            GetConversionStatus { [pscustomobject]@{ ReturnValue = 0; ConversionStatus = $case.Conversion } }
+            GetProtectionStatus { [pscustomobject]@{ ReturnValue = 0; ProtectionStatus = $case.Protection } }
+            GetKeyProtectors { if ($case.MissingIds) { [pscustomobject]@{ ReturnValue = 0 } } else { [pscustomobject]@{ ReturnValue = 0; VolumeKeyProtectorID = @($case.Types | ForEach-Object { [string]$_ }) } } }
+            GetKeyProtectorType { [pscustomobject]@{ ReturnValue = 0; KeyProtectorType = [int]$Arguments.VolumeKeyProtectorID } }
+        }
+    }
+    foreach ($case in @(
+        @{ Name = 'unencrypted'; Conversion = 0; Protection = 0; Types = @(); Expected = $true },
+        @{ Name = 'tpm-only'; Conversion = 1; Protection = 1; Types = @(1, 3); Expected = $true },
+        @{ Name = 'clear-key-no-protectors'; Conversion = 1; Protection = 0; Types = @(); Expected = $true },
+        @{ Name = 'suspended-pin'; Conversion = 1; Protection = 0; Types = @(4, 3); Expected = $false },
+        @{ Name = 'unknown-protection'; Conversion = 1; Protection = 2; Types = @(); Expected = $false },
+        @{ Name = 'encryption-in-progress'; Conversion = 2; Protection = 0; Types = @(); Expected = $false },
+        @{ Name = 'missing-protector-metadata'; Conversion = 1; Protection = 0; Types = @(); MissingIds = $true; Expected = $false },
+        @{ Name = 'login-banner'; Conversion = 1; Protection = 0; Types = @(); Banner = 'Notice'; Expected = $false },
+        @{ Name = 'nul-only-banner'; Conversion = 1; Protection = 0; Types = @(); BannerText = [string][char]0; Expected = $true },
+        @{ Name = 'nul-terminated-real-banner'; Conversion = 1; Protection = 0; Types = @(); BannerText = 'Notice' + [char]0; Expected = $false },
+        @{ Name = 'smart-card'; Conversion = 1; Protection = 0; Types = @(); SmartCard = 1; Expected = $false }
+    )) { Check ('preboot-' + $case.Name) ((Get-GuestPrebootEvidence).UnattendedPrebootSupported -eq $case.Expected) }
+}
 function Write-JsonAtomic { param($Path, $Value) }
 function Copy-GuestJobForExecution { param($Job) $Job | ConvertTo-Json -Depth 20 | ConvertFrom-Json }
 function Expand-GuestJobTokens { param($Value, $GuestPayloadRoot, $GuestOutputRoot, $GuestCredentialFile, $AllowedTokens, $Context) $Value.Replace('{OUTDIR}', $GuestOutputRoot) }
