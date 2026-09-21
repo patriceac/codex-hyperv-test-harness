@@ -2009,7 +2009,7 @@ try {
             [string]$brokerResult.VmFinalState -eq 'Off' -and
             $guestResult -and [bool]$guestResult.Success -and
             $missingHarnessEvidence.Count -eq 0
-        $restartContractProven = -not $restartPlan -or ($brokerResult.GuestRestart.ContractProven -is [bool] -and $brokerResult.GuestRestart.ContractProven -and
+        $restartContractProven = -not $restartPlan -or ($brokerResult.GuestRestart -and $brokerResult.GuestRestart.ContractProven -is [bool] -and $brokerResult.GuestRestart.ContractProven -and
             $brokerResult.GuestRestart.RequestId -ceq $requestId -and @($brokerResult.GuestRestart.Boots).Count -eq $restartPlan.Boots.Count -and
             @($brokerResult.GuestRestart.Phases).Count -eq ($restartPlan.Boots.Count + 1) -and $brokerResult.GuestRestart.OriginalApplicationLaunchCount -eq 1 -and
             $brokerResult.GuestRestart.ApplicationActionReplayed -is [bool] -and -not $brokerResult.GuestRestart.ApplicationActionReplayed)

@@ -19,6 +19,7 @@ try {
         $credential = New-Object Management.Automation.PSCredential($saved.UserName, (ConvertTo-SecureString $saved.Password -AsPlainText -Force))
         $value = Invoke-Command -VMName $data.VmName -Credential $credential -ErrorAction Stop -ScriptBlock {
             param($Id, $Clean, $Fixture, $Credential, $Plan, $BaselineId)
+            Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force -ErrorAction Stop
             . 'C:\CodexGuest\GuestPowerTest.ps1'
             Initialize-GuestPowerTest -RequestId $Id -CleanSignIn $Clean -CredentialFixture $Fixture -Credential $Credential -Plan $Plan -PoolBaselineId $BaselineId
         } -ArgumentList $data.RequestId, ([bool]$data.Policy.Plan), $data.Policy.CredentialFixture, $credential, $data.Policy.Plan, $data.BaselineId

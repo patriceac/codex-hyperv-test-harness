@@ -1337,6 +1337,7 @@ try {
         [ordered]@{
             State = $state
             PowerTest = if ($PowerTestContextPath) {
+                Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force -ErrorAction Stop
                 . 'C:\CodexGuest\GuestPowerTest.ps1'
                 Get-GuestPowerTestObservation -ContextPath $PowerTestContextPath -Outbox $Outbox
             } else { $null }

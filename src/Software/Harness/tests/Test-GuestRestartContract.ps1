@@ -61,6 +61,20 @@ $parameters = @{ Job = $job; Policy = [pscustomobject]@{ Plan = $plan }; VmName 
 $script:deliveries = New-Object Collections.Generic.List[string]; $script:cancel = $false
 $proof = Invoke-GuestRestartPlan @parameters
 Check 'one-original-one-continuation-same-output' ($proof.ContractProven -and $deliveries.Count -eq 2 -and $proof.OriginalApplicationLaunchCount -eq 1 -and -not $proof.ApplicationActionReplayed)
+& {
+    Set-StrictMode -Version Latest
+    $tokens = $null; $errors = $null
+    $runnerAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $root '..\Skill\scripts\Invoke-HyperVExecutableTest.ps1'), [ref]$tokens, [ref]$errors)
+    $assignment = $runnerAst.Find({ param($node) $node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -eq '$restartContractProven' }, $true)
+    $evaluate = [scriptblock]::Create($assignment.Extent.Text)
+    $restartPlan = $plan; $requestId = 'test'
+    $brokerResult = [pscustomobject]@{ GuestRestart = $null }
+    . $evaluate
+    Check 'failed-fixture-has-no-restart-proof-without-masking-error' (-not $restartContractProven)
+    $brokerResult.GuestRestart = $proof
+    . $evaluate
+    Check 'completed-restart-proof-still-accepted' $restartContractProven
+}
 $script:deliveries.Clear(); $script:cancel = $true
 Reject 'cancel-after-delivery-is-terminal' { Invoke-GuestRestartPlan @parameters }
 Check 'cancel-never-resubmits-or-continues' ($deliveries.Count -eq 1)
