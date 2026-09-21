@@ -77,11 +77,12 @@ function Get-GuestRestartObservation {
     $initial = $script:deliveries.Count -eq 0
     $final = $script:deliveries.Count -eq 2
     [pscustomobject]@{
-        CurrentGuestUtc = if ($initial) { '2026-01-01T00:01:00Z' } else { '2026-01-01T00:03:10Z' }
+        CurrentGuestUtc = if ($initial) { '2026-01-01T00:01:00Z' } elseif ($final) { '2026-01-01T00:03:20Z' } else { '2026-01-01T00:03:10Z' }
         CurrentGuestBootTimeUtc = if ($initial) { '2026-01-01T00:00:00Z' } else { '2026-01-01T00:03:00Z' }
         PowerTest = [pscustomobject]@{ SignedIn = $true; ConsoleUser = 'CodexTest'; Markers = @([pscustomobject]@{ Passed = $true; WrittenUtc = '2026-01-01T00:02:00Z' }) }
-        ApplicationLease = [pscustomobject]@{ JobId = $PhaseId; ProcessId = 111; GuestBootTimeUtc = if ($final) { '2026-01-01T00:03:00Z' } else { '2026-01-01T00:00:00Z' } }
-        Presence = [pscustomobject]@{ Result = $final; AgentError = $false; Completed = $false }
+        ApplicationLease = if (-not ($final -and $script:fastFinal)) { [pscustomobject]@{ JobId = $PhaseId; ProcessId = 111; GuestBootTimeUtc = if ($final) { '2026-01-01T00:03:00Z' } else { '2026-01-01T00:00:00Z' } } } else { $null }
+        TerminalResult = if ($final -and $script:fastFinal) { [pscustomobject]@{ JobId = $(if ($script:terminalFault -eq 'wrong-phase') { 'other' } else { $PhaseId }); ProcessId = 111; StartedUtc = $(if ($script:terminalFault -eq 'stale') { '2026-01-01T00:00:01Z' } else { '2026-01-01T00:03:11Z' }); CompletedUtc = '2026-01-01T00:03:12Z' } } else { $null }
+        Presence = [pscustomobject]@{ Result = $final; AgentError = $false; Completed = $final }
         State = [pscustomobject]@{}
     }
 }
@@ -91,6 +92,14 @@ $parameters = @{ Job = $job; Policy = [pscustomobject]@{ Plan = $plan }; VmName 
 $script:deliveries = New-Object Collections.Generic.List[string]; $script:cancel = $false
 $proof = Invoke-GuestRestartPlan @parameters
 Check 'one-original-one-continuation-same-output' ($proof.ContractProven -and $deliveries.Count -eq 2 -and $proof.OriginalApplicationLaunchCount -eq 1 -and -not $proof.ApplicationActionReplayed)
+$script:deliveries.Clear(); $script:fastFinal = $true; $script:terminalFault = $null
+$proof = Invoke-GuestRestartPlan @parameters
+Check 'fast-final-result-survives-lease-removal' ($proof.ContractProven -and $deliveries.Count -eq 2 -and $proof.Phases[1].LaunchEvidence -eq 'CompletedGuestResult')
+foreach ($fault in @('wrong-phase','stale')) {
+    $script:deliveries.Clear(); $script:terminalFault = $fault
+    Reject ('final-result-rejects-' + $fault) { Invoke-GuestRestartPlan @parameters }
+}
+$script:fastFinal = $false; $script:terminalFault = $null
 $script:deliveries.Clear()
 $proof = Invoke-GuestRestartPlan @parameters -NetworkRecheck { param($ExpectedBoot) Check 'network-gate-precedes-continuation' ($script:deliveries.Count -eq 1 -and $ExpectedBoot -eq '2026-01-01T00:03:00.0000000Z'); [pscustomobject]@{ Succeeded = $true } }
 Check 'network-gate-recorded-once-for-the-new-boot' ($proof.NetworkChecks.Count -eq 1 -and $proof.NetworkChecks[0].Succeeded -and $deliveries.Count -eq 2)

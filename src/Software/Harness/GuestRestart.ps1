@@ -194,7 +194,21 @@ function Invoke-GuestRestartPlan {
                     if ($newBoot) { throw 'Guest boot identity moved backwards.' }
                     $transitionDeadline = $null
                     if ($observation.Presence.AgentError -or ($phase -lt $Policy.Plan.Boots.Count -and ($observation.Presence.Result -or $observation.Presence.Completed))) { throw 'Restart phase terminated before its required boot.' }
-                    if ($phase -eq $Policy.Plan.Boots.Count -and $observation.Presence.Result -and $launched) { break }
+                    if ($phase -eq $Policy.Plan.Boots.Count -and $observation.Presence.Result) {
+                        if (-not $launched -and $observation.Presence.Completed) {
+                            # Fast phases can finish and remove their lease between probes.
+                            $terminal = $observation.TerminalResult
+                            if (-not $terminal -or $terminal.JobId -cne $phaseId -or [int]$terminal.ProcessId -le 0 -or
+                                -not $terminal.StartedUtc -or -not $terminal.CompletedUtc -or
+                                [DateTimeOffset]::Parse($terminal.StartedUtc).UtcDateTime -lt $phaseStarted -or
+                                [DateTimeOffset]::Parse($terminal.StartedUtc).UtcDateTime -lt $bootTime -or
+                                [DateTimeOffset]::Parse($terminal.CompletedUtc) -lt [DateTimeOffset]::Parse($terminal.StartedUtc) -or
+                                [DateTimeOffset]::Parse($terminal.CompletedUtc) -gt [DateTimeOffset]::Parse($observation.CurrentGuestUtc)) { throw 'Final restart result does not belong to the submitted phase and observed boot.' }
+                            $phaseRecord['LaunchEvidence'] = 'CompletedGuestResult'
+                            $launched = $true
+                        }
+                        if ($launched) { break }
+                    }
                     if ($phase -eq $Policy.Plan.Boots.Count -and $observation.Presence.Completed -and -not $observation.Presence.Result) { throw 'Final restart phase completed without evidence.' }
                 }
                 else {

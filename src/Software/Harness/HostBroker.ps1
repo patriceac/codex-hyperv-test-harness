@@ -1327,6 +1327,16 @@ try {
             }
             catch { $applicationLease = $null }
         }
+        $terminalResult = $null
+        if ($PowerTestContextPath -and $Outbox) {
+            try {
+                $resultFile = Get-Item -LiteralPath (Join-Path $Outbox 'result.json') -ErrorAction Stop
+                if ($resultFile.Length -le 1048576) {
+                    $completedResult = Get-Content -Raw -LiteralPath $resultFile.FullName -Encoding UTF8 | ConvertFrom-Json
+                    $terminalResult = [ordered]@{ JobId = $completedResult.JobId; StartedUtc = $completedResult.StartedUtc; CompletedUtc = $completedResult.CompletedUtc; ProcessId = $completedResult.ProcessCleanup.RootProcessId }
+                }
+            } catch { }
+        }
         $bootValue = (Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime
         $bootTime = if ($bootValue -is [DateTime]) {
             [DateTime]$bootValue
@@ -1346,6 +1356,7 @@ try {
             AgentAlive = [bool]$agentAlive
             AgentHeartbeatAgeSeconds = $agentHeartbeatAgeSeconds
             ApplicationLease = $applicationLease
+            TerminalResult = $terminalResult
             Presence = if ([string]::IsNullOrWhiteSpace($Outbox)) {
                 $null
             }
@@ -1368,6 +1379,7 @@ try {
         AgentAlive = [bool]$probeData.AgentAlive
         AgentHeartbeatAgeSeconds = $probeData.AgentHeartbeatAgeSeconds
         ApplicationLease = $probeData.ApplicationLease
+        TerminalResult = $probeData.TerminalResult
         PowerTest = $probeData.PowerTest
         Presence = $probeData.Presence
         Error = $null
