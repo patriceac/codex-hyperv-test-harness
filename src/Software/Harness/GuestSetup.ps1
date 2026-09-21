@@ -57,12 +57,15 @@ function Resolve-GuestSetupPolicyV1 {
     if ($null -ne $profile -and -not $exactProperty) {
         throw 'The top-level guest-setup property name must use exact case: GuestSetup.'
     }
-    $supportedOperations = @('RunGuestJobSetupV1', 'RunGuestJobSetupSystemPromptsV1')
+    $supportedOperations = @('RunGuestJobSetupV1', 'RunGuestJobSetupSystemPromptsV1', 'RunGuestJobPowerTestV1')
     if ($operation -notin $supportedOperations) {
         if ($null -ne $profile) { throw 'GuestSetup requires the versioned guest-setup operation.' }
         return $null
     }
-    if ($null -eq $profile) { throw "$operation requires GuestSetup." }
+    if ($null -eq $profile) {
+        if ($operation -eq 'RunGuestJobPowerTestV1') { return $null }
+        throw "$operation requires GuestSetup."
+    }
     $systemPrompts = Get-GuestSetupPropertyValue -Value $Request -Name 'SystemPrompts'
     if ($operation -eq 'RunGuestJobSetupSystemPromptsV1' -and $null -eq $systemPrompts) {
         throw 'RunGuestJobSetupSystemPromptsV1 requires SystemPrompts.'

@@ -423,6 +423,9 @@ function Get-PoolInterruptedExpectedGuestPowerOffState {
     )
 
     if (-not $Request) { return $null }
+    if ($Request.PSObject.Properties['Operation'] -and $Request.Operation -eq 'RunGuestJobPowerTestV1') {
+        return [pscustomobject]@{ Disposition = 'InvalidState'; Reason = 'Interrupted power-test phases are terminal and must never be replayed.'; RequestState = $RequestState }
+    }
     $requestExpectation = @($Request.PSObject.Properties | Where-Object { $_.Name -ceq 'ExpectGuestPowerOff' }) | Select-Object -First 1
     if (-not $requestExpectation -or $requestExpectation.Value -isnot [bool] -or -not [bool]$requestExpectation.Value) { return $null }
 

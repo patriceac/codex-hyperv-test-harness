@@ -820,7 +820,7 @@ function Resolve-RequestNetworkProfile {
     $hasGuestSetup = @(Get-RequestNetworkObjectPropertyNames -Value $Request) -contains 'GuestSetup'
     $systemPrompts = Get-RequestNetworkObjectPropertyValue -Value $Request -Name 'SystemPrompts'
     $hasSystemPrompts = @(Get-RequestNetworkObjectPropertyNames -Value $Request) -contains 'SystemPrompts'
-    if ($operation -notin @('RunGuestJobSetupV1', 'RunGuestJobSetupSystemPromptsV1') -and $hasGuestSetup) {
+    if ($operation -notin @('RunGuestJobSetupV1', 'RunGuestJobSetupSystemPromptsV1', 'RunGuestJobPowerTestV1') -and $hasGuestSetup) {
         throw 'GuestSetup requires the versioned guest-setup operation.'
     }
     if ($operation -notin @('RunGuestJobSystemPromptsV1', 'RunGuestJobSetupSystemPromptsV1') -and $hasSystemPrompts) {
@@ -842,8 +842,8 @@ function Resolve-RequestNetworkProfile {
         if ($profile -ne 'None' -and -not $network) { throw 'A system-prompt request with network access requires an explicit Network object.' }
         if ($hasGuestSetup) { throw 'System-prompt jobs cannot include guest setup.' }
     }
-    elseif ($operation -in @('RunGuestJobSetupV1', 'RunGuestJobSetupSystemPromptsV1')) {
-        if (-not $hasGuestSetup -or -not $guestSetup) { throw "$operation requires GuestSetup." }
+    elseif ($operation -in @('RunGuestJobSetupV1', 'RunGuestJobSetupSystemPromptsV1', 'RunGuestJobPowerTestV1')) {
+        if ($operation -ne 'RunGuestJobPowerTestV1' -and (-not $hasGuestSetup -or -not $guestSetup)) { throw "$operation requires GuestSetup." }
         if ($operation -eq 'RunGuestJobSetupSystemPromptsV1' -and (-not $hasSystemPrompts -or -not $systemPrompts)) {
             throw 'RunGuestJobSetupSystemPromptsV1 requires SystemPrompts.'
         }
@@ -853,10 +853,8 @@ function Resolve-RequestNetworkProfile {
             if ($flag -isnot [bool] -or -not $flag) { throw 'Guest-setup jobs require exact Boolean ResetToBaseline=true and StopAfter=true.' }
         }
         if (@(Get-RequestNetworkObjectPropertyValue -Value $Request -Name 'HostInputs' | Where-Object { $null -ne $_ }).Count -gt 0 -or
-            (Get-RequestNetworkObjectPropertyValue -Value $network -Name 'AllowHostInputs') -eq $true -or
-            (Get-RequestNetworkObjectPropertyValue -Value $Request -Name 'ExpectGuestPowerOff') -eq $true -or
-            (Get-RequestNetworkObjectPropertyValue -Value (Get-RequestNetworkObjectPropertyValue -Value $Request -Name 'Job') -Name 'expectGuestPowerOff') -eq $true) {
-            throw 'Guest-setup jobs cannot include host inputs or expected power-off.'
+            (Get-RequestNetworkObjectPropertyValue -Value $network -Name 'AllowHostInputs') -eq $true) {
+            throw 'Guest-setup jobs cannot include host inputs.'
         }
     }
     else {

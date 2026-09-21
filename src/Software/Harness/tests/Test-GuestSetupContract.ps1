@@ -133,7 +133,9 @@ $request.HostInputs = @([pscustomobject]@{ Name = 'data' })
 Assert-Rejected 'host-inputs-denied' { Resolve-RequestNetworkProfile -Request $request -Config $config } 'host inputs'
 $request = New-SetupRequest
 $request | Add-Member -NotePropertyName ExpectGuestPowerOff -NotePropertyValue $true
-Assert-Rejected 'expected-poweroff-denied' { Resolve-RequestNetworkProfile -Request $request -Config $config } 'expected power-off'
+$null = Resolve-RequestNetworkProfile -Request $request -Config $config
+if ($null -eq (Resolve-GuestSetupPolicyV1 -Request $request -PayloadManifest $manifest)) { throw 'Setup policy was lost for expected power-off.' }
+$checks.Add('setup-before-expected-poweroff-permitted')
 foreach ($flag in @('ResetToBaseline', 'StopAfter')) {
     $request = New-SetupRequest
     $request.$flag = $false

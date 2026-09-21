@@ -142,7 +142,7 @@ foreach ($case in $cases) {
     Assert-True ($encodedIndex -ge 0 -and $encodedIndex + 1 -lt $script:startInvocation.ArgumentList.Count) "Probe case '$($case.Name)' omitted its encoded command."
     $generatedCommand = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String([string]$script:startInvocation.ArgumentList[$encodedIndex + 1]))
     Assert-True ($generatedCommand.Contains("GetString('InvalidCredential'") -and $generatedCommand.Contains('PSDirectException') -and $generatedCommand.Contains('AuthenticationFailed = [bool]$authenticationFailed')) 'The probe does not classify the localized PowerShell Direct credential error.'
-    foreach ($placeholder in @('__INBOX_FILE__', '__PROCESSING_FILE__', '__COMPLETED_FILE__', '__OUTBOX__')) {
+    foreach ($placeholder in @('__INBOX_FILE__', '__PROCESSING_FILE__', '__COMPLETED_FILE__', '__OUTBOX__', '__POWER_TEST_CONTEXT__')) {
         Assert-True (-not $generatedCommand.Contains($placeholder)) "Probe case '$($case.Name)' left placeholder $placeholder unresolved."
     }
 
@@ -151,6 +151,7 @@ foreach ($case in $cases) {
         ConvertTo-ExpectedLiteral -Value ([string]$expectedPaths.ProcessingFile)
         ConvertTo-ExpectedLiteral -Value ([string]$expectedPaths.CompletedFile)
         ConvertTo-ExpectedLiteral -Value ([string]$expectedPaths.Outbox)
+        ConvertTo-ExpectedLiteral -Value ''
     ) -join ', ') + ' | Select-Object -Last 1'
     Assert-True ($generatedCommand.Contains($expectedArgumentList)) "Probe case '$($case.Name)' generated an incorrect optional-path argument list."
 

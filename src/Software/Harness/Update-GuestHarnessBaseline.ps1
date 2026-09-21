@@ -4,6 +4,7 @@ param(
     [string] $GuestAgentSource,
     [string] $GuestSupervisorSource,
     [string] $GuestLiveEvidenceSource,
+    [string] $GuestPowerTestSource,
     [string] $CredentialPath,
     [string] $SourceRoot,
     [string] $PoolDefinitionPath,
@@ -21,6 +22,7 @@ if ([string]::IsNullOrWhiteSpace($SourceRoot)) { $SourceRoot = [string]$layout.H
 if ([string]::IsNullOrWhiteSpace($GuestAgentSource)) { $GuestAgentSource = Join-Path $SourceRoot 'seed\guest\GuestAgent.ps1' }
 if ([string]::IsNullOrWhiteSpace($GuestSupervisorSource)) { $GuestSupervisorSource = Join-Path $SourceRoot 'seed\guest\GuestAgentSupervisor.ps1' }
 if ([string]::IsNullOrWhiteSpace($GuestLiveEvidenceSource)) { $GuestLiveEvidenceSource = Join-Path $SourceRoot 'seed\guest\GuestLiveEvidence.ps1' }
+if ([string]::IsNullOrWhiteSpace($GuestPowerTestSource)) { $GuestPowerTestSource = Join-Path $SourceRoot 'seed\guest\GuestPowerTest.ps1' }
 if ([string]::IsNullOrWhiteSpace($CredentialPath)) { $CredentialPath = Join-Path $SourceRoot 'private\guest-credential.json' }
 if ([string]::IsNullOrWhiteSpace($PoolDefinitionPath)) { $PoolDefinitionPath = Join-Path $SourceRoot 'pool-definition.json' }
 if ([string]::IsNullOrWhiteSpace($BrokerRoot)) { $BrokerRoot = [string]$layout.BrokerRoot }
@@ -39,6 +41,7 @@ function Get-GuestHarnessSourceInventory {
         [pscustomobject]@{ Name = 'GuestAgent'; Path = $GuestAgentSource },
         [pscustomobject]@{ Name = 'GuestSupervisor'; Path = $GuestSupervisorSource },
         [pscustomobject]@{ Name = 'GuestLiveEvidence'; Path = $GuestLiveEvidenceSource },
+        [pscustomobject]@{ Name = 'GuestPowerTest'; Path = $GuestPowerTestSource },
         [pscustomobject]@{ Name = 'HostBroker'; Path = Join-Path $SourceRoot 'HostBroker.ps1' },
         [pscustomobject]@{ Name = 'LiveEvidence'; Path = Join-Path $SourceRoot 'LiveEvidence.ps1' },
         [pscustomobject]@{ Name = 'InstallPoolHostBroker'; Path = Join-Path $SourceRoot 'Install-PoolHostBroker.ps1' },
@@ -160,7 +163,7 @@ try {
     if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
         throw 'Guest baseline refresh must run from an elevated administrator process.'
     }
-    foreach ($guestSourceFile in @($GuestAgentSource, $GuestSupervisorSource, $GuestLiveEvidenceSource)) {
+    foreach ($guestSourceFile in @($GuestAgentSource, $GuestSupervisorSource, $GuestLiveEvidenceSource, $GuestPowerTestSource)) {
         if (-not (Test-Path -LiteralPath $guestSourceFile -PathType Leaf)) {
             throw "Updated guest harness file not found: $guestSourceFile"
         }
@@ -252,6 +255,7 @@ try {
         Copy-Item -LiteralPath $GuestAgentSource -Destination 'C:\CodexGuest' -ToSession $session -Force
         Copy-Item -LiteralPath $GuestSupervisorSource -Destination 'C:\CodexGuest' -ToSession $session -Force
         Copy-Item -LiteralPath $GuestLiveEvidenceSource -Destination 'C:\CodexGuest' -ToSession $session -Force
+        Copy-Item -LiteralPath $GuestPowerTestSource -Destination 'C:\CodexGuest' -ToSession $session -Force
         Invoke-Command -Session $session -ScriptBlock {
             Get-LocalUser -SID ([Security.Principal.WindowsIdentity]::GetCurrent().User) |
                 Set-LocalUser -PasswordNeverExpires $true -AccountNeverExpires
@@ -272,10 +276,12 @@ try {
                 GuestAgentSha256 = (Get-FileHash -LiteralPath 'C:\CodexGuest\GuestAgent.ps1' -Algorithm SHA256).Hash
                 GuestSupervisorSha256 = (Get-FileHash -LiteralPath 'C:\CodexGuest\GuestAgentSupervisor.ps1' -Algorithm SHA256).Hash
                 GuestLiveEvidenceSha256 = (Get-FileHash -LiteralPath 'C:\CodexGuest\GuestLiveEvidence.ps1' -Algorithm SHA256).Hash
+                GuestPowerTestSha256 = (Get-FileHash -LiteralPath 'C:\CodexGuest\GuestPowerTest.ps1' -Algorithm SHA256).Hash
                 RunCommand = (Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name CodexGuestAgent).CodexGuestAgent
             }
         }
         $sourceHash = (Get-FileHash -LiteralPath $GuestAgentSource -Algorithm SHA256).Hash
+        if ($guestHarness.GuestPowerTestSha256 -ne (Get-FileHash -LiteralPath $GuestPowerTestSource -Algorithm SHA256).Hash) { throw 'Updated power-test module hash does not match the source file.' }
         if (-not $guestHarness.AccountPolicyHealthy) { throw 'The disposable guest automation account still expires or is disabled.' }
         $supervisorSourceHash = (Get-FileHash -LiteralPath $GuestSupervisorSource -Algorithm SHA256).Hash
         $liveEvidenceSourceHash = (Get-FileHash -LiteralPath $GuestLiveEvidenceSource -Algorithm SHA256).Hash

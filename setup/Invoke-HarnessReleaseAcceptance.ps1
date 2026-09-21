@@ -57,7 +57,9 @@ function New-HarnessReleaseAcceptanceInvocations {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)] [string] $SoftwareRoot,
-        [Parameter(Mandatory = $true)] [string] $BrokerRoot
+        [Parameter(Mandatory = $true)] [string] $BrokerRoot,
+        [string] $PowerCanarySha256 = ('0' * 64),
+        [string] $RestartPlanPath = 'guest-restart-plan.json'
     )
 
     $canaryRoot = Join-Path $SoftwareRoot 'Canaries'
@@ -139,6 +141,48 @@ function New-HarnessReleaseAcceptanceInvocations {
                 ExecutionTimeoutSeconds = 300
                 ThrowOnFailure = $true
             }
+        },
+        [pscustomobject][ordered]@{
+            Name = 'GuestRestart'
+            Parameters = @{
+                ArtifactPath = $canaryRoot
+                ExecutableRelativePath = 'PowerTestCanary.exe'
+                Arguments = 'initial "{OUTDIR}"'
+                GuestRestartPlanPath = $RestartPlanPath
+                GuestCredentialFixture = $true
+                GuestSetupExecutableRelativePath = 'PowerTestCanary.exe'
+                GuestSetupExecutableSha256 = $PowerCanarySha256
+                GuestSetupArguments = @('setup', 'unused', '{GUEST_CREDENTIAL_FILE}')
+                AssertResultFile = '{OUTDIR}\final.json'
+                AssertResultJsonPointer = '/passed'
+                AssertResultEqualsJson = 'true'
+                NetworkProfile = 'IsolatedTestNet'
+                NetworkCohort = 'release-power-restarts'
+                BrokerRoot = $BrokerRoot
+                QueueTimeoutSeconds = 900
+                ExecutionTimeoutSeconds = 900
+                ThrowOnFailure = $true
+            }
+        },
+        [pscustomobject][ordered]@{
+            Name = 'InstalledGuestPowerOff'
+            Parameters = @{
+                ArtifactPath = $canaryRoot
+                ExecutableRelativePath = 'PowerTestCanary.exe'
+                Arguments = 'installed-shutdown "{OUTDIR}"'
+                GuestSetupExecutableRelativePath = 'PowerTestCanary.exe'
+                GuestSetupExecutableSha256 = $PowerCanarySha256
+                GuestSetupArguments = @('setup', 'unused')
+                AssertResultFile = '{OUTDIR}\shutdown-marker.json'
+                AssertResultJsonPointer = '/passed'
+                AssertResultEqualsJson = 'true'
+                ExpectGuestPowerOff = $true
+                GuestPowerOffRecoveryTimeoutSeconds = 180
+                BrokerRoot = $BrokerRoot
+                QueueTimeoutSeconds = 900
+                ExecutionTimeoutSeconds = 300
+                ThrowOnFailure = $true
+            }
         }
     )
 }
@@ -154,7 +198,7 @@ if ($InvocationPreflightOnly) {
         $null -eq (Get-ReleaseOptionalPropertyValue -InputObject $shapeProbe -Name 'Missing') -and
         (Get-ReleaseOptionalPropertyValue -InputObject $shapeProbe -Name 'Present') -is [bool]
     [pscustomobject][ordered]@{
-        Success = $preview.Count -eq 5 -and $maintenanceSnapshotShapeSafe
+        Success = $preview.Count -eq 7 -and $maintenanceSnapshotShapeSafe
         NoMutationPerformed = $true
         MaintenanceSnapshotShapeSafe = [bool]$maintenanceSnapshotShapeSafe
         TestNames = @($preview.Name)
@@ -342,7 +386,7 @@ function Invoke-AcceptanceTest {
         $requiredPaths += [string]$Definition.Parameters['ActionsPath']
     }
     foreach ($requiredPath in $requiredPaths) {
-        if (-not [string]::IsNullOrWhiteSpace($requiredPath) -and -not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
+        if (-not [string]::IsNullOrWhiteSpace($requiredPath) -and -not (Test-Path -LiteralPath $requiredPath)) {
             throw "Release acceptance input is missing: $requiredPath"
         }
     }
@@ -360,7 +404,19 @@ function Invoke-AcceptanceTest {
 $startedUtc = [DateTime]::UtcNow
 $preAudit = Invoke-PoolAuditUnderMaintenance -Name 'pre-acceptance-audit'
 $preAuditPath = [string]$preAudit.AuditPath
-$invocations = @(New-HarnessReleaseAcceptanceInvocations -SoftwareRoot $softwareRoot -BrokerRoot $brokerRoot)
+$powerCanaryHash = (Get-FileHash -LiteralPath (Join-Path $softwareRoot 'Canaries\PowerTestCanary.exe') -Algorithm SHA256).Hash
+$restartPlanPath = Join-Path $EvidenceRoot 'guest-restart-plan.json'
+$boots = @(for ($boot = 1; $boot -le 2; $boot++) {
+    [ordered]@{
+        ExpectedSignIn = if ($boot -eq 1) { 'Automatic' } else { 'Manual' }
+        BootTimeoutSeconds = 180
+        SignedOutObservationSeconds = if ($boot -eq 1) { 0 } else { 15 }
+        BeforeRestart = @{ ResultFile = ('{OUTDIR}\before-boot-' + $boot + '.json'); JsonPointer = '/passed'; EqualsJson = 'true' }
+        Continuation = @{ ExecutableRelativePath = 'PowerTestCanary.exe'; ExecutableSha256 = $powerCanaryHash; Arguments = $(if ($boot -eq 1) { 'observe-first "{OUTDIR}"' } else { 'observe-final "{OUTDIR}"' }); Actions = @() }
+    }
+})
+Write-JsonAtomic -Path $restartPlanPath -Value @{ FormatVersion = 1; Boots = $boots }
+$invocations = @(New-HarnessReleaseAcceptanceInvocations -SoftwareRoot $softwareRoot -BrokerRoot $brokerRoot -PowerCanarySha256 $powerCanaryHash -RestartPlanPath $restartPlanPath)
 $results = [ordered]@{}
 foreach ($invocation in $invocations) {
     $results[[string]$invocation.Name] = Invoke-AcceptanceTest -Definition $invocation
@@ -414,6 +470,12 @@ if (-not [bool]$shutdown.ExpectedGuestPowerOffContractProven -or
     [bool]$shutdown.ApplicationRelaunchedByHarnessAfterGuestPowerOff) {
     throw 'Expected-guest-power-off acceptance did not prove ordered shutdown and no replay.'
 }
+$restart = $results.GuestRestart
+if (-not $restart.GuestRestartContractProven -or $restart.GuestRestart.ManualSignInCount -ne 1 -or
+    @($restart.GuestRestart.Boots).Count -ne 2 -or -not $restart.GuestPowerFixture.PersistentAutoLogonCleared -or
+    -not $restart.GuestPowerFixture.Preboot.UnattendedPrebootSupported -or
+    -not (Test-Path -LiteralPath (Join-Path $restart.ResultPath 'restart-2-signed-out.png') -PathType Leaf)) { throw 'Restart acceptance did not prove automatic then manual sign-in and independent signed-out evidence.' }
+if (-not $results.InstalledGuestPowerOff.ExpectedGuestPowerOffContractProven) { throw 'Installed shutdown acceptance lacks causal power-off proof.' }
 
 $systemPrompts = $results.SystemPrompts
 if (-not [bool]$systemPrompts.SystemPromptContractProven -or

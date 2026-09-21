@@ -274,6 +274,7 @@ if (-not (Test-Path -LiteralPath $guestSetupModulePath -PathType Leaf)) {
     throw "Guest-setup module not found: $guestSetupModulePath"
 }
 . $guestSetupModulePath
+. (Join-Path $PSScriptRoot 'GuestRestart.ps1')
 $liveEvidenceModulePath = Join-Path $PSScriptRoot 'LiveEvidence.ps1'
 if (-not (Test-Path -LiteralPath $liveEvidenceModulePath -PathType Leaf)) {
     throw "Live-evidence module not found: $liveEvidenceModulePath"
@@ -777,6 +778,11 @@ function Get-InterruptedExpectedGuestPowerOffRecoveryClassification {
         Reason = $null
     }
     if (-not $Request) { return [pscustomobject]$classification }
+    if ($Request.PSObject.Properties['Operation'] -and $Request.Operation -eq 'RunGuestJobPowerTestV1') {
+        $classification.Disposition = 'Invalid'
+        $classification.Reason = 'Interrupted power-test phases are terminal and must never be replayed.'
+        return [pscustomobject]$classification
+    }
     $requestExpectation = @($Request.PSObject.Properties | Where-Object { $_.Name -ceq 'ExpectGuestPowerOff' }) | Select-Object -First 1
     if (-not $requestExpectation -or $requestExpectation.Value -isnot [bool] -or -not [bool]$requestExpectation.Value) {
         return [pscustomobject]$classification
@@ -1280,7 +1286,8 @@ function Start-GuestSessionProbe {
         [string] $InboxFile,
         [string] $ProcessingFile,
         [string] $CompletedFile,
-        [string] $Outbox
+        [string] $Outbox,
+        [string] $PowerTestContextPath
     )
 
     $probeTemplate = @'
@@ -1292,7 +1299,7 @@ try {
     $securePassword = ConvertTo-SecureString ([string]$credentialData.Password) -AsPlainText -Force
     $credential = New-Object Management.Automation.PSCredential([string]$credentialData.UserName, $securePassword)
     $probeData = Invoke-Command -VMName __VM_NAME__ -Credential $credential -ErrorAction Stop -ScriptBlock {
-        param($InboxFile, $ProcessingFile, $CompletedFile, $Outbox)
+        param($InboxFile, $ProcessingFile, $CompletedFile, $Outbox, $PowerTestContextPath)
         $statePath = 'C:\CodexGuest\agent-state.json'
         $state = if (Test-Path -LiteralPath $statePath -PathType Leaf) {
             Get-Content -Raw -LiteralPath $statePath -Encoding UTF8 | ConvertFrom-Json
@@ -1329,6 +1336,10 @@ try {
         }
         [ordered]@{
             State = $state
+            PowerTest = if ($PowerTestContextPath) {
+                . 'C:\CodexGuest\GuestPowerTest.ps1'
+                Get-GuestPowerTestObservation -ContextPath $PowerTestContextPath -Outbox $Outbox
+            } else { $null }
             CurrentGuestBootTimeUtc = $bootTime.ToUniversalTime().ToString('o')
             CurrentGuestUtc = $currentGuestUtc.ToString('o')
             AgentAlive = [bool]$agentAlive
@@ -1347,7 +1358,7 @@ try {
                 }
             }
         }
-    } -ArgumentList __INBOX_FILE__, __PROCESSING_FILE__, __COMPLETED_FILE__, __OUTBOX__ | Select-Object -Last 1
+    } -ArgumentList __INBOX_FILE__, __PROCESSING_FILE__, __COMPLETED_FILE__, __OUTBOX__, __POWER_TEST_CONTEXT__ | Select-Object -Last 1
     $result = [ordered]@{
         Success = $true
         State = $probeData.State
@@ -1356,6 +1367,7 @@ try {
         AgentAlive = [bool]$probeData.AgentAlive
         AgentHeartbeatAgeSeconds = $probeData.AgentHeartbeatAgeSeconds
         ApplicationLease = $probeData.ApplicationLease
+        PowerTest = $probeData.PowerTest
         Presence = $probeData.Presence
         Error = $null
     }
@@ -1390,7 +1402,8 @@ exit $exitCode
         Replace('__INBOX_FILE__', (ConvertTo-PowerShellSingleQuotedLiteral -Value ([string]$InboxFile))).
         Replace('__PROCESSING_FILE__', (ConvertTo-PowerShellSingleQuotedLiteral -Value ([string]$ProcessingFile))).
         Replace('__COMPLETED_FILE__', (ConvertTo-PowerShellSingleQuotedLiteral -Value ([string]$CompletedFile))).
-        Replace('__OUTBOX__', (ConvertTo-PowerShellSingleQuotedLiteral -Value ([string]$Outbox)))
+        Replace('__OUTBOX__', (ConvertTo-PowerShellSingleQuotedLiteral -Value ([string]$Outbox))).
+        Replace('__POWER_TEST_CONTEXT__', (ConvertTo-PowerShellSingleQuotedLiteral -Value ([string]$PowerTestContextPath)))
     $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probeCommand))
     $process = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList @(
         '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encodedCommand
@@ -2382,7 +2395,8 @@ function Expand-GuestJobTokens {
         [Parameter(Mandatory = $true)] [string] $GuestOutputRoot,
         [Parameter(Mandatory = $true)] [string] $Context,
         [string[]] $AllowedTokens = @('PAYLOAD', 'OUTDIR'),
-        [Collections.IDictionary] $GuestHostInputRoots
+        [Collections.IDictionary] $GuestHostInputRoots,
+        [string] $GuestCredentialFile
     )
 
     if ($null -eq $Value) {
@@ -2411,6 +2425,10 @@ function Expand-GuestJobTokens {
     }
     if ($expanded.Contains('{OUTDIR}')) {
         $expanded = $expanded.Replace('{OUTDIR}', $GuestOutputRoot.TrimEnd('\'))
+    }
+    if ($expanded.Contains('{GUEST_CREDENTIAL_FILE}')) {
+        if (-not $GuestCredentialFile) { throw 'The credential fixture was not requested.' }
+        $expanded = $expanded.Replace('{GUEST_CREDENTIAL_FILE}', $GuestCredentialFile)
     }
     foreach ($match in @([regex]::Matches($expanded, '\{HOSTINPUT:(?<Alias>[A-Za-z][A-Za-z0-9_-]{0,31})\}'))) {
         $alias = [string]$match.Groups['Alias'].Value
@@ -3375,6 +3393,10 @@ function Invoke-GuestRequest {
     $systemPromptRuntime = $null
     $guestSetupPolicy = $null
     $guestSetupEvidence = $null
+    $guestPowerPolicy = $null
+    $guestPowerFixture = $null
+    $guestRestartEvidence = $null
+    $guestCredentialFile = $null
     $expectGuestPowerOff = $false
     $guestPowerOffRecoveryTimeoutSeconds = 180
     $expectedGuestPowerOffSubmissionStartedUtc = $null
@@ -3517,6 +3539,7 @@ function Invoke-GuestRequest {
         }
         $systemPromptPolicy = Resolve-SystemPromptPolicyV1 -Request $Request -PayloadManifest $payloadManifest
         $guestSetupPolicy = Resolve-GuestSetupPolicyV1 -Request $Request -PayloadManifest $payloadManifest
+        $guestPowerPolicy = Resolve-GuestPowerTestPolicy -Request $Request -PayloadManifest $payloadManifest
         $hostInputNames = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
         $hostInputDefinitions = @($Request.HostInputs)
         if ($hostInputDefinitions.Count -gt 8) { throw 'A request may expose at most eight read-only host inputs.' }
@@ -3754,8 +3777,20 @@ function Invoke-GuestRequest {
         if ([string]$job.id -ne $requestId) {
             throw 'Guest job id must exactly match RequestId.'
         }
+        if ($guestPowerPolicy -and -not $guestPowerPolicy.Plan) {
+            # A credential-fixture controller can issue a peer's power action.
+            # Agent recovery must not replay that controller either.
+            $job | Add-Member -NotePropertyName restartRequestId -NotePropertyValue $requestId
+            $job | Add-Member -NotePropertyName restartPhase -NotePropertyValue 0
+            $job | Add-Member -NotePropertyName awaitGuestRestart -NotePropertyValue $false
+        }
 
         $guestOutbox = "C:\CodexGuest\Outbox\$requestId"
+        if ($guestPowerPolicy) {
+            $guestPowerFixture = Invoke-GuestPowerWatchdog -Mode Fixture -VmName $vmName -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc -Policy $guestPowerPolicy -BaselineId ([string]$Config.PoolSourceCheckpointId)
+            $guestCredentialFile = [string]$guestPowerFixture.CredentialFile
+            Write-JsonAtomic -Path (Join-Path $ResultRoot 'broker-guest-power-fixture.json') -Value $guestPowerFixture
+        }
 
         $guestExecutable = [string]$job.executable
         $payloadToken = '{PAYLOAD}\'
@@ -3785,7 +3820,8 @@ function Invoke-GuestRequest {
             $job | Add-Member -NotePropertyName hostInputs -NotePropertyValue $hostInputGuestJobMappings -Force
         }
         $hostInputTokenNames = @($hostInputDefinitions | ForEach-Object { [string]$_.TokenName })
-        $job.arguments = Expand-GuestJobTokens -Value ([string]$job.arguments) -GuestPayloadRoot $guestPayloadRoot -GuestOutputRoot $guestOutbox -Context 'Arguments' -AllowedTokens (@('PAYLOAD', 'OUTDIR') + $hostInputTokenNames) -GuestHostInputRoots $hostInputGuestRoots
+        if ($guestCredentialFile) { $hostInputTokenNames += 'GUEST_CREDENTIAL_FILE' }
+        $job.arguments = Expand-GuestJobTokens -Value ([string]$job.arguments) -GuestPayloadRoot $guestPayloadRoot -GuestOutputRoot $guestOutbox -Context 'Arguments' -AllowedTokens (@('PAYLOAD', 'OUTDIR') + $hostInputTokenNames) -GuestHostInputRoots $hostInputGuestRoots -GuestCredentialFile $guestCredentialFile
         for ($actionIndex = 0; $actionIndex -lt @($job.actions).Count; $actionIndex++) {
             $action = @($job.actions)[$actionIndex]
             $actionType = [string]$action.type
@@ -3805,7 +3841,7 @@ function Invoke-GuestRequest {
                 else {
                     @('PAYLOAD', 'OUTDIR') + $hostInputTokenNames
                 }
-                $property.Value = Expand-GuestJobTokens -Value ([string]$property.Value) -GuestPayloadRoot $guestPayloadRoot -GuestOutputRoot $guestOutbox -Context "Action $($actionIndex + 1) '$($property.Name)'" -AllowedTokens $tokensAllowedHere -GuestHostInputRoots $hostInputGuestRoots
+                $property.Value = Expand-GuestJobTokens -Value ([string]$property.Value) -GuestPayloadRoot $guestPayloadRoot -GuestOutputRoot $guestOutbox -Context "Action $($actionIndex + 1) '$($property.Name)'" -AllowedTokens $tokensAllowedHere -GuestHostInputRoots $hostInputGuestRoots -GuestCredentialFile $guestCredentialFile
             }
         }
         if ($job.PSObject.Properties.Name -contains 'assertResultFile' -and -not [string]::IsNullOrWhiteSpace([string]$job.assertResultFile)) {
@@ -3858,6 +3894,11 @@ function Invoke-GuestRequest {
         }
         if ($guestSetupPolicy) {
             $failureStage = 'RunningGuestSetup'
+            if ($guestPowerPolicy) {
+                $guestSetupPolicy.Arguments = @($guestSetupPolicy.Arguments | ForEach-Object {
+                    Expand-GuestJobTokens -Value $_ -GuestPayloadRoot $guestPayloadRoot -GuestOutputRoot $guestOutbox -GuestCredentialFile $guestCredentialFile -AllowedTokens (@('PAYLOAD', 'OUTDIR') + $hostInputTokenNames) -Context 'GuestSetup argument'
+                })
+            }
             Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
             Write-RequestState -ResultRoot $RequestStateRoot -RequestId $requestId -Status 'PreparingGuest' -Message 'Running the request-bound elevated setup executable inside the disposable guest.' -CreatedUtc $createdUtc -ClaimedUtc $ClaimedUtc -ExecutionDeadlineUtc $executionDeadlineUtc -WorkerId $workerId
             $guestSetupRoot = 'C:\ProgramData\CodexHarness\GuestSetup\' + $requestId
@@ -3875,6 +3916,17 @@ function Invoke-GuestRequest {
             }
             Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
         }
+        if ($guestPowerPolicy -and $guestPowerPolicy.Plan) {
+            $failureStage = 'GuestRestartContinuation'
+            Write-RequestState -ResultRoot $RequestStateRoot -RequestId $requestId -Status 'Running' -Message 'Running the declared restart and sign-in sequence with one exclusive worker lease.' -CreatedUtc $createdUtc -ClaimedUtc $ClaimedUtc -ExecutionDeadlineUtc $executionDeadlineUtc -WorkerId $workerId
+            if ($session) { Remove-PSSession -Session $session -ErrorAction SilentlyContinue; $session = $null }
+            $guestRestartEvidence = Invoke-GuestRestartPlan -Job $job -Policy $guestPowerPolicy -VmName $vmName -RequestId $requestId -PayloadRoot $guestPayloadRoot -Outbox $guestOutbox -ResultRoot $ResultRoot -CredentialFile $guestCredentialFile -ExecutionDeadlineUtc $executionDeadlineUtc -Credential $credential -NetworkCheck {
+                Write-BrokerState -Status 'Running' -RequestId $requestId -Message 'Observing the declared guest restart/sign-in sequence; cancellation and the original deadline remain active.'
+                if ($requestNetworkRuntime) { $null = Assert-RequestNetworkHostPolicyCurrent -Runtime $requestNetworkRuntime -BrokerRoot $BrokerRoot }
+            }
+            $jobSubmissionAttempts = 1
+        }
+        else {
         $failureStage = 'SubmittingGuestJob'
         $guestJobPath = Join-Path $ResultRoot ($requestId + '.json')
         Write-JsonAtomic -Path $guestJobPath -Value $job
@@ -4306,6 +4358,7 @@ function Invoke-GuestRequest {
             Start-Sleep -Milliseconds 500
         }
 
+        }
         if ($expectGuestPowerOff) {
             if ([string]::IsNullOrWhiteSpace($guestPowerOffObservedUtc) -or -not [bool]$guestPowerOffBeforeCleanup) {
                 $failureKind = 'ExpectedGuestPowerOffUnproven'
@@ -5068,7 +5121,7 @@ function Invoke-GuestRequest {
             HostInputCleanup = $hostInputCleanup
             Network = [ordered]@{
                 ContractVersion = if ([string]$Request.Operation -eq 'RunGuestJobNetworkV1' -or
-                    ([string]$Request.Operation -in @('RunGuestJobSetupV1', 'RunGuestJobSystemPromptsV1', 'RunGuestJobSetupSystemPromptsV1') -and [string]$requestNetworkDefinition.EffectiveProfile -ne 'None')) { 1 } else { 0 }
+                    ([string]$Request.Operation -in @('RunGuestJobSetupV1', 'RunGuestJobSystemPromptsV1', 'RunGuestJobSetupSystemPromptsV1', 'RunGuestJobPowerTestV1') -and [string]$requestNetworkDefinition.EffectiveProfile -ne 'None')) { 1 } else { 0 }
                 RequestedProfile = if ($requestNetworkDefinition) { [string]$requestNetworkDefinition.RequestedProfile } else { 'None' }
                 EffectiveProfile = if ($requestNetworkDefinition) { [string]$requestNetworkDefinition.EffectiveProfile } else { 'None' }
                 Cohort = if ($requestNetworkDefinition -and [string]$requestNetworkDefinition.EffectiveProfile -eq 'IsolatedTestNet') { [string]$requestNetworkDefinition.Cohort } else { $null }
@@ -5167,6 +5220,12 @@ function Invoke-GuestRequest {
         }
         if ($guestSetupPolicy) {
             $brokerResultValue['GuestSetup'] = $guestSetupEvidence
+        }
+        if ($guestPowerPolicy) {
+            $brokerResultValue['GuestPowerFixture'] = $guestPowerFixture
+            $brokerResultValue['GuestRestart'] = $guestRestartEvidence
+            if ($guestPowerFixture) { Write-JsonAtomic -Path (Join-Path $ResultRoot 'broker-guest-power-fixture.json') -Value $guestPowerFixture }
+            if ($guestRestartEvidence) { Write-JsonAtomic -Path (Join-Path $ResultRoot 'broker-guest-restart.json') -Value $guestRestartEvidence }
         }
         if ($expectGuestPowerOff) {
             $brokerResultValue['ExpectGuestPowerOff'] = $true

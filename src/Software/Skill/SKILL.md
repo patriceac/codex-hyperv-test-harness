@@ -25,6 +25,7 @@ Do not preload every reference.
 - For an expected startup UAC prompt or Windows Firewall access prompt, read [system-prompt acceptance](references/system-prompts.md). Prompt handling is explicit, identity-bound, and VM-only.
 - For a bounded elevated executable that must finish before the normal application starts, read [request-scoped guest setup](references/guest-setup.md). The executable is payload-manifest bound; product commands and assertions remain in the product scenario.
 - For an application expected to shut down its disposable guest, read [expected guest power-off](references/expected-guest-power-off.md). That mode has a distinct no-replay evidence contract.
+- For application-initiated restarts, automatic/manual sign-in, or a protected disposable-account credential fixture, read [restart continuation](references/guest-restart.md).
 - For shared queue use, a long request, live evidence, cancellation, or deadline behavior, read [queue, observation, and cancellation](references/queue-observation-and-cancellation.md).
 - For payload-cache behavior, pool internals, lifecycle recovery, or performance diagnosis, read [broker, pool, and cache internals](references/broker-pool-and-cache.md).
 - Before claiming any test result, read [verification and reporting](references/verification-and-reporting.md) and apply the sections relevant to the request.

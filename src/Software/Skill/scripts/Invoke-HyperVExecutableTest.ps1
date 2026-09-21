@@ -9,6 +9,8 @@ param(
     [string] $AssertResultJsonPointer,
     [string] $AssertResultEqualsJson,
     [switch] $ExpectGuestPowerOff,
+    [string] $GuestRestartPlanPath,
+    [switch] $GuestCredentialFixture,
     [switch] $AcceptUacPrompt,
     [switch] $AcceptWindowsFirewallPrompt,
     [ValidateRange(5, 600)] [int] $SystemPromptTimeoutSeconds = 120,
@@ -34,6 +36,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'HyperVBrokerLocation.ps1')
+. (Join-Path $PSScriptRoot 'GuestPowerTestContract.ps1')
 $BrokerRoot = Resolve-HyperVBrokerRoot -BrokerRoot $BrokerRoot
 
 if (-not [string]::IsNullOrWhiteSpace($ActionsPath) -and -not [string]::IsNullOrWhiteSpace($ActionsJson)) {
@@ -65,9 +68,13 @@ if ($guestSetupRequested -and (-not $PSBoundParameters.ContainsKey('GuestSetupEx
 if (-not $guestSetupRequested -and ($PSBoundParameters.ContainsKey('GuestSetupArguments') -or $PSBoundParameters.ContainsKey('GuestSetupTimeoutSeconds'))) {
     throw 'GuestSetupArguments and GuestSetupTimeoutSeconds require a guest setup executable.'
 }
-if ($guestSetupRequested -and ($NetworkProfile -notin @('None', 'IsolatedTestNet') -or $ReadOnlyHostInput.Count -gt 0 -or $AllowNetworkWithHostInputs -or $ExpectGuestPowerOff)) {
-    throw 'Guest setup permits only None or IsolatedTestNet, without host inputs or expected power-off.'
+if ($guestSetupRequested -and ($NetworkProfile -notin @('None', 'IsolatedTestNet') -or $ReadOnlyHostInput.Count -gt 0 -or $AllowNetworkWithHostInputs)) {
+    throw 'Guest setup permits only None or IsolatedTestNet, without host inputs.'
 }
+$powerTestRequested = -not [string]::IsNullOrWhiteSpace($GuestRestartPlanPath) -or [bool]$GuestCredentialFixture
+if ($powerTestRequested -and ($ExpectGuestPowerOff -or $systemPromptRequested -or $ReadOnlyHostInput.Count -gt 0 -or $AllowNetworkWithHostInputs -or $NetworkProfile -notin @('None', 'IsolatedTestNet'))) { throw 'Power tests permit None or IsolatedTestNet, without host inputs, system prompts, or expected power-off.' }
+if ($GuestRestartPlanPath -and -not $AssertResultFile) { throw 'GuestRestartPlanPath requires a final AssertResultFile.' }
+$restartPlan = if ($GuestRestartPlanPath) { Get-Content -Raw -LiteralPath $GuestRestartPlanPath -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop } else { $null }
 
 function Resolve-GuestSetupClientExecutable {
     param(
@@ -1102,6 +1109,7 @@ elseif (-not [string]::IsNullOrWhiteSpace($ActionsJson)) {
         $actions += $action
     }
 }
+elseif ($GuestRestartPlanPath) { $actions = @() }
 elseif ($ExpectGuestPowerOff) {
     $actions = @(
         [ordered]@{
@@ -1120,7 +1128,7 @@ else {
     )
 }
 
-if ($actions.Count -eq 0) {
+if ($actions.Count -eq 0 -and -not $GuestRestartPlanPath) {
     throw 'At least one guest action is required.'
 }
 
@@ -1234,6 +1242,7 @@ if (-not [string]::IsNullOrWhiteSpace($AssertResultFile)) {
     }
 }
 
+if ($GuestCredentialFixture) { $hostInputTokenNames += 'GUEST_CREDENTIAL_FILE' }
 Assert-SupportedReservedTokens -Value $Arguments -Context 'Arguments' -AllowedTokens (@('PAYLOAD', 'OUTDIR') + $hostInputTokenNames)
 for ($actionIndex = 0; $actionIndex -lt $actions.Count; $actionIndex++) {
     $action = $actions[$actionIndex]
@@ -1486,7 +1495,7 @@ try {
     $queueDeadlineUtc = $createdUtc.AddSeconds($QueueTimeoutSeconds)
     $request = [ordered]@{
         RequestId = $requestId
-        Operation = if ($guestSetupRequest -and $systemPromptRequested) { 'RunGuestJobSetupSystemPromptsV1' } elseif ($systemPromptRequested) { 'RunGuestJobSystemPromptsV1' } elseif ($guestSetupRequest) { 'RunGuestJobSetupV1' } elseif ($networkEnabled) { 'RunGuestJobNetworkV1' } else { 'RunGuestJob' }
+        Operation = if ($powerTestRequested) { 'RunGuestJobPowerTestV1' } elseif ($guestSetupRequest -and $systemPromptRequested) { 'RunGuestJobSetupSystemPromptsV1' } elseif ($systemPromptRequested) { 'RunGuestJobSystemPromptsV1' } elseif ($guestSetupRequest) { 'RunGuestJobSetupV1' } elseif ($networkEnabled) { 'RunGuestJobNetworkV1' } else { 'RunGuestJob' }
         CreatedUtc = $createdUtc.ToString('o')
         QueueTimeoutSeconds = $QueueTimeoutSeconds
         ExecutionTimeoutSeconds = $ExecutionTimeoutSeconds
@@ -1513,6 +1522,9 @@ try {
         Job = $job
     }
     if ($guestSetupRequest) { $request['GuestSetup'] = $guestSetupRequest }
+    if ($restartPlan) { $request['GuestRestartPlan'] = $restartPlan }
+    if ($GuestCredentialFixture) { $request['GuestCredentialFixture'] = $true }
+    if ($powerTestRequested) { $null = Resolve-GuestPowerTestPolicy -Request ([pscustomobject]$request) -PayloadManifest $payloadManifest }
     if ($systemPromptContract) { $request['SystemPrompts'] = $systemPromptContract }
     if ($ExpectGuestPowerOff) {
         $request['ExpectGuestPowerOff'] = $true
@@ -1997,7 +2009,11 @@ try {
             [string]$brokerResult.VmFinalState -eq 'Off' -and
             $guestResult -and [bool]$guestResult.Success -and
             $missingHarnessEvidence.Count -eq 0
-        $harnessSucceeded = [bool]$baseHarnessSucceeded -and [bool]$expectedGuestPowerOffContractProven -and [bool]$systemPromptContractProven
+        $restartContractProven = -not $restartPlan -or ($brokerResult.GuestRestart.ContractProven -is [bool] -and $brokerResult.GuestRestart.ContractProven -and
+            $brokerResult.GuestRestart.RequestId -ceq $requestId -and @($brokerResult.GuestRestart.Boots).Count -eq $restartPlan.Boots.Count -and
+            @($brokerResult.GuestRestart.Phases).Count -eq ($restartPlan.Boots.Count + 1) -and $brokerResult.GuestRestart.OriginalApplicationLaunchCount -eq 1 -and
+            $brokerResult.GuestRestart.ApplicationActionReplayed -is [bool] -and -not $brokerResult.GuestRestart.ApplicationActionReplayed)
+        $harnessSucceeded = [bool]$baseHarnessSucceeded -and [bool]$expectedGuestPowerOffContractProven -and [bool]$systemPromptContractProven -and $restartContractProven
         $testEvaluated = [bool]($guestResult -and $guestResult.TestEvaluated)
         $testPassed = if ($testEvaluated) { [bool]$guestResult.TestPassed } else { $null }
         if ($missingTestEvidence.Count -gt 0) {
@@ -2119,6 +2135,11 @@ try {
                 $null
             }
             LifecycleSequence = @($observedLifecycle.ToArray())
+        }
+        if ($powerTestRequested) {
+            $summary['GuestPowerFixture'] = $brokerResult.GuestPowerFixture
+            $summary['GuestRestart'] = $brokerResult.GuestRestart
+            $summary['GuestRestartContractProven'] = [bool]$restartContractProven
         }
         if ($ExpectGuestPowerOff) {
             $summary['ExpectGuestPowerOff'] = $true

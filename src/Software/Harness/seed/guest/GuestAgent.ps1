@@ -1650,10 +1650,12 @@ function Invoke-GuestJob {
         throw "Invalid job id: $jobId"
     }
     $expectGuestPowerOff = Test-ExpectedGuestPowerOffJob -Job $Job
-
-    $jobOutputPath = Join-Path $outboxPath $jobId
+    $restartPhase = $Job.PSObject.Properties.Name -contains 'restartRequestId'
+    if ($restartPhase -and ($Job.restartRequestId -notmatch '^[A-Za-z0-9][A-Za-z0-9_-]{0,100}$' -or
+        $jobId -cne $(if ([int]$Job.restartPhase -eq 0) { $Job.restartRequestId } else { $Job.restartRequestId + '-boot' + [int]$Job.restartPhase }))) { throw 'Invalid restart phase identity.' }
+    $jobOutputPath = Join-Path $outboxPath $(if ($restartPhase) { $Job.restartRequestId } else { $jobId })
     $leasePath = Join-Path $jobOutputPath 'lease.json'
-    if (Test-Path -LiteralPath $leasePath -PathType Leaf) {
+    if (-not $restartPhase -and (Test-Path -LiteralPath $leasePath -PathType Leaf)) {
         try {
             $priorLease = Get-Content -Raw -LiteralPath $leasePath -Encoding UTF8 | ConvertFrom-Json
             if ([int]$priorLease.ProcessId -gt 0) {
@@ -1667,10 +1669,18 @@ function Invoke-GuestJob {
             throw "Could not recover the prior guest-job lease: $($_.Exception.Message)"
         }
     }
-    if (Test-Path -LiteralPath $jobOutputPath -PathType Container) {
+    if (-not $restartPhase -and (Test-Path -LiteralPath $jobOutputPath -PathType Container)) {
         Remove-Item -LiteralPath $jobOutputPath -Recurse -Force
     }
     New-Item -ItemType Directory -Force -Path $jobOutputPath | Out-Null
+    if ($restartPhase -and [int]$Job.restartPhase -gt 0) {
+        $archive = Join-Path $jobOutputPath ('phases\' + ([int]$Job.restartPhase - 1))
+        New-Item -ItemType Directory -Path $archive -Force | Out-Null
+        foreach ($name in @('lease.json', 'result.json', 'agent-error.json')) {
+            $prior = Join-Path $jobOutputPath $name
+            if (Test-Path -LiteralPath $prior -PathType Leaf) { Move-Item -LiteralPath $prior -Destination $archive -ErrorAction Stop }
+        }
+    }
     $leasePath = Join-Path $jobOutputPath 'lease.json'
     $resultFile = Join-Path $jobOutputPath 'result.json'
     $actionLog = New-Object System.Collections.Generic.List[object]
@@ -2083,6 +2093,11 @@ function Invoke-GuestJob {
             }
         }
 
+        if ($restartPhase -and $Job.awaitGuestRestart -and -not ($testEvaluated -and -not $testPassed)) {
+            # The host owns the deadline and VM cleanup. A new boot kills this
+            # process; startup recovery must never relaunch this power action.
+            while ($true) { Write-AgentState -Status 'AwaitingGuestRestart' -JobId $jobId; Start-Sleep -Milliseconds 500 }
+        }
         $success = $true
     }
     catch {
@@ -2207,6 +2222,10 @@ function Repair-InterruptedGuestJobs {
         try { $job = Get-Content -Raw -LiteralPath $orphanedJob.FullName -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
         catch { $job = $null }
 
+        if ($job -and $job.PSObject.Properties.Name -contains 'restartRequestId') {
+            Move-Item -LiteralPath $orphanedJob.FullName -Destination (Join-Path $CompletedRoot $orphanedJob.Name) -Force
+            continue
+        }
         if (-not (Test-ExpectedGuestPowerOffJob -Job $job)) {
             # Preserve the legacy orphan behavior exactly: an interrupted
             # ordinary job returns to Inbox for clean retry and lease cleanup.

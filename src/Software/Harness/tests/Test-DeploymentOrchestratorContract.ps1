@@ -54,8 +54,8 @@ if (-not [bool]$acceptancePreview.Success -or
     (Test-Path -LiteralPath $probeRoot)) {
     throw 'Acceptance invocation preflight was not successful and mutation-free.'
 }
-if ((@($acceptancePreview.TestNames) -join ',') -ne 'LegacyLaunch,Utf8ActionName,KeyboardInput,ExpectedGuestPowerOff,SystemPrompts') {
-    throw 'Release acceptance does not contain the exact five required paths in order.'
+if ((@($acceptancePreview.TestNames) -join ',') -ne 'LegacyLaunch,Utf8ActionName,KeyboardInput,ExpectedGuestPowerOff,SystemPrompts,GuestRestart,InstalledGuestPowerOff') {
+    throw 'Release acceptance does not contain the exact seven required paths in order.'
 }
 $utf8Invocation = @($acceptancePreview.Invocations | Where-Object Name -eq 'Utf8ActionName')[0].Parameters
 if ([string]$utf8Invocation.ActionsPath -notlike '*release-utf8-actions.json' -or
@@ -102,7 +102,26 @@ if ($acceptanceSource -notmatch 'ExactInboundFirewallRulesWithQueryUserReconcili
     $acceptanceSource -match 'RemovedQueryUserBlockRules\)\.Count\s*-lt\s*1') {
     throw 'Release acceptance does not prove post-dismissal Query User reconciliation and a final exact allow-only state.'
 }
-$scenarios.Add('five-path-isolated-acceptance-is-exactly-bound')
+$restartInvocation = @($acceptancePreview.Invocations | Where-Object Name -eq 'GuestRestart')[0].Parameters
+$installedShutdownInvocation = @($acceptancePreview.Invocations | Where-Object Name -eq 'InstalledGuestPowerOff')[0].Parameters
+if (-not $restartInvocation.GuestCredentialFixture -or -not $restartInvocation.GuestRestartPlanPath -or
+    -not $restartInvocation.GuestSetupExecutableSha256 -or $restartInvocation.NetworkProfile -ne 'IsolatedTestNet' -or
+    -not $installedShutdownInvocation.ExpectGuestPowerOff -or -not $installedShutdownInvocation.GuestSetupExecutableSha256) { throw 'Power acceptance lost its fixture, setup, network, or restart binding.' }
+$scenarios.Add('seven-path-isolated-acceptance-is-exactly-bound')
+
+$inventoryAst = [Management.Automation.Language.Parser]::ParseFile($deployPath, [ref]$null, [ref]$null).Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-GuestReleaseInventory' }, $true)
+. ([scriptblock]::Create($inventoryAst.Extent.Text))
+$inventoryRoot = Join-Path $repositoryRoot ('work\release-inventory-' + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $inventoryRoot | Out-Null
+$priorGuestFiles = @('GuestAgent.ps1', 'GuestAgentSupervisor.ps1', 'GuestLiveEvidence.ps1')
+$priorReceipt = @{ FormatVersion = 1; GuestSourceInventory = @($priorGuestFiles | ForEach-Object {
+    @{ RelativePath = 'Harness/seed/guest/' + $_; Sha256 = (Get-FileHash -LiteralPath (Join-Path $harnessRoot ('seed\guest\' + $_)) -Algorithm SHA256).Hash }
+}) }
+$priorReceipt | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $inventoryRoot 'prior.json') -Encoding UTF8
+$inventory = @(Get-GuestReleaseInventory -CandidateSoftwareRoot $softwareRoot -InstalledSoftwareRoot $softwareRoot -ProvenancePath (Join-Path $inventoryRoot 'prior.json'))
+if (@($inventory | Where-Object Changed).Count -ne 1 -or @($inventory | Where-Object Changed)[0].RelativePath -ne 'Harness/seed/guest/GuestPowerTest.ps1' -or
+    @($inventory | Where-Object Changed)[0].InstalledSha256) { throw 'A new guest component was incorrectly treated as deployed from source alone.' }
+$scenarios.Add('new-guest-component-requires-baseline-promotion')
 
 if ($acceptanceSource -notmatch "Invoke-PoolAuditUnderMaintenance -Name 'pre-acceptance-audit'" -or
     $acceptanceSource -notmatch "Invoke-PoolAuditUnderMaintenance -Name 'post-acceptance-audit'" -or
@@ -162,8 +181,8 @@ $deploy = Get-Content -LiteralPath $deployPath -Raw
 if ($deploy -notmatch 'verify the disposable account cannot expire') {
     throw 'The immutable release plan omits guest account expiry protection.'
 }
-if ($deploy -notmatch [regex]::Escape("Run legacy launch, accented-name UI Automation, bounded keyboard, expected-guest-power-off, and verified system-prompt acceptance in isolated workers.")) {
-    throw 'The immutable release plan does not describe all five isolated acceptance paths.'
+if ($deploy -notmatch [regex]::Escape("Run legacy launch, accented-name UI Automation, bounded keyboard, expected-guest-power-off, verified system-prompt, automatic/manual restart, and installed-app shutdown acceptance in isolated workers.")) {
+    throw 'The immutable release plan does not describe all seven isolated acceptance paths.'
 }
 $phaseNames = @('CandidateQualification','LiveReadiness','SourcePromotion','GuestBaselinePromotion','IsolatedAcceptance','RecoveryRefresh','Finalization')
 $lastIndex = -1

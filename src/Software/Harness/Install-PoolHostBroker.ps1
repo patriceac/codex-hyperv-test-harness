@@ -50,6 +50,7 @@ $credentialExistedBefore = $false
 $installCommitted = $false
 $rollbackSucceeded = $false
 $installedFiles = @('HostBroker.ps1', 'PayloadCache.ps1', 'HostInputShare.ps1', 'RequestNetwork.ps1', 'SystemPrompts.ps1', 'GuestSetup.ps1', 'LiveEvidence.ps1', 'PoolCommon.ps1', 'PoolBroker.ps1', 'PoolLifecycle.ps1', 'HostWorker.ps1')
+$installedFiles += @('GuestRestart.ps1', 'GuestPowerTestContract.ps1')
 $obsoleteFiles = @('RemoteDebuggerProvisioning.ps1', 'RemoteDebuggerObservation.ps1')
 $backedUpNames = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
 
@@ -179,6 +180,7 @@ try {
     }
     foreach ($name in $installedFiles) {
         $source = Join-Path $SourceRoot $name
+        if ($name -eq 'GuestPowerTestContract.ps1') { $source = Join-Path $SourceRoot '..\Skill\scripts\GuestPowerTestContract.ps1' }
         if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
             throw "Required pool broker source file is missing: $source"
         }
@@ -308,6 +310,7 @@ try {
     $installationMutationStarted = $true
     foreach ($name in $installedFiles) {
         $source = Join-Path $SourceRoot $name
+        if ($name -eq 'GuestPowerTestContract.ps1') { $source = Join-Path $SourceRoot '..\Skill\scripts\GuestPowerTestContract.ps1' }
         $destination = Join-Path $BrokerRoot $name
         $staged = $destination + '.' + [Guid]::NewGuid().ToString('N') + '.new'
         Copy-Item -LiteralPath $source -Destination $staged -Force
@@ -356,6 +359,7 @@ try {
         PoolRoot = [string]$definition.PoolRoot
         PoolBaseVhdx = [string]$definition.BaseVhdx
         PoolCreatedUtc = [string]$definition.CreatedUtc
+        PoolSourceCheckpointId = [string]$definition.SourceCheckpointId
         PoolWorkers = @($definition.Workers)
         PayloadCacheMaxAgeDays = 30
         PayloadCacheMaxBytes = [long]64GB
