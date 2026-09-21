@@ -2363,7 +2363,8 @@ function Confirm-GuestRequestNetworkAfterBoot {
             if ([DateTimeOffset]::Parse($State.GuestBootTimeUtc) -ne [DateTimeOffset]::Parse($ExpectedBoot)) { throw 'Guest boot identity changed during network reattestation.' }
             if ($State.MatchingAdapters.Count -ne 1) { throw 'The leased network MAC no longer resolves uniquely.' }
             $adapter = $State.MatchingAdapters[0]
-            if ($adapter.InterfaceAlias -cne $Initial.InterfaceAlias -or $adapter.ifIndex -ne $Initial.InterfaceIndex -or $adapter.Status -ne 'Up' -or
+            # Windows can renumber ifIndex across boots; the lease MAC owns identity.
+            if ($adapter.InterfaceAlias -cne $Initial.InterfaceAlias -or $adapter.Status -ne 'Up' -or
                 @($State.Adapters | Where-Object { $_.Status -eq 'Up' -and $_.ifIndex -ne $adapter.ifIndex }).Count -ne 0) { throw 'Guest request or foreign network interface drifted.' }
             if ($State.Addresses.Count -ne 1 -or $State.Addresses[0].IPAddress -cne $Runtime.GuestAddress -or
                 $State.Addresses[0].PrefixLength -ne $Runtime.PrefixLength -or $State.Addresses[0].AddressState -ne 'Preferred') { throw 'Guest IPv4 address or prefix drifted.' }

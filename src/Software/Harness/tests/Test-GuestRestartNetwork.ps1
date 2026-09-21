@@ -10,10 +10,10 @@ function Get-CimInstance { [pscustomobject]@{ LastBootUpTime = [DateTime]::Parse
 function Get-NetAdapter { $script:state.Adapters }
 function Get-NetIPAddress { $script:state.Addresses }
 function Get-NetRoute { $script:state.Routes }
-function Get-DnsClientServerAddress { [pscustomobject]@{ InterfaceIndex = 19; ServerAddresses = $script:state.Dns } }
+function Get-DnsClientServerAddress { [pscustomobject]@{ InterfaceIndex = $script:state.Adapters[0].ifIndex; ServerAddresses = $script:state.Dns } }
 function Get-NetAdapterBinding { [pscustomobject]@{ Enabled = $script:state.IPv6 } }
-function Get-NetIPInterface { [pscustomobject]@{ InterfaceIndex = 19; Dhcp = 'Disabled'; Forwarding = 'Disabled'; WeakHostSend = 'Disabled'; WeakHostReceive = 'Disabled' } }
-function Get-NetConnectionProfile { [pscustomobject]@{ InterfaceIndex = 19; NetworkCategory = $script:state.Category } }
+function Get-NetIPInterface { [pscustomobject]@{ InterfaceIndex = $script:state.Adapters[0].ifIndex; Dhcp = 'Disabled'; Forwarding = 'Disabled'; WeakHostSend = 'Disabled'; WeakHostReceive = 'Disabled' } }
+function Get-NetConnectionProfile { [pscustomobject]@{ InterfaceIndex = $script:state.Adapters[0].ifIndex; NetworkCategory = $script:state.Category } }
 function Get-NetFirewallProfile { [pscustomobject]@{ Enabled = 'True'; DefaultInboundAction = 'Block'; DisabledInterfaceAliases = $script:state.Aliases } }
 function Set-NetConnectionProfile { param($InterfaceIndex, $NetworkCategory) $script:mutations++; $script:state.Category = $NetworkCategory }
 function Set-NetFirewallProfile { param($Name, $DisabledInterfaceAliases) $script:mutations++; $script:state.Aliases = $DisabledInterfaceAliases }
@@ -32,6 +32,9 @@ function Reset-State {
 Reset-State
 $receipt = Confirm-GuestRequestNetworkAfterBoot -Runtime $runtime -InitialAttestation $initial -ExpectedBootTimeUtc $boot
 Check 'unchanged-boot-network-is-read-only' ($receipt.Succeeded -and $mutations -eq 0 -and $receipt.Before -and $receipt.After)
+Reset-State; $state.Adapters[0].ifIndex = 4; $state.Addresses[0].InterfaceIndex = 4; $state.Routes[0].InterfaceIndex = 4
+$receipt = Confirm-GuestRequestNetworkAfterBoot -Runtime $runtime -InitialAttestation $initial -ExpectedBootTimeUtc $boot
+Check 'boot-interface-renumbering-keeps-the-same-leased-mac' ($receipt.Succeeded -and $mutations -eq 0 -and $receipt.Before.MatchingAdapters[0].ifIndex -eq 4)
 Reset-State; $state.Category = 'Public'; $state.Aliases = @()
 $receipt = Confirm-GuestRequestNetworkAfterBoot -Runtime $runtime -InitialAttestation $initial -ExpectedBootTimeUtc $boot
 Check 'only-owned-category-and-exemption-restored-with-observations' ($receipt.Succeeded -and $mutations -eq 2 -and $receipt.Before.Profiles[0].NetworkCategory -eq 'Public' -and $receipt.After.Profiles[0].NetworkCategory -eq 'Private' -and $receipt.Restored.Count -eq 2)

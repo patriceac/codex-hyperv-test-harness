@@ -119,7 +119,12 @@ if ($acceptancePreview.RestartNetworkPeer.Profile -ne 'IsolatedTestNet' -or -not
     $definition = [Management.Automation.Language.Parser]::ParseInput($acceptanceSource, [ref]$null, [ref]$null).Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-RestartAcceptanceWithPeer' }, $true)
     . ([scriptblock]::Create($definition.Extent.Text))
     $EvidenceRoot = $repositoryRoot; $runner = 'synthetic'; $brokerRoot = 'synthetic'
-    function Start-Job { [pscustomobject]@{ State = 'Completed' } }
+    function Start-Job {
+        param($ScriptBlock, $ArgumentList)
+        $actions = @($ArgumentList[1].ActionsJson | ConvertFrom-Json)
+        if ($actions.Count -ne 1 -or $actions[0].type -cne 'wait_result_file' -or $actions[0].path -cne '{OUTDIR}\peer.json' -or $actions[0].timeoutMs -ne 900000) { throw 'The headless peer must wait for its result without requiring a window.' }
+        [pscustomobject]@{ State = 'Completed' }
+    }
     function Wait-Job { }
     function Remove-Job { }
     function Invoke-AcceptanceTest { [pscustomobject]@{ PoolWorkerId = 1; ResultPath = 'C:\synthetic\restart'; Network = @{ GuestAddress = '10.254.0.101' }; GuestRestart = @{ NetworkChecks = @(@{ Succeeded = $true; Evidence = @{ Before = $true; After = $true } }, @{ Succeeded = $true; Evidence = @{ Before = $true; After = $true } }) } } }

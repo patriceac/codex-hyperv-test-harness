@@ -438,6 +438,7 @@ function Invoke-RestartAcceptanceWithPeer {
     $parameters = @{
         ArtifactPath = Join-Path $softwareRoot 'Canaries\PowerTestCanary.exe'
         Arguments = 'network-peer "{OUTDIR}" ' + $Token
+        ActionsJson = '[{"type":"wait_result_file","path":"{OUTDIR}\\peer.json","timeoutMs":900000}]'
         AssertResultFile = '{OUTDIR}\peer.json'; AssertResultJsonPointer = '/passed'; AssertResultEqualsJson = 'true'
         NetworkProfile = 'IsolatedTestNet'; NetworkCohort = $Definition.Parameters.NetworkCohort
         BrokerRoot = $brokerRoot; QueueTimeoutSeconds = 900; ExecutionTimeoutSeconds = 1000
