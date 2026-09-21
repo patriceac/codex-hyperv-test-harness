@@ -2334,6 +2334,76 @@ function Initialize-GuestRequestNetwork {
     $result
 }
 
+function Confirm-GuestRequestNetworkAfterBoot {
+    param([string] $VmName, [Management.Automation.PSCredential] $Credential, $Runtime, $InitialAttestation, [string] $ExpectedBootTimeUtc)
+
+    if ($Runtime.Profile -cne 'IsolatedTestNet' -or -not $InitialAttestation.BoundaryAttested) { throw 'Restart networking requires the original isolated guest attestation.' }
+    Invoke-Command -VMName $VmName -Credential $Credential -ErrorAction Stop -ScriptBlock {
+        param($Runtime, $Initial, $ExpectedBoot)
+        $ErrorActionPreference = 'Stop'
+        $receipt = [ordered]@{ Succeeded = $false; ExpectedBootTimeUtc = $ExpectedBoot; Before = $null; After = $null; Restored = @(); Error = $null }
+        function Observe {
+            $adapters = @(Get-NetAdapter -IncludeHidden | Select-Object InterfaceAlias, ifIndex, MacAddress, @{ Name = 'Status'; Expression = { [string]$_.Status } })
+            $matching = @($adapters | Where-Object { (($_.MacAddress -replace '[:-]', '') -eq ($Runtime.AdapterMacAddress -replace '[:-]', '')) })
+            $index = if ($matching.Count -eq 1) { [int]$matching[0].ifIndex } else { -1 }
+            [pscustomobject]@{
+                ObservedUtc = [DateTime]::UtcNow.ToString('o')
+                GuestBootTimeUtc = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString('o')
+                Adapters = $adapters; MatchingAdapters = $matching
+                Addresses = @(Get-NetIPAddress -AddressFamily IPv4 | Where-Object InterfaceIndex -eq $index | Select-Object IPAddress, PrefixLength, @{ Name = 'AddressState'; Expression = { [string]$_.AddressState } })
+                Routes = @(Get-NetRoute -AddressFamily IPv4 | Where-Object InterfaceIndex -eq $index | Select-Object DestinationPrefix, NextHop)
+                DnsServers = @(Get-DnsClientServerAddress -AddressFamily IPv4 | Where-Object InterfaceIndex -eq $index | ForEach-Object { $_.ServerAddresses })
+                IPv6 = @($matching | ForEach-Object { Get-NetAdapterBinding -Name $_.InterfaceAlias -ComponentID ms_tcpip6 } | Select-Object Enabled)
+                IPInterfaces = @(Get-NetIPInterface -AddressFamily IPv4 | Where-Object InterfaceIndex -eq $index | ForEach-Object { [pscustomobject]@{ Dhcp = [string]$_.Dhcp; Forwarding = [string]$_.Forwarding; WeakHostSend = [string]$_.WeakHostSend; WeakHostReceive = [string]$_.WeakHostReceive } })
+                Profiles = @(Get-NetConnectionProfile | Where-Object InterfaceIndex -eq $index | Select-Object @{ Name = 'NetworkCategory'; Expression = { [string]$_.NetworkCategory } })
+                Firewall = @(Get-NetFirewallProfile -PolicyStore ActiveStore -Name Private | Select-Object @{ Name = 'Enabled'; Expression = { [string]$_.Enabled } }, @{ Name = 'DefaultInboundAction'; Expression = { [string]$_.DefaultInboundAction } }, DisabledInterfaceAliases)
+            }
+        }
+        function Validate($State, [bool] $Restored) {
+            if ([DateTimeOffset]::Parse($State.GuestBootTimeUtc) -ne [DateTimeOffset]::Parse($ExpectedBoot)) { throw 'Guest boot identity changed during network reattestation.' }
+            if ($State.MatchingAdapters.Count -ne 1) { throw 'The leased network MAC no longer resolves uniquely.' }
+            $adapter = $State.MatchingAdapters[0]
+            if ($adapter.InterfaceAlias -cne $Initial.InterfaceAlias -or $adapter.ifIndex -ne $Initial.InterfaceIndex -or $adapter.Status -ne 'Up' -or
+                @($State.Adapters | Where-Object { $_.Status -eq 'Up' -and $_.ifIndex -ne $adapter.ifIndex }).Count -ne 0) { throw 'Guest request or foreign network interface drifted.' }
+            if ($State.Addresses.Count -ne 1 -or $State.Addresses[0].IPAddress -cne $Runtime.GuestAddress -or
+                $State.Addresses[0].PrefixLength -ne $Runtime.PrefixLength -or $State.Addresses[0].AddressState -ne 'Preferred') { throw 'Guest IPv4 address or prefix drifted.' }
+            $routes = @($State.Routes | ForEach-Object { $_.DestinationPrefix + '|' + $_.NextHop } | Sort-Object)
+            $originalRoutes = @($Initial.Routes | ForEach-Object { $_.DestinationPrefix + '|' + $_.NextHop } | Sort-Object)
+            if (($routes -join ',') -cne ($originalRoutes -join ',')) { throw 'Guest routes drifted.' }
+            if ($State.DnsServers.Count -ne 0) { throw 'Guest DNS servers drifted.' }
+            if ($State.IPv6.Count -ne 1 -or $State.IPv6[0].Enabled) { throw 'Guest IPv6 binding drifted.' }
+            if ($State.IPInterfaces.Count -ne 1 -or $State.IPInterfaces[0].Dhcp -ne 'Disabled' -or $State.IPInterfaces[0].Forwarding -ne 'Disabled' -or
+                $State.IPInterfaces[0].WeakHostSend -ne 'Disabled' -or $State.IPInterfaces[0].WeakHostReceive -ne 'Disabled') { throw 'Guest IP interface policy drifted.' }
+            if ($State.Profiles.Count -ne 1 -or $State.Profiles[0].NetworkCategory -notin @('Public','Private')) { throw 'Guest connection profile identity drifted.' }
+            if ($State.Firewall.Count -ne 1 -or [string]$State.Firewall[0].Enabled -ne 'True' -or [string]$State.Firewall[0].DefaultInboundAction -ne 'Block') { throw 'Guest Private firewall policy drifted.' }
+            $aliases = @($State.Firewall[0].DisabledInterfaceAliases | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and $_ -ne 'NotConfigured' })
+            if ($aliases.Count -gt 1 -or ($aliases.Count -eq 1 -and $aliases[0] -cne $adapter.InterfaceAlias)) { throw 'Guest firewall contains a foreign interface exemption.' }
+            if ($Restored -and ($State.Profiles[0].NetworkCategory -ne 'Private' -or $aliases.Count -ne 1)) { throw 'Guest request-owned network exemption did not restore.' }
+        }
+        try {
+            $receipt.Before = Observe
+            Validate $receipt.Before $false
+            $adapter = $receipt.Before.MatchingAdapters[0]
+            if ($receipt.Before.Profiles[0].NetworkCategory -ne 'Private') {
+                Set-NetConnectionProfile -InterfaceIndex $adapter.ifIndex -NetworkCategory Private
+                $receipt.Restored += 'ConnectionProfileCategory'
+            }
+            if (@($receipt.Before.Firewall[0].DisabledInterfaceAliases | Where-Object { $_ -ceq $adapter.InterfaceAlias }).Count -ne 1) {
+                Set-NetFirewallProfile -Name Private -DisabledInterfaceAliases ([string[]]@($adapter.InterfaceAlias))
+                $receipt.Restored += 'IsolatedFirewallInterfaceExemption'
+            }
+            $receipt.After = Observe
+            Validate $receipt.After $true
+            $receipt.Succeeded = $true
+        }
+        catch {
+            $receipt.Error = $_.Exception.Message
+            if (-not $receipt.After) { try { $receipt.After = Observe } catch { } }
+        }
+        [pscustomobject]$receipt
+    } -ArgumentList $Runtime, $InitialAttestation, $ExpectedBootTimeUtc
+}
+
 function ConvertFrom-RequestNetworkLeaseState {
     param(
         [Parameter(Mandatory = $true)] $State,

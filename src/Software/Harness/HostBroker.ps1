@@ -4029,10 +4029,20 @@ function Invoke-GuestRequest {
             Write-RequestState -ResultRoot $RequestStateRoot -RequestId $requestId -Status 'Running' -Message 'Running the declared restart and sign-in sequence with one exclusive worker lease.' -CreatedUtc $createdUtc -ClaimedUtc $ClaimedUtc -ExecutionDeadlineUtc $executionDeadlineUtc -WorkerId $workerId
             if ($session) { Remove-PSSession -Session $session -ErrorAction SilentlyContinue; $session = $null }
             $guestRestartStarted = $true
+            $guestRestartNetworkRecheck = $null
+            if ($requestNetworkRuntime -and $requestNetworkRuntime.Profile -eq 'IsolatedTestNet') {
+                $guestRestartNetworkRecheck = {
+                    param($ExpectedBootTimeUtc)
+                    $null = Assert-RequestNetworkHostPolicyCurrent -Runtime $requestNetworkRuntime -BrokerRoot $BrokerRoot
+                    $receipt = Invoke-GuestPowerWatchdog -Mode Network -VmName $vmName -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc -Policy @{ Runtime = $requestNetworkRuntime; InitialAttestation = $requestNetworkGuestEvidence; ExpectedBootTimeUtc = $ExpectedBootTimeUtc }
+                    $null = Assert-RequestNetworkHostPolicyCurrent -Runtime $requestNetworkRuntime -BrokerRoot $BrokerRoot
+                    $receipt
+                }
+            }
             $guestRestartEvidence = Invoke-GuestRestartPlan -Job $job -Policy $guestPowerPolicy -VmName $vmName -RequestId $requestId -PayloadRoot $guestPayloadRoot -Outbox $guestOutbox -ResultRoot $ResultRoot -CredentialFile $guestCredentialFile -ExecutionDeadlineUtc $executionDeadlineUtc -Credential $credential -NetworkCheck {
                 Write-BrokerState -Status 'Running' -RequestId $requestId -Message 'Observing the declared guest restart/sign-in sequence; cancellation and the original deadline remain active.'
                 if ($requestNetworkRuntime) { $null = Assert-RequestNetworkHostPolicyCurrent -Runtime $requestNetworkRuntime -BrokerRoot $BrokerRoot }
-            }
+            } -NetworkRecheck $guestRestartNetworkRecheck
             $jobSubmissionAttempts = 1
         }
         else {
@@ -4894,6 +4904,7 @@ function Invoke-GuestRequest {
             $typedException = $typedException.InnerException
         }
         $cancelled = $typedException -is [OperationCanceledException]
+        if ($_.Exception.Data['GuestRestartNetwork'] -or $typedException.Data['GuestRestartNetwork']) { $failureStage = 'GuestRestartNetwork' }
         $executionTimedOut = $typedException -is [TimeoutException] -and
             $typedException.Data.Contains('CodexBrokerDeadlineExpired') -and
             $typedException.Data['CodexBrokerDeadlineExpired'] -is [bool] -and

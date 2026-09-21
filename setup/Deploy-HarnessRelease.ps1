@@ -343,7 +343,7 @@ function New-ReleasePlan {
     $operations.Add('Stage and publish source through Install.ps1 without creating recovery or running duplicate smoke acceptance.')
     if ($guestUpdateRequired) { $operations.Add('Replace the guest harness, verify the disposable account cannot expire in the canonical baseline, and rebuild the disposable pool exactly once.') }
     else { $operations.Add('Refresh the disposable pool exactly once from the unchanged canonical baseline.') }
-    $operations.Add('Run legacy launch, accented-name UI Automation, bounded keyboard, expected-guest-power-off, verified system-prompt, automatic/manual restart, installed-app shutdown, and restart-failure diagnostics acceptance in isolated workers.')
+    $operations.Add('Run legacy launch, accented-name UI Automation, bounded keyboard, expected-guest-power-off, verified system-prompt, automatic/manual restart with cross-guest traffic after both boots, installed-app shutdown, and restart-failure diagnostics acceptance in isolated workers.')
     if ($recoveryBaselineExportMode -eq 'ReuseCurrent') {
         $operations.Add('Reuse the receipt-backed unchanged baseline export with NTFS hard links, hash only the recovery delta, and rotate local recovery exactly once after acceptance.')
     }
@@ -580,7 +580,7 @@ if ($PlanOnly) {
         $guestPlan = if ($guestPlanJson -is [string]) { $guestPlanJson | ConvertFrom-Json } else { $guestPlanJson }
         if (-not [bool]$guestPlan.NoMutationPerformed) { throw 'The guest-baseline component plan did not remain read-only.' }
     }
-    $acceptancePlan = & (Join-Path $repositoryRoot 'setup\Invoke-HarnessReleaseAcceptance.ps1') -InstallRoot $InstallRoot -InvocationPreflightOnly
+    $acceptancePlan = & (Join-Path $repositoryRoot 'setup\Invoke-HarnessReleaseAcceptance.ps1') -InstallRoot $InstallRoot -InvocationPreflightOnly -AvailableWorkerCount ([int]$configuration.Document.PoolSize)
     $applyReady = [bool]$publicAudit.Success -and [bool]$installPlan.Preflight.Success -and ($null -eq $guestPlan -or [bool]$guestPlan.ApplyReady) -and [bool]$acceptancePlan.Success
     $authorizationBoundary = 'A successful ordinary release plan is authorized for immediate Apply without additional user confirmation. ForceRebuild, image servicing, networking changes, host restart, and rollback use their own exact plans and are also standing-authorized when they are within the requested task.'
     [pscustomobject][ordered]@{

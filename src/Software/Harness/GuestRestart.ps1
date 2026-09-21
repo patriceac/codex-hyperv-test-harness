@@ -3,26 +3,31 @@ if (-not (Test-Path -LiteralPath $contractPath -PathType Leaf)) { $contractPath 
 . $contractPath
 
 function Invoke-GuestPowerWatchdog {
-    param([ValidateSet('Fixture','Frame')] [string] $Mode, [string] $VmName, [string] $RequestId, [DateTime] $ExecutionDeadlineUtc, $Policy, [string] $BaselineId, [string] $CapturePath, [int] $TimeoutSeconds = 30)
+    param([ValidateSet('Fixture','Frame','Network')] [string] $Mode, [string] $VmName, [string] $RequestId, [DateTime] $ExecutionDeadlineUtc, $Policy, [string] $BaselineId, [string] $CapturePath, [int] $TimeoutSeconds = 30)
     Assert-RequestActive -RequestId $RequestId -ExecutionDeadlineUtc $ExecutionDeadlineUtc
     $base = Join-Path $probePath ($RequestId + '-power-' + [Guid]::NewGuid().ToString('N'))
     $inputPath = $base + '.input.json'; $outputPath = $base + '.json'; $leasePath = $base + '.process.json'
     $process = $null
     try {
-        Write-JsonAtomic -Path $inputPath -Value @{ Mode = $Mode; VmName = $VmName; RequestId = $RequestId; Policy = $Policy; BaselineId = $BaselineId; CapturePath = $CapturePath; CredentialPath = $credentialPath; PromptModule = (Join-Path $PSScriptRoot 'SystemPrompts.ps1') }
+        Write-JsonAtomic -Path $inputPath -Value @{ Mode = $Mode; VmName = $VmName; RequestId = $RequestId; Policy = $Policy; BaselineId = $BaselineId; CapturePath = $CapturePath; CredentialPath = $credentialPath; PromptModule = (Join-Path $PSScriptRoot 'SystemPrompts.ps1'); NetworkModule = (Join-Path $PSScriptRoot 'RequestNetwork.ps1') }
         $command = @'
 $ErrorActionPreference = 'Stop'
 try {
     $data = Get-Content -Raw -LiteralPath __INPUT__ -Encoding UTF8 | ConvertFrom-Json
-    if ($data.Mode -eq 'Fixture') {
+    if ($data.Mode -in @('Fixture','Network')) {
         $saved = Get-Content -Raw -LiteralPath $data.CredentialPath -Encoding UTF8 | ConvertFrom-Json
         $credential = New-Object Management.Automation.PSCredential($saved.UserName, (ConvertTo-SecureString $saved.Password -AsPlainText -Force))
+        if ($data.Mode -eq 'Network') {
+            . $data.NetworkModule
+            $value = Confirm-GuestRequestNetworkAfterBoot -VmName $data.VmName -Credential $credential -Runtime $data.Policy.Runtime -InitialAttestation $data.Policy.InitialAttestation -ExpectedBootTimeUtc $data.Policy.ExpectedBootTimeUtc
+        } else {
         $value = Invoke-Command -VMName $data.VmName -Credential $credential -ErrorAction Stop -ScriptBlock {
             param($Id, $Clean, $Fixture, $Credential, $Plan, $BaselineId)
             Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force -ErrorAction Stop
             . 'C:\CodexGuest\GuestPowerTest.ps1'
             Initialize-GuestPowerTest -RequestId $Id -CleanSignIn $Clean -CredentialFixture $Fixture -Credential $Credential -Plan $Plan -PoolBaselineId $BaselineId
         } -ArgumentList $data.RequestId, ([bool]$data.Policy.Plan), $data.Policy.CredentialFixture, $credential, $data.Policy.Plan, $data.BaselineId
+        }
     } else {
         . $data.PromptModule
         $value = Save-SystemPromptVmFramebuffer -VmName $data.VmName -Path $data.CapturePath
@@ -134,14 +139,31 @@ function New-GuestRestartPhaseJob {
 }
 
 function Invoke-GuestRestartPlan {
-    param($Job, $Policy, [string] $VmName, [string] $RequestId, [string] $PayloadRoot, [string] $Outbox, [string] $ResultRoot, [string] $CredentialFile, [DateTime] $ExecutionDeadlineUtc, [Management.Automation.PSCredential] $Credential, [scriptblock] $NetworkCheck)
-    $history = [ordered]@{ FormatVersion = 1; RequestId = $RequestId; ContractProven = $false; OriginalApplicationLaunchCount = 0; Boots = @(); Phases = @(); ManualSignInCount = 0; ApplicationActionReplayed = $false }
+    param($Job, $Policy, [string] $VmName, [string] $RequestId, [string] $PayloadRoot, [string] $Outbox, [string] $ResultRoot, [string] $CredentialFile, [DateTime] $ExecutionDeadlineUtc, [Management.Automation.PSCredential] $Credential, [scriptblock] $NetworkCheck, [scriptblock] $NetworkRecheck)
+    $history = [ordered]@{ FormatVersion = 1; RequestId = $RequestId; ContractProven = $false; OriginalApplicationLaunchCount = 0; Boots = @(); Phases = @(); NetworkChecks = @(); ManualSignInCount = 0; ApplicationActionReplayed = $false }
     $journal = Join-Path $ResultRoot 'broker-guest-restart.json'
     $observation = Get-GuestRestartObservation $VmName $RequestId $RequestId $Outbox $ExecutionDeadlineUtc
     if (-not $observation -or -not $observation.PowerTest.SignedIn) { throw 'Restart test initial boot/session observation failed.' }
     $bootTime = [DateTimeOffset]::Parse($observation.CurrentGuestBootTimeUtc).UtcDateTime
     for ($phase = 0; $phase -le $Policy.Plan.Boots.Count; $phase++) {
         Assert-RequestActive -RequestId $RequestId -ExecutionDeadlineUtc $ExecutionDeadlineUtc
+        if ($phase -gt 0 -and $NetworkRecheck) {
+            $networkRecord = [ordered]@{ Phase = $phase; GuestBootTimeUtc = $bootTime.ToString('o'); Succeeded = $false; Evidence = $null; Error = $null }
+            $history.NetworkChecks += $networkRecord
+            Write-JsonAtomic -Path $journal -Value $history
+            try {
+                $networkRecord.Evidence = & $NetworkRecheck $bootTime.ToString('o')
+                if (-not $networkRecord.Evidence.Succeeded) { throw "Guest restart network reattestation failed: $($networkRecord.Evidence.Error)" }
+                Assert-RequestActive -RequestId $RequestId -ExecutionDeadlineUtc $ExecutionDeadlineUtc
+                $networkRecord.Succeeded = $true
+            }
+            catch {
+                $networkRecord.Error = $_.Exception.Message
+                $_.Exception.Data['GuestRestartNetwork'] = $true
+                throw
+            }
+            finally { Write-JsonAtomic -Path $journal -Value $history }
+        }
         $phaseJob = New-GuestRestartPhaseJob $Job $Policy.Plan $phase $RequestId $PayloadRoot $Outbox $CredentialFile $ExecutionDeadlineUtc
         $phaseId = $phaseJob.id
         $phaseStarted = [DateTimeOffset]::Parse($observation.CurrentGuestUtc).UtcDateTime

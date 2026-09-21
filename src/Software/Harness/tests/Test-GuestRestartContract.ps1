@@ -91,6 +91,15 @@ $parameters = @{ Job = $job; Policy = [pscustomobject]@{ Plan = $plan }; VmName 
 $script:deliveries = New-Object Collections.Generic.List[string]; $script:cancel = $false
 $proof = Invoke-GuestRestartPlan @parameters
 Check 'one-original-one-continuation-same-output' ($proof.ContractProven -and $deliveries.Count -eq 2 -and $proof.OriginalApplicationLaunchCount -eq 1 -and -not $proof.ApplicationActionReplayed)
+$script:deliveries.Clear()
+$proof = Invoke-GuestRestartPlan @parameters -NetworkRecheck { param($ExpectedBoot) Check 'network-gate-precedes-continuation' ($script:deliveries.Count -eq 1 -and $ExpectedBoot -eq '2026-01-01T00:03:00.0000000Z'); [pscustomobject]@{ Succeeded = $true } }
+Check 'network-gate-recorded-once-for-the-new-boot' ($proof.NetworkChecks.Count -eq 1 -and $proof.NetworkChecks[0].Succeeded -and $deliveries.Count -eq 2)
+$script:deliveries.Clear()
+Reject 'network-drift-rejects-continuation' { Invoke-GuestRestartPlan @parameters -NetworkRecheck { [pscustomobject]@{ Succeeded = $false; Error = 'synthetic route drift' } } }
+Check 'network-drift-never-replays-or-delivers-continuation' ($deliveries.Count -eq 1)
+$script:deliveries.Clear()
+try { Invoke-GuestRestartPlan @parameters -NetworkRecheck { throw [OperationCanceledException]::new('network cancellation') }; throw 'Cancellation was swallowed.' }
+catch [OperationCanceledException] { Check 'network-gate-preserves-cancellation-type' ($deliveries.Count -eq 1) }
 & {
     Set-StrictMode -Version Latest
     $tokens = $null; $errors = $null

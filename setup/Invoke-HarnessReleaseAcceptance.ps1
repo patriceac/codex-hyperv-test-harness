@@ -3,6 +3,7 @@ param(
     [string] $InstallRoot = 'D:\Disk\VMs\Codex-Harness',
     [string] $EvidenceRoot,
     [string] $ClientSid,
+    [ValidateRange(1, 4)] [int] $AvailableWorkerCount = 2,
     [switch] $InvocationPreflightOnly
 )
 
@@ -213,11 +214,14 @@ if ($InvocationPreflightOnly) {
         $null -eq (Get-ReleaseOptionalPropertyValue -InputObject $shapeProbe -Name 'Missing') -and
         (Get-ReleaseOptionalPropertyValue -InputObject $shapeProbe -Name 'Present') -is [bool]
     [pscustomobject][ordered]@{
-        Success = $preview.Count -eq 8 -and $maintenanceSnapshotShapeSafe
+        Success = $preview.Count -eq 8 -and $maintenanceSnapshotShapeSafe -and $AvailableWorkerCount -ge 2
+        RequiredWorkerCount = 2
+        AvailableWorkerCount = $AvailableWorkerCount
         NoMutationPerformed = $true
         MaintenanceSnapshotShapeSafe = [bool]$maintenanceSnapshotShapeSafe
         TestNames = @($preview.Name)
         Invocations = $preview
+        RestartNetworkPeer = [pscustomobject]@{ Profile = 'IsolatedTestNet'; SameCohort = $true; DistinctWorkerRequired = $true; BootChallenges = @('auto','manual') }
     }
     return
 }
@@ -233,6 +237,7 @@ $configPath = Join-Path $InstallRoot 'Software\harness-config.json'
 if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { throw "Harness configuration is missing: $configPath" }
 . (Join-Path $InstallRoot 'Software\Harness\HarnessPaths.ps1')
 $layout = Get-CodexHarnessConfig -ConfigPath $configPath
+if ([int]$layout.PoolSize -lt 2) { throw 'Release restart acceptance requires two workers for cross-guest traffic.' }
 $softwareRoot = [string]$layout.SoftwareRoot
 $brokerRoot = [string]$layout.BrokerRoot
 $definitionPath = Join-Path ([string]$layout.HarnessSourceRoot) 'pool-definition.json'
@@ -427,25 +432,70 @@ function Invoke-AcceptanceTest {
     $summary
 }
 
+function Invoke-RestartAcceptanceWithPeer {
+    param($Definition, [string] $Token)
+    $peerLog = Join-Path $EvidenceRoot 'restart-peer-runner.log'
+    $parameters = @{
+        ArtifactPath = Join-Path $softwareRoot 'Canaries\PowerTestCanary.exe'
+        Arguments = 'network-peer "{OUTDIR}" ' + $Token
+        AssertResultFile = '{OUTDIR}\peer.json'; AssertResultJsonPointer = '/passed'; AssertResultEqualsJson = 'true'
+        NetworkProfile = 'IsolatedTestNet'; NetworkCohort = $Definition.Parameters.NetworkCohort
+        BrokerRoot = $brokerRoot; QueueTimeoutSeconds = 900; ExecutionTimeoutSeconds = 1000
+    }
+    $peerJob = Start-Job -ScriptBlock {
+        param($Runner, $Parameters, $Log)
+        & $Runner @Parameters 6>&1 | ForEach-Object { Add-Content -LiteralPath $Log -Value ([string]$_); $_ }
+    } -ArgumentList $runner, $parameters, $peerLog
+    try {
+        $summary = Invoke-AcceptanceTest -Definition $Definition
+        $null = Wait-Job -Job $peerJob -Timeout 180
+        if ($peerJob.State -ne 'Completed') { throw 'The restart network peer did not complete.' }
+        $peer = (Receive-Job -Job $peerJob -ErrorAction Stop | Select-Object -Last 1) | ConvertFrom-Json
+        if (-not $peer.Success -or -not $peer.PayloadChildDeleted -or $peer.VmFinalState -ne 'Off' -or
+            $peer.PoolWorkerId -eq $summary.PoolWorkerId -or $peer.Network.GuestAddress -eq $summary.Network.GuestAddress) { throw 'The restart peer did not prove a separate successful isolated guest and cleanup.' }
+        $peerEvidence = Read-JsonIfPresent -Path (Join-Path $peer.ResultPath 'peer.json')
+        if (-not $peerEvidence.passed -or $peerEvidence.token -cne $Token -or $peerEvidence.address -cne $summary.Network.GuestAddress -or -not $peerEvidence.automatic -or -not $peerEvidence.manual) { throw 'The restart peer did not observe both boot challenges from the leased guest.' }
+        foreach ($phase in @('auto','manual')) {
+            $evidence = Read-JsonIfPresent -Path (Join-Path $summary.ResultPath ('network-' + $phase + '.json'))
+            if (-not $evidence.passed -or $evidence.token -cne $Token -or $evidence.phase -cne $phase -or $evidence.peerAddress -cne $peer.Network.GuestAddress) { throw "Cross-guest traffic after $phase sign-in was not proven." }
+        }
+        if (@($summary.GuestRestart.NetworkChecks).Count -ne 2 -or @($summary.GuestRestart.NetworkChecks | Where-Object { -not $_.Succeeded -or -not $_.Evidence.Before -or -not $_.Evidence.After }).Count -ne 0) { throw 'Both restarted guest network attestations are required.' }
+        $summary | Add-Member -NotePropertyName NetworkPeer -NotePropertyValue @{ RequestId = $peer.RequestId; ResultPath = $peer.ResultPath; Success = $true }
+        $summary
+    }
+    finally {
+        if ($peerJob.State -in @('Running','NotStarted')) {
+            $log = if (Test-Path -LiteralPath $peerLog) { Get-Content -Raw -LiteralPath $peerLog } else { '' }
+            if ($log -match 'Submitted\s+(executable-test-[A-Za-z0-9_-]+)') {
+                & (Join-Path $softwareRoot 'Skill\scripts\Cancel-HyperVExecutableTest.ps1') -BrokerRoot $brokerRoot -RequestId $Matches[1] -Reason 'Owning restart acceptance ended before its peer completed.' | Out-Null
+                $null = Wait-Job -Job $peerJob -Timeout 240
+            }
+            if ($peerJob.State -in @('Running','NotStarted')) { Stop-Job -Job $peerJob }
+        }
+        Remove-Job -Job $peerJob
+    }
+}
+
 $startedUtc = [DateTime]::UtcNow
 $preAudit = Invoke-PoolAuditUnderMaintenance -Name 'pre-acceptance-audit'
 $preAuditPath = [string]$preAudit.AuditPath
 $powerCanaryHash = (Get-FileHash -LiteralPath (Join-Path $softwareRoot 'Canaries\PowerTestCanary.exe') -Algorithm SHA256).Hash
 $restartPlanPath = Join-Path $EvidenceRoot 'guest-restart-plan.json'
+$restartNetworkToken = [Guid]::NewGuid().ToString('N')
 $boots = @(for ($boot = 1; $boot -le 2; $boot++) {
     [ordered]@{
         ExpectedSignIn = if ($boot -eq 1) { 'Automatic' } else { 'Manual' }
         BootTimeoutSeconds = 180
         SignedOutObservationSeconds = if ($boot -eq 1) { 0 } else { 15 }
         BeforeRestart = @{ ResultFile = ('{OUTDIR}\before-boot-' + $boot + '.json'); JsonPointer = '/passed'; EqualsJson = 'true' }
-        Continuation = @{ ExecutableRelativePath = 'PowerTestCanary.exe'; ExecutableSha256 = $powerCanaryHash; Arguments = $(if ($boot -eq 1) { 'observe-first "{OUTDIR}"' } else { 'observe-final "{OUTDIR}"' }); Actions = @() }
+        Continuation = @{ ExecutableRelativePath = 'PowerTestCanary.exe'; ExecutableSha256 = $powerCanaryHash; Arguments = $(if ($boot -eq 1) { 'observe-first "{OUTDIR}" ' + $restartNetworkToken } else { 'observe-final "{OUTDIR}" ' + $restartNetworkToken }); Actions = @() }
     }
 })
 Write-JsonAtomic -Path $restartPlanPath -Value @{ FormatVersion = 1; Boots = $boots }
 $invocations = @(New-HarnessReleaseAcceptanceInvocations -SoftwareRoot $softwareRoot -BrokerRoot $brokerRoot -PowerCanarySha256 $powerCanaryHash -RestartPlanPath $restartPlanPath)
 $results = [ordered]@{}
 foreach ($invocation in $invocations) {
-    $results[[string]$invocation.Name] = Invoke-AcceptanceTest -Definition $invocation
+    $results[[string]$invocation.Name] = if ($invocation.Name -eq 'GuestRestart') { Invoke-RestartAcceptanceWithPeer -Definition $invocation -Token $restartNetworkToken } else { Invoke-AcceptanceTest -Definition $invocation }
 }
 
 $legacy = $results.LegacyLaunch
@@ -550,6 +600,7 @@ $postAuditPath = [string]$postAudit.AuditPath
             RequestId = [string]$summary.RequestId
             ResultPath = [string]$summary.ResultPath
             Success = [bool]$summary.Success -or $_.Name -eq 'GuestRestartFailure'
+            NetworkPeer = Get-ReleaseOptionalPropertyValue -InputObject $summary -Name 'NetworkPeer'
         }
     })
 }

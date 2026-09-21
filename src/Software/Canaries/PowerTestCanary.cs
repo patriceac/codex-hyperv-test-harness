@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Net;
+using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
@@ -34,11 +36,65 @@ internal static class PowerTestCanary {
             key.SetValue("CodexHarnessPowerCanary", Quote(Installed) + " " + mode + " " + Quote(output));
         }
     }
+    // A request-scoped challenge proves traffic between two broker-owned guests.
+    // Discovery stays inside the isolated cohort; no host endpoint is involved.
+    static void NetworkPeer(string output, string token) {
+        using (var udp = new UdpClient(42572)) {
+            udp.Client.ReceiveTimeout = 500;
+            var timeout = Stopwatch.StartNew();
+            string address = null, machine = null;
+            bool automatic = false, manual = false;
+            long completeAt = -1;
+            while (timeout.ElapsedMilliseconds < 900000) {
+                if (completeAt >= 0 && timeout.ElapsedMilliseconds >= completeAt) {
+                    File.WriteAllText(Path.Combine(output, "peer.json.tmp"), Json.Serialize(new { passed = true, address, machine, automatic, manual, token }));
+                    File.Move(Path.Combine(output, "peer.json.tmp"), Path.Combine(output, "peer.json"));
+                    return;
+                }
+                IPEndPoint remote = new IPEndPoint(IPAddress.Any, 0);
+                byte[] data;
+                try { data = udp.Receive(ref remote); } catch (SocketException ex) { if (ex.SocketErrorCode == SocketError.TimedOut) continue; throw; }
+                string[] parts = Encoding.UTF8.GetString(data).Split('|');
+                if (parts.Length != 3 || parts[0] != token || (parts[1] != "auto" && parts[1] != "manual")) continue;
+                if (address != null && (address != remote.Address.ToString() || machine != parts[2])) throw new Exception("Peer identity changed.");
+                address = remote.Address.ToString(); machine = parts[2];
+                if (parts[1] == "auto") automatic = true;
+                if (parts[1] == "manual" && automatic) manual = true;
+                byte[] reply = Encoding.UTF8.GetBytes(token + "|" + parts[1] + "|" + Environment.MachineName);
+                udp.Send(reply, reply.Length, remote);
+                if (automatic && manual && completeAt < 0) completeAt = timeout.ElapsedMilliseconds + 3000;
+            }
+            throw new Exception("Both boot challenges were not observed.");
+        }
+    }
+    static void CheckNetwork(string output, string token, string phase) {
+        using (var udp = new UdpClient(0)) {
+            udp.EnableBroadcast = true; udp.Client.ReceiveTimeout = 500;
+            var timeout = Stopwatch.StartNew();
+            byte[] challenge = Encoding.UTF8.GetBytes(token + "|" + phase + "|" + Environment.MachineName);
+            while (timeout.ElapsedMilliseconds < 30000) {
+                udp.Send(challenge, challenge.Length, new IPEndPoint(IPAddress.Broadcast, 42572));
+                IPEndPoint remote = new IPEndPoint(IPAddress.Any, 0);
+                byte[] data;
+                try { data = udp.Receive(ref remote); } catch (SocketException ex) { if (ex.SocketErrorCode == SocketError.TimedOut) continue; throw; }
+                string[] parts = Encoding.UTF8.GetString(data).Split('|');
+                if (parts.Length != 3 || parts[0] != token || parts[1] != phase || remote.Port != 42572) continue;
+                File.WriteAllText(Path.Combine(output, "network-" + phase + ".json"), Json.Serialize(new { passed = true, token, phase, peerAddress = remote.Address.ToString(), peerMachine = parts[2] }));
+                return;
+            }
+            throw new Exception("Cross-guest boot challenge failed.");
+        }
+    }
     [STAThread]
     static int Main(string[] args) {
         if (!File.Exists(@"C:\CodexGuest\GuestAgent.ps1") || args.Length < 2) return 90;
         string mode = args[0], output = args[1];
         try {
+            if (mode == "network-peer") {
+                Directory.CreateDirectory(output);
+                NetworkPeer(output, args[2]);
+                return 0;
+            }
             if (mode == "fail-restart") {
                 Directory.CreateDirectory(Path.Combine(output, "product-data"));
                 File.WriteAllText(Path.Combine(output, "product-data", "restart-session.resume"), "failure-diagnostic-canary");
@@ -79,11 +135,13 @@ internal static class PowerTestCanary {
                 Marker(Path.Combine(output, mode + ".json"));
             } else if (mode == "observe-first") {
                 WaitFor(Path.Combine(output, "after-auto.json"));
+                CheckNetwork(output, args[2], "auto");
                 RunOnce("after-manual", output);
                 Marker(Path.Combine(output, "before-boot-2.json"));
                 Power("/r");
             } else if (mode == "observe-final") {
                 WaitFor(Path.Combine(output, "after-manual.json"));
+                CheckNetwork(output, args[2], "manual");
                 Marker(Path.Combine(output, "final.json"));
             } else if (mode == "installed-shutdown") {
                 Process.Start(new ProcessStartInfo(Installed, "shutdown " + Quote(output)) { UseShellExecute = false });

@@ -32,6 +32,8 @@ Before setup/initial launch, only the disposable guest loses baseline `AutoAdmin
 
 `None` and `IsolatedTestNet` are supported. Host inputs, system-prompt handling and `ExpectGuestPowerOff` cannot be combined with this contract. Existing `GuestSetup` may install/provision the app and exact guest firewall rules before its initial launch; it is not repeated after boots. Installed-app shutdown instead uses `GuestSetup` plus the unchanged expected-power-off contract.
 
+For `IsolatedTestNet`, each new signed-in boot must pass a bounded guest network check before continuation. `GuestRestart.NetworkChecks` retains the observed boot, before/after network state and any restoration of the request-owned Private category or interface exemption. Address, route, DNS, IPv6, interface or foreign-exemption drift fails at `GuestRestartNetwork` without resetting IP configuration, changing product rules or replaying a phase. Autonomous startup may precede this check; an earlier Windows firewall prompt is not automatically accepted.
+
 ## Protected credential input
 
 Opt in with `-GuestCredentialFixture` only when the test must enter the disposable account's real password into a product dialog. It can be used on a controller request without a restart plan. `{GUEST_CREDENTIAL_FILE}` resolves in arguments, continuation arguments and guest-setup arguments to a request-private file outside payload/evidence directories. Its ACL grants only the guest SID and SYSTEM access. It is discarded with the OS child.

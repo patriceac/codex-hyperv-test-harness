@@ -113,6 +113,37 @@ if ($failedRestartInvocation.ContainsKey('ThrowOnFailure') -or -not $failedResta
     $failedRestartInvocation.Arguments -cne 'fail-restart "{OUTDIR}"' -or
     $installedShutdownInvocation.GuestSetupArguments[2] -cne '{PAYLOAD}\PowerTestCanary.exe') { throw 'Failure-diagnostic or setup-token acceptance lost its exact reproduction.' }
 $scenarios.Add('eight-path-isolated-acceptance-is-exactly-bound')
+if ($acceptancePreview.RestartNetworkPeer.Profile -ne 'IsolatedTestNet' -or -not $acceptancePreview.RestartNetworkPeer.SameCohort -or
+    -not $acceptancePreview.RestartNetworkPeer.DistinctWorkerRequired -or ($acceptancePreview.RestartNetworkPeer.BootChallenges -join ',') -cne 'auto,manual') { throw 'Restart acceptance requires a distinct same-cohort peer after both boots.' }
+& {
+    $definition = [Management.Automation.Language.Parser]::ParseInput($acceptanceSource, [ref]$null, [ref]$null).Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-RestartAcceptanceWithPeer' }, $true)
+    . ([scriptblock]::Create($definition.Extent.Text))
+    $EvidenceRoot = $repositoryRoot; $runner = 'synthetic'; $brokerRoot = 'synthetic'
+    function Start-Job { [pscustomobject]@{ State = 'Completed' } }
+    function Wait-Job { }
+    function Remove-Job { }
+    function Invoke-AcceptanceTest { [pscustomobject]@{ PoolWorkerId = 1; ResultPath = 'C:\synthetic\restart'; Network = @{ GuestAddress = '10.254.0.101' }; GuestRestart = @{ NetworkChecks = @(@{ Succeeded = $true; Evidence = @{ Before = $true; After = $true } }, @{ Succeeded = $true; Evidence = @{ Before = $true; After = $true } }) } } }
+    function Receive-Job { @{ Success = $true; PayloadChildDeleted = $true; VmFinalState = 'Off'; PoolWorkerId = $peerWorker; Network = @{ GuestAddress = '10.254.0.102' }; ResultPath = 'C:\synthetic\peer'; RequestId = 'peer' } | ConvertTo-Json -Depth 8 }
+    function Read-JsonIfPresent {
+        param($Path)
+        if ($Path.EndsWith('peer.json')) { return [pscustomobject]@{ passed = $true; token = 'challenge'; address = '10.254.0.101'; automatic = $true; manual = $true } }
+        [pscustomobject]@{ passed = -not ($missingManual -and $Path.EndsWith('network-manual.json')); token = 'challenge'; phase = $(if ($Path.EndsWith('network-auto.json')) { 'auto' } else { 'manual' }); peerAddress = '10.254.0.102' }
+    }
+    $peerWorker = 2; $missingManual = $false
+    $definition = @{ Parameters = @{ NetworkCohort = 'synthetic' } }
+    $result = Invoke-RestartAcceptanceWithPeer -Definition $definition -Token 'challenge'
+    if (-not $result.NetworkPeer.Success) { throw 'Two-guest boot acceptance did not retain the peer receipt.' }
+    foreach ($fault in @('same-worker','missing-manual')) {
+        $peerWorker = if ($fault -eq 'same-worker') { 1 } else { 2 }; $missingManual = $fault -eq 'missing-manual'
+        $rejected = $false
+        try { Invoke-RestartAcceptanceWithPeer -Definition $definition -Token 'challenge' | Out-Null } catch { $rejected = $true }
+        if (-not $rejected) { throw "Restart peer acceptance accepted $fault." }
+    }
+}
+$scenarios.Add('restart-peer-must-prove-both-boots-on-distinct-workers')
+$singleWorkerPreview = & $acceptancePath -InstallRoot $probeRoot -InvocationPreflightOnly -AvailableWorkerCount 1
+if ($singleWorkerPreview.Success -or -not $singleWorkerPreview.NoMutationPerformed -or $singleWorkerPreview.RequiredWorkerCount -ne 2) { throw 'A single-worker pool must fail peer acceptance preflight before mutation.' }
+$scenarios.Add('single-worker-peer-acceptance-fails-preflight')
 
 $inventoryAst = [Management.Automation.Language.Parser]::ParseFile($deployPath, [ref]$null, [ref]$null).Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-GuestReleaseInventory' }, $true)
 . ([scriptblock]::Create($inventoryAst.Extent.Text))
@@ -193,7 +224,7 @@ $deploy = Get-Content -LiteralPath $deployPath -Raw
 if ($deploy -notmatch 'verify the disposable account cannot expire') {
     throw 'The immutable release plan omits guest account expiry protection.'
 }
-if ($deploy -notmatch [regex]::Escape("Run legacy launch, accented-name UI Automation, bounded keyboard, expected-guest-power-off, verified system-prompt, automatic/manual restart, installed-app shutdown, and restart-failure diagnostics acceptance in isolated workers.")) {
+if ($deploy -notmatch [regex]::Escape("Run legacy launch, accented-name UI Automation, bounded keyboard, expected-guest-power-off, verified system-prompt, automatic/manual restart with cross-guest traffic after both boots, installed-app shutdown, and restart-failure diagnostics acceptance in isolated workers.")) {
     throw 'The immutable release plan does not describe all eight isolated acceptance paths.'
 }
 $phaseNames = @('CandidateQualification','LiveReadiness','SourcePromotion','GuestBaselinePromotion','IsolatedAcceptance','RecoveryRefresh','Finalization')
