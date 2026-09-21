@@ -2234,7 +2234,8 @@ function Start-ExpectedPowerOffEvidenceTransfer {
         [Parameter(Mandatory = $true)] [ValidatePattern('^[a-f0-9]{32}$')] [string] $SnapshotId,
         [Parameter(Mandatory = $true)] [string] $GuestOutbox,
         [Parameter(Mandatory = $true)] [string] $HostResultRoot,
-        [Parameter(Mandatory = $true)] [string] $OutputPath
+        [Parameter(Mandatory = $true)] [string] $OutputPath,
+        [switch] $FailureDiagnostics
     )
 
     $childTemplate = @'
@@ -2246,7 +2247,7 @@ try {
     . __HOST_BROKER_PATH__ -BrokerRoot __BROKER_ROOT__ -LibraryOnly
     $credential = Get-GuestCredential
     $session = New-PSSession -VMName __VM_NAME__ -Credential $credential -ErrorAction Stop
-    $manifest = New-GuestEvidenceSnapshot -Session $session -GuestOutbox __GUEST_OUTBOX__ -RequestId __REQUEST_ID__ -SnapshotId __SNAPSHOT_ID__
+    $manifest = New-GuestEvidenceSnapshot -Session $session -GuestOutbox __GUEST_OUTBOX__ -RequestId __REQUEST_ID__ -SnapshotId __SNAPSHOT_ID__ -FailureDiagnostics:__FAILURE_DIAGNOSTICS__
     $manifestSha256 = Invoke-Command -Session $session -ErrorAction Stop -ScriptBlock {
         param($Path)
         (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash
@@ -2288,7 +2289,8 @@ exit $exitCode
         Replace('__GUEST_OUTBOX__', (ConvertTo-PowerShellSingleQuotedLiteral -Value $GuestOutbox)).
         Replace('__REQUEST_ID__', (ConvertTo-PowerShellSingleQuotedLiteral -Value $RequestId)).
         Replace('__SNAPSHOT_ID__', (ConvertTo-PowerShellSingleQuotedLiteral -Value $SnapshotId)).
-        Replace('__HOST_RESULT_ROOT__', (ConvertTo-PowerShellSingleQuotedLiteral -Value $HostResultRoot))
+        Replace('__HOST_RESULT_ROOT__', (ConvertTo-PowerShellSingleQuotedLiteral -Value $HostResultRoot)).
+        Replace('__FAILURE_DIAGNOSTICS__', ('$' + ([bool]$FailureDiagnostics).ToString().ToLowerInvariant()))
     $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childCommand))
     $process = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList @(
         '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encodedCommand
@@ -2311,10 +2313,19 @@ function Invoke-ExpectedPowerOffEvidenceTransferBounded {
         [Parameter(Mandatory = $true)] [DateTime] $ExecutionDeadlineUtc,
         [Parameter(Mandatory = $true)] [string] $GuestOutbox,
         [Parameter(Mandatory = $true)] [string] $HostResultRoot,
-        [ValidateRange(5, 60)] [int] $AttemptTimeoutSeconds = 30
+        [ValidateRange(5, 60)] [int] $AttemptTimeoutSeconds = 30,
+        [switch] $FailureDiagnostics
     )
 
-    Assert-RequestActive -RequestId $RequestId -ExecutionDeadlineUtc $ExecutionDeadlineUtc
+    if ($FailureDiagnostics) {
+        if ($RequestId -notmatch '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$' -or
+            [IO.Path]::GetFullPath($GuestOutbox).TrimEnd('\') -ine ('C:\CodexGuest\Outbox\' + $RequestId)) { throw 'Failure evidence must use the exact request outbox.' }
+        # Cleanup only: cancellation and an expired execution deadline must not
+        # skip diagnostics, but this separate grace never extends application work.
+        $AttemptTimeoutSeconds = [Math]::Min(30, $AttemptTimeoutSeconds)
+        $ExecutionDeadlineUtc = [DateTime]::UtcNow.AddSeconds($AttemptTimeoutSeconds)
+    }
+    else { Assert-RequestActive -RequestId $RequestId -ExecutionDeadlineUtc $ExecutionDeadlineUtc }
     $operationId = $RequestId + '-evidence-' + [Guid]::NewGuid().ToString('N')
     $snapshotId = [Guid]::NewGuid().ToString('N')
     $outputPath = Join-Path $probePath ($operationId + '.json')
@@ -2325,9 +2336,9 @@ function Invoke-ExpectedPowerOffEvidenceTransferBounded {
     $candidateAttemptDeadlineUtc = [DateTime]::UtcNow.AddSeconds($AttemptTimeoutSeconds)
     $attemptDeadlineUtc = if ($candidateAttemptDeadlineUtc -lt $ExecutionDeadlineUtc) { $candidateAttemptDeadlineUtc } else { $ExecutionDeadlineUtc }
     try {
-        $operation = Start-ExpectedPowerOffEvidenceTransfer -VmName $VmName -RequestId $RequestId -SnapshotId $snapshotId -GuestOutbox $GuestOutbox -HostResultRoot $hostStageRoot -OutputPath $outputPath
+        $operation = Start-ExpectedPowerOffEvidenceTransfer -VmName $VmName -RequestId $RequestId -SnapshotId $snapshotId -GuestOutbox $GuestOutbox -HostResultRoot $hostStageRoot -OutputPath $outputPath -FailureDiagnostics:$FailureDiagnostics
         while ($true) {
-            Assert-RequestActive -RequestId $RequestId -ExecutionDeadlineUtc $ExecutionDeadlineUtc
+            if (-not $FailureDiagnostics) { Assert-RequestActive -RequestId $RequestId -ExecutionDeadlineUtc $ExecutionDeadlineUtc }
             if ([DateTime]::UtcNow -ge $attemptDeadlineUtc) {
                 throw [InvalidOperationException]::new("The bounded evidence-transfer attempt exceeded $AttemptTimeoutSeconds seconds.")
             }
@@ -2343,7 +2354,7 @@ function Invoke-ExpectedPowerOffEvidenceTransferBounded {
             throw "Expected-power-off evidence transfer failed: $([string]$operationResult.Error)"
         }
         Assert-ExpectedPowerOffEvidenceStageMatchesManifest -HostStageRoot $hostStageRoot -Manifest $operationResult.Manifest -ManifestSha256 ([string]$operationResult.ManifestSha256) -RequestId $RequestId -SnapshotId $snapshotId | Out-Null
-        Assert-RequestActive -RequestId $RequestId -ExecutionDeadlineUtc $ExecutionDeadlineUtc
+        if (-not $FailureDiagnostics) { Assert-RequestActive -RequestId $RequestId -ExecutionDeadlineUtc $ExecutionDeadlineUtc }
         $preserveHostStage = $true
         [pscustomobject][ordered]@{
             Manifest = $operationResult.Manifest
@@ -2359,6 +2370,37 @@ function Invoke-ExpectedPowerOffEvidenceTransferBounded {
             Remove-Item -LiteralPath $hostStageRoot -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
+}
+
+function Save-GuestRestartFailureEvidence {
+    param([string] $VmName, [string] $RequestId, [string] $GuestOutbox, [string] $ResultRoot, [string] $ClientSid)
+
+    $receipt = [ordered]@{ Attempted = $true; Retained = $false; Partial = $false; TimeoutSeconds = 30; RelativePath = $null; CopiedFiles = 0; SkippedFiles = 0; Error = $null }
+    $transfer = $null
+    try {
+        $destination = Join-Path $ResultRoot 'failure-diagnostics'
+        if (Test-Path -LiteralPath $destination) { throw 'Failure diagnostics destination already exists.' }
+        $transfer = Invoke-ExpectedPowerOffEvidenceTransferBounded -VmName $VmName -RequestId $RequestId -ExecutionDeadlineUtc ([DateTime]::UtcNow) -GuestOutbox $GuestOutbox -HostResultRoot $ResultRoot -FailureDiagnostics
+        $manifest = Read-BrokerJsonWithRetry -Path (Join-Path $transfer.HostStageRoot 'evidence-copy-manifest.json')
+        # Publish only the verified snapshot, with the same client-read boundary
+        # as live evidence. Its result.json is diagnostic, never a final result.
+        Set-HostLiveEvidencePublishedAcl -Path $transfer.HostStageRoot -ClientSid $ClientSid
+        [IO.Directory]::Move($transfer.HostStageRoot, $destination)
+        $receipt.Retained = $true
+        $receipt.RelativePath = 'failure-diagnostics'
+        $receipt.CopiedFiles = @($manifest.CopiedFiles).Count
+        $receipt.SkippedFiles = @($manifest.SkippedFiles).Count
+        $receipt.Partial = $receipt.SkippedFiles -gt 0 -or @($manifest.EnumerationErrors).Count -gt 0
+    }
+    catch { $receipt.Error = $_.Exception.Message }
+    finally {
+        if ($transfer -and (Test-Path -LiteralPath $transfer.HostStageRoot)) {
+            $stage = [IO.Path]::GetFullPath($transfer.HostStageRoot)
+            $allowed = [IO.Path]::GetFullPath((Join-Path $probePath 'EvidenceTransfers')).TrimEnd('\') + '\'
+            if ($stage.StartsWith($allowed, [StringComparison]::OrdinalIgnoreCase)) { Remove-Item -LiteralPath $stage -Recurse -ErrorAction SilentlyContinue }
+        }
+    }
+    [pscustomobject]$receipt
 }
 
 function Open-GuestSessionReliable {
@@ -2557,11 +2599,12 @@ function New-GuestEvidenceSnapshot {
         [Parameter(Mandatory = $true)] [System.Management.Automation.Runspaces.PSSession] $Session,
         [Parameter(Mandatory = $true)] [string] $GuestOutbox,
         [Parameter(Mandatory = $true)] [string] $RequestId,
-        [Parameter(Mandatory = $true)] [ValidatePattern('^[a-f0-9]{32}$')] [string] $SnapshotId
+        [Parameter(Mandatory = $true)] [ValidatePattern('^[a-f0-9]{32}$')] [string] $SnapshotId,
+        [switch] $FailureDiagnostics
     )
 
     Invoke-Command -Session $Session -ErrorAction Stop -ScriptBlock {
-        param($SourceRoot, $JobId, $StageId, $StageBaseRoot = 'C:\CodexGuest\EvidenceStage')
+        param($SourceRoot, $JobId, $StageId, $StageBaseRoot = 'C:\CodexGuest\EvidenceStage', [bool] $FailureDiagnostics = $false)
 
         if ($JobId -notmatch '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$') {
             throw "Invalid evidence snapshot request id: $JobId"
@@ -2573,6 +2616,25 @@ function New-GuestEvidenceSnapshot {
         if (-not (Test-Path -LiteralPath $sourceRootFull -PathType Container)) {
             throw "Guest evidence source is missing: $sourceRootFull"
         }
+        if ($FailureDiagnostics) {
+            foreach ($rootPath in @($sourceRootFull, $StageBaseRoot)) {
+                for ($ancestor = $rootPath; $ancestor; $ancestor = Split-Path -Parent $ancestor) {
+                    if ((Test-Path -LiteralPath $ancestor) -and
+                        ((Get-Item -LiteralPath $ancestor -Force -ErrorAction Stop).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Failure evidence root traverses a reparse point.' }
+                }
+            }
+            if (-not ('CodexFailureEvidenceNative' -as [type])) {
+                Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+public static class CodexFailureEvidenceNative {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern uint GetFinalPathNameByHandle(SafeFileHandle file, StringBuilder path, uint size, uint flags);
+}
+'@
+            }
+        }
 
         # Every attempt owns an immutable stage. A killed PowerShell Direct
         # child may still unwind remotely; retries must never delete or reuse
@@ -2583,8 +2645,27 @@ function New-GuestEvidenceSnapshot {
         $copiedFiles = New-Object Collections.Generic.List[object]
         $skippedFiles = New-Object Collections.Generic.List[object]
         $enumerationErrors = @()
-        $files = @(Get-ChildItem -LiteralPath $sourceRootFull -File -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable enumerationErrors |
-            Sort-Object FullName)
+        $boundaryWarnings = New-Object Collections.Generic.List[string]
+        $copiedBytes = [long]0
+        $copyAttempts = if ($FailureDiagnostics) { 1 } else { 4 }
+        if ($FailureDiagnostics) {
+            $files = New-Object Collections.Generic.List[object]
+            $pending = New-Object 'Collections.Generic.Stack[string]'
+            $pending.Push($sourceRootFull)
+            $entryCount = 0
+            while ($pending.Count -gt 0 -and $entryCount -le 512) {
+                $directory = $pending.Pop()
+                if ((Get-Item -LiteralPath $directory -Force -ErrorAction Stop).Attributes -band [IO.FileAttributes]::ReparsePoint) { $boundaryWarnings.Add('Skipped reparse directory.'); continue }
+                foreach ($entry in Get-ChildItem -LiteralPath $directory -Force -ErrorAction SilentlyContinue -ErrorVariable +enumerationErrors) {
+                    if (++$entryCount -gt 512) { $boundaryWarnings.Add('Failure evidence exceeded the 512-entry limit.'); break }
+                    if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) { $boundaryWarnings.Add('Skipped reparse entry: ' + $entry.Name); continue }
+                    if ($entry.PSIsContainer) { $pending.Push($entry.FullName) } else { $files.Add($entry) }
+                }
+            }
+        }
+        else {
+            $files = @(Get-ChildItem -LiteralPath $sourceRootFull -File -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable enumerationErrors | Sort-Object FullName)
+        }
         foreach ($file in $files) {
             $relativePath = $file.FullName.Substring($sourceRootFull.Length).TrimStart('\')
             $destinationPath = Join-Path $stageRoot $relativePath
@@ -2592,7 +2673,7 @@ function New-GuestEvidenceSnapshot {
             $copied = $false
             $lastError = $null
             $attemptUsed = 0
-            for ($attempt = 1; $attempt -le 4; $attempt++) {
+            for ($attempt = 1; $attempt -le $copyAttempts; $attempt++) {
                 $attemptUsed = $attempt
                 $sourceStream = $null
                 $destinationStream = $null
@@ -2600,18 +2681,43 @@ function New-GuestEvidenceSnapshot {
                     $sourceBefore = Get-Item -LiteralPath $file.FullName -Force -ErrorAction Stop
                     $sourceBeforeLength = [int64]$sourceBefore.Length
                     $sourceBeforeWriteTicks = $sourceBefore.LastWriteTimeUtc.Ticks
+                    if ($FailureDiagnostics) {
+                        for ($ancestor = $file.FullName; $ancestor; $ancestor = Split-Path -Parent $ancestor) {
+                            if ((Get-Item -LiteralPath $ancestor -Force -ErrorAction Stop).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Failure evidence file traverses a reparse point.' }
+                        }
+                        if ($sourceBeforeLength -gt 16MB -or $copiedBytes + $sourceBeforeLength -gt 64MB) { throw 'Failure evidence exceeded the 16 MiB file or 64 MiB total limit.' }
+                    }
                     $shareMode = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
                     $sourceStream = [IO.File]::Open($file.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, $shareMode)
+                    if ($FailureDiagnostics) {
+                        $finalPath = New-Object Text.StringBuilder 32768
+                        $pathLength = [CodexFailureEvidenceNative]::GetFinalPathNameByHandle($sourceStream.SafeFileHandle, $finalPath, [uint32]$finalPath.Capacity, 0)
+                        if ($pathLength -eq 0 -or $pathLength -ge $finalPath.Capacity -or
+                            $finalPath.ToString() -ine ('\\?\' + $file.FullName)) { throw 'Opened failure evidence handle escaped its validated path.' }
+                    }
                     $destinationStream = [IO.File]::Open($destinationPath, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
-                    $sourceStream.CopyTo($destinationStream)
+                    if ($FailureDiagnostics) {
+                        $buffer = New-Object byte[] 65536
+                        $fileBytes = [long]0
+                        while (($read = $sourceStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                            $fileBytes += $read
+                            if ($fileBytes -gt 16MB -or $copiedBytes + $fileBytes -gt 64MB) { throw 'Failure evidence grew beyond its byte limit.' }
+                            $destinationStream.Write($buffer, 0, $read)
+                        }
+                    }
+                    else { $sourceStream.CopyTo($destinationStream) }
                     $destinationStream.Flush()
                     $destinationStream.Dispose()
                     $destinationStream = $null
+                    if ($FailureDiagnostics) {
+                        $sourceStream.Position = 0
+                        $sourceHash = (Get-FileHash -InputStream $sourceStream -Algorithm SHA256 -ErrorAction Stop).Hash
+                    }
                     $sourceStream.Dispose()
                     $sourceStream = $null
                     $sourceAfterCopy = Get-Item -LiteralPath $file.FullName -Force -ErrorAction Stop
                     $destinationAfterCopy = Get-Item -LiteralPath $destinationPath -Force -ErrorAction Stop
-                    $sourceHash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
+                    if (-not $FailureDiagnostics) { $sourceHash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256 -ErrorAction Stop).Hash }
                     $destinationHash = (Get-FileHash -LiteralPath $destinationPath -Algorithm SHA256 -ErrorAction Stop).Hash
                     $sourceAfterHash = Get-Item -LiteralPath $file.FullName -Force -ErrorAction Stop
                     if ($sourceBeforeLength -ne [int64]$sourceAfterCopy.Length -or
@@ -2633,12 +2739,13 @@ function New-GuestEvidenceSnapshot {
                     if ($sourceStream) { $sourceStream.Dispose() }
                 }
                 Remove-Item -LiteralPath $destinationPath -Force -ErrorAction SilentlyContinue
-                if ($attempt -lt 4) {
+                if ($attempt -lt $copyAttempts) {
                     Start-Sleep -Milliseconds ([int](100 * [Math]::Pow(2, $attempt - 1)))
                 }
             }
 
             if ($copied) {
+                $copiedBytes += [long](Get-Item -LiteralPath $destinationPath).Length
                 $copiedFiles.Add([ordered]@{
                     RelativePath = $relativePath
                     Length = [long](Get-Item -LiteralPath $destinationPath).Length
@@ -2667,14 +2774,14 @@ function New-GuestEvidenceSnapshot {
             EnumeratedFileCount = $files.Count
             CopiedFiles = $copiedFiles.ToArray()
             SkippedFiles = $skippedFiles.ToArray()
-            EnumerationErrors = @($enumerationErrors | ForEach-Object { $_.Exception.Message })
+            EnumerationErrors = @($enumerationErrors | ForEach-Object { $_.Exception.Message }) + $boundaryWarnings.ToArray()
         }
         $manifestPath = Join-Path $stageRoot 'evidence-copy-manifest.json'
         $temporaryManifestPath = $manifestPath + '.' + [Guid]::NewGuid().ToString('N') + '.tmp'
         $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $temporaryManifestPath -Encoding UTF8
         Move-Item -LiteralPath $temporaryManifestPath -Destination $manifestPath -Force
         [pscustomobject]$manifest
-    } -ArgumentList $GuestOutbox, $RequestId, $SnapshotId
+    } -ArgumentList $GuestOutbox, $RequestId, $SnapshotId, 'C:\CodexGuest\EvidenceStage', ([bool]$FailureDiagnostics)
 }
 
 function Remove-GuestEvidenceSnapshot {
@@ -3397,6 +3504,8 @@ function Invoke-GuestRequest {
     $guestPowerPolicy = $null
     $guestPowerFixture = $null
     $guestRestartEvidence = $null
+    $guestRestartStarted = $false
+    $failureEvidence = $null
     $guestCredentialFile = $null
     $expectGuestPowerOff = $false
     $guestPowerOffRecoveryTimeoutSeconds = 180
@@ -3895,11 +4004,9 @@ function Invoke-GuestRequest {
         }
         if ($guestSetupPolicy) {
             $failureStage = 'RunningGuestSetup'
-            if ($guestPowerPolicy) {
-                $guestSetupPolicy.Arguments = @($guestSetupPolicy.Arguments | ForEach-Object {
-                    Expand-GuestJobTokens -Value $_ -GuestPayloadRoot $guestPayloadRoot -GuestOutputRoot $guestOutbox -GuestCredentialFile $guestCredentialFile -AllowedTokens (@('PAYLOAD', 'OUTDIR') + $hostInputTokenNames) -Context 'GuestSetup argument'
-                })
-            }
+            $guestSetupPolicy.Arguments = @($guestSetupPolicy.Arguments | ForEach-Object {
+                Expand-GuestJobTokens -Value $_ -GuestPayloadRoot $guestPayloadRoot -GuestOutputRoot $guestOutbox -GuestCredentialFile $guestCredentialFile -AllowedTokens (@('PAYLOAD', 'OUTDIR') + $hostInputTokenNames) -Context 'GuestSetup argument'
+            })
             Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
             Write-RequestState -ResultRoot $RequestStateRoot -RequestId $requestId -Status 'PreparingGuest' -Message 'Running the request-bound elevated setup executable inside the disposable guest.' -CreatedUtc $createdUtc -ClaimedUtc $ClaimedUtc -ExecutionDeadlineUtc $executionDeadlineUtc -WorkerId $workerId
             $guestSetupRoot = 'C:\ProgramData\CodexHarness\GuestSetup\' + $requestId
@@ -3921,6 +4028,7 @@ function Invoke-GuestRequest {
             $failureStage = 'GuestRestartContinuation'
             Write-RequestState -ResultRoot $RequestStateRoot -RequestId $requestId -Status 'Running' -Message 'Running the declared restart and sign-in sequence with one exclusive worker lease.' -CreatedUtc $createdUtc -ClaimedUtc $ClaimedUtc -ExecutionDeadlineUtc $executionDeadlineUtc -WorkerId $workerId
             if ($session) { Remove-PSSession -Session $session -ErrorAction SilentlyContinue; $session = $null }
+            $guestRestartStarted = $true
             $guestRestartEvidence = Invoke-GuestRestartPlan -Job $job -Policy $guestPowerPolicy -VmName $vmName -RequestId $requestId -PayloadRoot $guestPayloadRoot -Outbox $guestOutbox -ResultRoot $ResultRoot -CredentialFile $guestCredentialFile -ExecutionDeadlineUtc $executionDeadlineUtc -Credential $credential -NetworkCheck {
                 Write-BrokerState -Status 'Running' -RequestId $requestId -Message 'Observing the declared guest restart/sign-in sequence; cancellation and the original deadline remain active.'
                 if ($requestNetworkRuntime) { $null = Assert-RequestNetworkHostPolicyCurrent -Runtime $requestNetworkRuntime -BrokerRoot $BrokerRoot }
@@ -4864,6 +4972,10 @@ function Invoke-GuestRequest {
             }
         }
 
+        if ($guestRestartStarted -and -not $success -and -not $evidenceTransferSucceeded) {
+            $failureEvidence = Save-GuestRestartFailureEvidence -VmName $vmName -RequestId $requestId -GuestOutbox $guestOutbox -ResultRoot $ResultRoot -ClientSid ([string]$Config.ClientSid)
+        }
+
         if ($Request.StopAfter -and $session) {
             try {
                 Invoke-Command -Session $session -ErrorAction Stop -ScriptBlock {
@@ -5205,6 +5317,7 @@ function Invoke-GuestRequest {
             EvidenceFilesSkipped = if ($evidenceSnapshotSucceeded) { @($evidenceManifest.SkippedFiles).Count } else { $null }
             EvidenceSkippedFiles = if ($evidenceSnapshotSucceeded) { @($evidenceManifest.SkippedFiles) } else { $null }
             EvidenceWarnings = $evidenceWarnings.ToArray()
+            FailureEvidence = $failureEvidence
             GuestSessionReconnects = $guestSessionReconnects
             JobSubmissionAttempts = $jobSubmissionAttempts
             JobSubmittedUtc = if ($jobSubmittedUtc) { $jobSubmittedUtc.ToString('o') } else { $null }

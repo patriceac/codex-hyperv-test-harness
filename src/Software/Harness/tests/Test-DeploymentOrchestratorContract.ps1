@@ -54,8 +54,8 @@ if (-not [bool]$acceptancePreview.Success -or
     (Test-Path -LiteralPath $probeRoot)) {
     throw 'Acceptance invocation preflight was not successful and mutation-free.'
 }
-if ((@($acceptancePreview.TestNames) -join ',') -ne 'LegacyLaunch,Utf8ActionName,KeyboardInput,ExpectedGuestPowerOff,SystemPrompts,GuestRestart,InstalledGuestPowerOff') {
-    throw 'Release acceptance does not contain the exact seven required paths in order.'
+if ((@($acceptancePreview.TestNames) -join ',') -ne 'LegacyLaunch,Utf8ActionName,KeyboardInput,ExpectedGuestPowerOff,SystemPrompts,GuestRestart,InstalledGuestPowerOff,GuestRestartFailure') {
+    throw 'Release acceptance does not contain the exact eight required paths in order.'
 }
 $utf8Invocation = @($acceptancePreview.Invocations | Where-Object Name -eq 'Utf8ActionName')[0].Parameters
 if ([string]$utf8Invocation.ActionsPath -notlike '*release-utf8-actions.json' -or
@@ -108,7 +108,11 @@ $installedShutdownInvocation = @($acceptancePreview.Invocations | Where-Object N
 if (-not $restartInvocation.GuestCredentialFixture -or -not $restartInvocation.GuestRestartPlanPath -or
     -not $restartInvocation.GuestSetupExecutableSha256 -or $restartInvocation.NetworkProfile -ne 'IsolatedTestNet' -or
     -not $installedShutdownInvocation.ExpectGuestPowerOff -or -not $installedShutdownInvocation.GuestSetupExecutableSha256) { throw 'Power acceptance lost its fixture, setup, network, or restart binding.' }
-$scenarios.Add('seven-path-isolated-acceptance-is-exactly-bound')
+$failedRestartInvocation = @($acceptancePreview.Invocations | Where-Object Name -eq 'GuestRestartFailure')[0].Parameters
+if ($failedRestartInvocation.ContainsKey('ThrowOnFailure') -or -not $failedRestartInvocation.GuestRestartPlanPath -or
+    $failedRestartInvocation.Arguments -cne 'fail-restart "{OUTDIR}"' -or
+    $installedShutdownInvocation.GuestSetupArguments[2] -cne '{PAYLOAD}\PowerTestCanary.exe') { throw 'Failure-diagnostic or setup-token acceptance lost its exact reproduction.' }
+$scenarios.Add('eight-path-isolated-acceptance-is-exactly-bound')
 
 $inventoryAst = [Management.Automation.Language.Parser]::ParseFile($deployPath, [ref]$null, [ref]$null).Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-GuestReleaseInventory' }, $true)
 . ([scriptblock]::Create($inventoryAst.Extent.Text))
@@ -189,8 +193,8 @@ $deploy = Get-Content -LiteralPath $deployPath -Raw
 if ($deploy -notmatch 'verify the disposable account cannot expire') {
     throw 'The immutable release plan omits guest account expiry protection.'
 }
-if ($deploy -notmatch [regex]::Escape("Run legacy launch, accented-name UI Automation, bounded keyboard, expected-guest-power-off, verified system-prompt, automatic/manual restart, and installed-app shutdown acceptance in isolated workers.")) {
-    throw 'The immutable release plan does not describe all seven isolated acceptance paths.'
+if ($deploy -notmatch [regex]::Escape("Run legacy launch, accented-name UI Automation, bounded keyboard, expected-guest-power-off, verified system-prompt, automatic/manual restart, installed-app shutdown, and restart-failure diagnostics acceptance in isolated workers.")) {
+    throw 'The immutable release plan does not describe all eight isolated acceptance paths.'
 }
 $phaseNames = @('CandidateQualification','LiveReadiness','SourcePromotion','GuestBaselinePromotion','IsolatedAcceptance','RecoveryRefresh','Finalization')
 $lastIndex = -1

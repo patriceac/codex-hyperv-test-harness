@@ -136,6 +136,25 @@ $request | Add-Member -NotePropertyName ExpectGuestPowerOff -NotePropertyValue $
 $null = Resolve-RequestNetworkProfile -Request $request -Config $config
 if ($null -eq (Resolve-GuestSetupPolicyV1 -Request $request -PayloadManifest $manifest)) { throw 'Setup policy was lost for expected power-off.' }
 $checks.Add('setup-before-expected-poweroff-permitted')
+
+$brokerAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $sourceRoot 'HostBroker.ps1'), [ref]$null, [ref]$null)
+$expand = $brokerAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Expand-GuestJobTokens' }, $true)
+. ([scriptblock]::Create($expand.Extent.Text))
+$setupGate = $brokerAst.Find({ param($n) $n -is [Management.Automation.Language.IfStatementAst] -and $n.Clauses[0].Item1.Extent.Text -eq '$guestSetupPolicy' -and $n.Extent.Text.Contains("'RunningGuestSetup'") }, $true)
+$expandSetup = [scriptblock]::Create(($setupGate.Clauses[0].Item2.Statements[0..1].Extent.Text -join "`n"))
+$guestPayloadRoot = 'X:\request-payload'; $guestOutbox = 'C:\CodexGuest\Outbox\synthetic'; $guestCredentialFile = $null; $hostInputTokenNames = @()
+foreach ($guestPowerPolicy in @($null, [pscustomobject]@{ Plan = 'restart' })) {
+    $guestSetupPolicy = Resolve-GuestSetupPolicyV1 -Request $request -PayloadManifest $manifest
+    $guestSetupPolicy.Arguments = @('powersetup', '{PAYLOAD}\release\app.exe', '{PAYLOAD}\lab\lab.exe', '{OUTDIR}\setup.json')
+    . $expandSetup
+    if ($guestSetupPolicy.Arguments[1] -cne 'X:\request-payload\release\app.exe' -or
+        $guestSetupPolicy.Arguments[2] -cne 'X:\request-payload\lab\lab.exe' -or
+        $guestSetupPolicy.Arguments[3] -cne 'C:\CodexGuest\Outbox\synthetic\setup.json' -or
+        $guestSetupPolicy.ExecutableSha256 -cne ('A' * 64)) { throw 'Setup token expansion depends on restart mode or changed executable binding.' }
+}
+$guestSetupPolicy.Arguments = @('{GUEST_CREDENTIAL_FILE}')
+Assert-Rejected 'setup-token-keeps-credential-opt-in' { . $expandSetup } 'GUEST_CREDENTIAL_FILE'
+$checks.Add('setup-payload-and-output-tokens-expand-without-restart')
 foreach ($flag in @('ResetToBaseline', 'StopAfter')) {
     $request = New-SetupRequest
     $request.$flag = $false

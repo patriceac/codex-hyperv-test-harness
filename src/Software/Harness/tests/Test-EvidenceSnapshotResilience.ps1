@@ -120,6 +120,40 @@ try {
     Assert-True $invalidSnapshotRejected 'A non-canonical snapshot id was accepted by the guest snapshot implementation.'
     $scenarios.Add('snapshot-attempts-use-validated-unique-stages')
 
+    $failureManifest = & $snapshotScript $sourceRoot 'synthetic-request' ([Guid]::NewGuid().ToString('N')) $stageBaseRoot $true
+    Assert-True (@($failureManifest.CopiedFiles).Count -eq 2 -and @($failureManifest.SkippedFiles).Count -eq 1 -and $failureManifest.SkippedFiles[0].Attempts -eq 1) 'Failure diagnostics did not retain available files with one bounded attempt for a locked file.'
+    $failureRoot = Join-Path $testRoot 'failure-source'
+    New-Item -ItemType Directory -Path $failureRoot | Out-Null
+    foreach ($name in @('a.bin','b.bin','c.bin','d.bin','e.bin','oversized.bin')) {
+        $stream = [IO.File]::Create((Join-Path $failureRoot $name))
+        try { $stream.SetLength($(if ($name -eq 'oversized.bin') { 17MB } else { 16MB })) } finally { $stream.Dispose() }
+    }
+    $limited = & $snapshotScript $failureRoot 'synthetic-request' ([Guid]::NewGuid().ToString('N')) $stageBaseRoot $true
+    Assert-True (@($limited.CopiedFiles).Count -eq 4 -and @($limited.SkippedFiles).Count -eq 2 -and ($limited.CopiedFiles | ForEach-Object { $_['Length'] } | Measure-Object -Sum).Sum -eq 64MB) 'Failure diagnostics did not enforce per-file and aggregate byte limits.'
+    $scenarios.Add('failure-snapshot-retains-partial-bounded-files')
+
+    $manyRoot = Join-Path $testRoot 'many-files'
+    New-Item -ItemType Directory -Path $manyRoot | Out-Null
+    for ($index = 0; $index -lt 514; $index++) { [IO.File]::WriteAllText((Join-Path $manyRoot ($index.ToString() + '.txt')), '') }
+    $limited = & $snapshotScript $manyRoot 'synthetic-request' ([Guid]::NewGuid().ToString('N')) $stageBaseRoot $true
+    Assert-True (@($limited.CopiedFiles).Count -eq 512 -and @($limited.EnumerationErrors).Count -eq 1) 'Failure diagnostics did not enforce the entry limit or report truncation.'
+    $scenarios.Add('failure-snapshot-reports-entry-limit')
+
+    $safeRoot = Join-Path $testRoot 'safe-output'
+    New-Item -ItemType Directory -Path $safeRoot | Out-Null
+    'authorized' | Set-Content -LiteralPath (Join-Path $safeRoot 'status.json')
+    $junction = Join-Path $safeRoot 'outside'
+    New-Item -ItemType Junction -Path $junction -Target $sourceRoot | Out-Null
+    try {
+        $safe = & $snapshotScript $safeRoot 'synthetic-request' ([Guid]::NewGuid().ToString('N')) $stageBaseRoot $true
+        Assert-True (@($safe.CopiedFiles).Count -eq 1 -and $safe.CopiedFiles[0].RelativePath -eq 'status.json' -and @($safe.EnumerationErrors).Count -gt 0) 'Failure diagnostics followed a directory junction outside the authorized output.'
+        $rejected = $false
+        try { & $snapshotScript $junction 'synthetic-request' ([Guid]::NewGuid().ToString('N')) $stageBaseRoot $true | Out-Null } catch { $rejected = $_.Exception.Message -like '*reparse*' }
+        Assert-True $rejected 'A reparse-backed failure output root was accepted.'
+    }
+    finally { [IO.Directory]::Delete($junction) }
+    $scenarios.Add('failure-snapshot-rejects-reparse-boundary')
+
     $hostBrokerText = Get-Content -Raw -LiteralPath $HostBrokerPath
     Assert-True ($hostBrokerText -notlike '*Copy-Item -Path "$guestOutbox\*"*') 'The broker still recursively copies the live guest outbox.'
     Assert-True ($hostBrokerText -like '*Copy-Item -Path "$guestEvidenceStage\*"*') 'The broker does not transfer the stable evidence stage.'

@@ -2085,6 +2085,7 @@ try {
             RequireHostLocked = [bool]$RequireHostLocked
             ResultPath = $resultPath
             BrokerResultPath = $brokerResultPath
+            FailureEvidence = if ($brokerResult.PSObject.Properties['FailureEvidence']) { $brokerResult.FailureEvidence } else { $null }
             GuestResultPath = $guestResultPath
             VmFinalState = [string]$brokerResult.VmFinalState
             PoolWorkerId = if ($null -ne $brokerResult.PoolWorkerId) { [int]$brokerResult.PoolWorkerId } else { $null }

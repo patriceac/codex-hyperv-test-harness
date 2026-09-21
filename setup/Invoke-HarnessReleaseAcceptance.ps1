@@ -172,7 +172,7 @@ function New-HarnessReleaseAcceptanceInvocations {
                 Arguments = 'installed-shutdown "{OUTDIR}"'
                 GuestSetupExecutableRelativePath = 'PowerTestCanary.exe'
                 GuestSetupExecutableSha256 = $PowerCanarySha256
-                GuestSetupArguments = @('setup', 'unused')
+                GuestSetupArguments = @('setup-payload', 'unused', '{PAYLOAD}\PowerTestCanary.exe')
                 AssertResultFile = '{OUTDIR}\shutdown-marker.json'
                 AssertResultJsonPointer = '/passed'
                 AssertResultEqualsJson = 'true'
@@ -182,6 +182,21 @@ function New-HarnessReleaseAcceptanceInvocations {
                 QueueTimeoutSeconds = 900
                 ExecutionTimeoutSeconds = 600
                 ThrowOnFailure = $true
+            }
+        },
+        [pscustomobject][ordered]@{
+            Name = 'GuestRestartFailure'
+            Parameters = @{
+                ArtifactPath = $canaryRoot
+                ExecutableRelativePath = 'PowerTestCanary.exe'
+                Arguments = 'fail-restart "{OUTDIR}"'
+                GuestRestartPlanPath = $RestartPlanPath
+                AssertResultFile = '{OUTDIR}\final.json'
+                AssertResultJsonPointer = '/passed'
+                AssertResultEqualsJson = 'true'
+                BrokerRoot = $BrokerRoot
+                QueueTimeoutSeconds = 900
+                ExecutionTimeoutSeconds = 300
             }
         }
     )
@@ -198,7 +213,7 @@ if ($InvocationPreflightOnly) {
         $null -eq (Get-ReleaseOptionalPropertyValue -InputObject $shapeProbe -Name 'Missing') -and
         (Get-ReleaseOptionalPropertyValue -InputObject $shapeProbe -Name 'Present') -is [bool]
     [pscustomobject][ordered]@{
-        Success = $preview.Count -eq 7 -and $maintenanceSnapshotShapeSafe
+        Success = $preview.Count -eq 8 -and $maintenanceSnapshotShapeSafe
         NoMutationPerformed = $true
         MaintenanceSnapshotShapeSafe = [bool]$maintenanceSnapshotShapeSafe
         TestNames = @($preview.Name)
@@ -395,7 +410,18 @@ function Invoke-AcceptanceTest {
     $json = $output | Select-Object -Last 1
     if ($null -eq $json) { throw "$($Definition.Name) returned no summary." }
     $summary = if ($json -is [string]) { $json | ConvertFrom-Json } else { $json }
-    if (-not [bool]$summary.Success -or -not [bool]$summary.PayloadChildDeleted -or [string]$summary.VmFinalState -ne 'Off') {
+    if ($Definition.Name -eq 'GuestRestartFailure') {
+        $terminal = Read-JsonIfPresent -Path $summary.BrokerResultPath
+        $diagnostics = Join-Path $summary.ResultPath 'failure-diagnostics'
+        $marker = Read-JsonIfPresent -Path (Join-Path $diagnostics 'before-boot-1.json')
+        $history = Read-JsonIfPresent -Path (Join-Path $summary.ResultPath 'broker-guest-restart.json')
+        if ($summary.Success -or $terminal.FailureKind -ne 'Harness' -or $terminal.FailureStage -ne 'GuestRestartContinuation' -or
+            -not $terminal.FailureEvidence.Retained -or $terminal.FailureEvidence.Partial -or $terminal.GuestResult -or
+            $marker.passed -ne $false -or $history.OriginalApplicationLaunchCount -ne 1 -or @($history.Phases).Count -ne 1 -or $history.ContractProven -or
+            (Get-Content -Raw -LiteralPath (Join-Path $diagnostics 'product-data\restart-session.resume')) -cne 'failure-diagnostic-canary') { throw 'Restart failure acceptance lost diagnostics, failure identity, or no-replay guarantees.' }
+    }
+    elseif (-not [bool]$summary.Success) { throw "$($Definition.Name) failed: $($summary.Error)" }
+    if (-not [bool]$summary.PayloadChildDeleted -or [string]$summary.VmFinalState -ne 'Off') {
         throw "$($Definition.Name) did not satisfy the isolated harness contract: $($summary.Error)"
     }
     $summary
@@ -523,7 +549,7 @@ $postAuditPath = [string]$postAudit.AuditPath
             Name = [string]$_.Name
             RequestId = [string]$summary.RequestId
             ResultPath = [string]$summary.ResultPath
-            Success = [bool]$summary.Success
+            Success = [bool]$summary.Success -or $_.Name -eq 'GuestRestartFailure'
         }
     })
 }

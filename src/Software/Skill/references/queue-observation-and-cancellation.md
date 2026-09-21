@@ -60,3 +60,9 @@ Cancel by the exact reported request ID:
 A queued cancellation atomically removes the request so it cannot run later. A running cancellation signals its assigned worker, disconnects request-scoped networking through the persisted lease, powers off the VM, and places it into isolated recycling before reuse. Broker-enforced deadlines prevent abandoned clients from leaving stale queued or running work. Terminal evidence is withheld until network cleanup proves every adapter disconnected; startup and periodic reconciliation complete interrupted cleanup.
 
 Terminal flags remain distinct: an explicit queued cancel reports `Status=Cancelled`, `Cancelled=true`, `QueueTimedOut=false`; an expired queue deadline reports `Status=QueueTimedOut`, `Cancelled=false`, `QueueTimedOut=true`. Neither starts a VM.
+
+## Restart failure diagnostics
+
+After a restart sequence begins, cancellation, timeout, or an early phase failure triggers one best-effort evidence transfer before the worker stops and recycles. It uses a separate transfer deadline of at most 30 seconds, never boots the guest or replays an action, and reads only that request's original `{OUTDIR}`. Available files are retained under `failure-diagnostics/`; `broker-result.json` reports `FailureEvidence.Retained`, `Partial`, file counts, and any collection error. The original failure and cancellation fields remain authoritative; diagnostic `result.json` files are not final test results.
+
+Collection skips reparse paths and locked/changing files, examines at most 512 entries, and copies at most 16 MiB per file and 64 MiB total. The snapshot manifest lists skipped files and enumeration warnings. An unavailable guest or expired transfer budget can prevent retention; the broker records that failure and continues cleanup. Files already lost to an earlier worker recycle cannot be recovered.

@@ -39,11 +39,18 @@ internal static class PowerTestCanary {
         if (!File.Exists(@"C:\CodexGuest\GuestAgent.ps1") || args.Length < 2) return 90;
         string mode = args[0], output = args[1];
         try {
-            if (mode == "setup") {
+            if (mode == "fail-restart") {
+                Directory.CreateDirectory(Path.Combine(output, "product-data"));
+                File.WriteAllText(Path.Combine(output, "product-data", "restart-session.resume"), "failure-diagnostic-canary");
+                File.WriteAllText(Path.Combine(output, "before-boot-1.json"), "{\"passed\":false}");
+                return 1;
+            }
+            if (mode == "setup" || mode == "setup-payload") {
                 if (!new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator)) return 91;
+                if (mode == "setup-payload" && (args.Length != 3 || !Path.IsPathRooted(args[2]) || !File.Exists(args[2]))) return 98;
                 Directory.CreateDirectory(Path.GetDirectoryName(Installed));
                 File.Copy(Process.GetCurrentProcess().MainModule.FileName, Installed, true);
-                if (args.Length > 2) {
+                if (mode == "setup" && args.Length > 2) {
                     var fixture = Json.Deserialize<Dictionary<string, object>>(File.ReadAllText(args[2], Encoding.UTF8));
                     if ((string)fixture["UserSid"] != WindowsIdentity.GetCurrent().User.Value || (string)fixture["Protection"] != "DPAPI CurrentUser") return 92;
                     byte[] plain = ProtectedData.Unprotect(Convert.FromBase64String((string)fixture["ProtectedPassword"]), null, DataProtectionScope.CurrentUser);
