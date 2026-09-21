@@ -289,7 +289,7 @@ function Get-RecoveryReusePlanReadiness {
             }
             $path = [IO.Path]::GetFullPath((Join-Path $currentRoot $relative))
             if (-not ($path + '\').StartsWith(([IO.Path]::GetFullPath($currentRoot).TrimEnd('\') + '\'), [StringComparison]::OrdinalIgnoreCase) -or
-                -not (Test-Path -LiteralPath $path -PathType Leaf) -or [long](Get-Item -LiteralPath $path).Length -ne [long]$entry.Length) {
+                -not (Test-Path -LiteralPath $path -PathType Leaf) -or [long](Get-Item -LiteralPath $path -Force).Length -ne [long]$entry.Length) {
                 throw "Recovery\Current is structurally incomplete: $relative"
             }
             if ($relative -like 'BaselineExport/*') { $baselineEntryCount++ }

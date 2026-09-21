@@ -22,6 +22,18 @@ $bad = $planJson | ConvertFrom-Json; $bad.Boots[0].Continuation.Arguments = '{GU
 Reject 'credential-token-requires-opt-in' { Resolve-GuestRestartPlan $bad $manifest }
 Check 'credential-opt-in-permitted' ($null -ne (Resolve-GuestRestartPlan $bad $manifest $true))
 
+& {
+    Set-StrictMode -Version Latest
+    . (Join-Path $root '..\Skill\scripts\GuestPowerTestContract.ps1')
+    $request = [pscustomobject]@{ Operation = 'RunGuestJobPowerTestV1'; ResetToBaseline = $true; StopAfter = $true; Job = [pscustomobject]@{ executable = 'lab.exe' }; Network = [pscustomobject]@{ Profile = 'None' }; GuestRestartPlan = $plan }
+    Check 'strict-runner-allows-omitted-optional-controls' ($null -ne (Resolve-GuestPowerTestPolicy $request $manifest))
+    $request.PSObject.Properties.Remove('GuestRestartPlan')
+    $request | Add-Member -NotePropertyName GuestCredentialFixture -NotePropertyValue $true
+    Check 'strict-fixture-only-request-allows-omitted-controls' ((Resolve-GuestPowerTestPolicy $request $manifest).CredentialFixture)
+    $request | Add-Member -NotePropertyName ExpectGuestPowerOff -NotePropertyValue $true
+    Reject 'strict-runner-still-rejects-conflicting-power-control' { Resolve-GuestPowerTestPolicy $request $manifest }
+}
+
 # Exercise the actual coordinator with synthetic independent guest observations.
 # Host/VM side effects are replaced here, never on a real worker.
 function Write-JsonAtomic { param($Path, $Value) }

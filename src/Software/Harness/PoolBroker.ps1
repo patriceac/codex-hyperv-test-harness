@@ -16,12 +16,14 @@ function Test-PoolPayloadCleanupDue {
         [Parameter(Mandatory = $true)] [bool] $MaintenanceCleanupCompleted,
         [Parameter(Mandatory = $true)] [bool] $AllWorkerStatesOff,
         [Parameter(Mandatory = $true)] [DateTime] $NowUtc,
-        [Parameter(Mandatory = $true)] [DateTime] $NextCleanupUtc
+        [Parameter(Mandatory = $true)] [DateTime] $NextCleanupUtc,
+        [DateTime] $MaintenanceRequestedUtc = [DateTime]::MinValue,
+        [DateTime] $MaintenanceCleanupStartedUtc = [DateTime]::MinValue
     )
 
     $AllWorkerStatesOff -and (
         $NowUtc -ge $NextCleanupUtc -or
-        ($MaintenanceActive -and -not $MaintenanceCleanupCompleted)
+        ($MaintenanceActive -and (-not $MaintenanceCleanupCompleted -or $MaintenanceCleanupStartedUtc -lt $MaintenanceRequestedUtc))
     )
 }
 
@@ -1265,6 +1267,7 @@ function Invoke-PoolBrokerLoop {
     $nextHostInputCleanupUtc = [DateTime]::UtcNow.AddSeconds(2)
     $nextRequestNetworkCleanupUtc = [DateTime]::UtcNow.AddSeconds(2)
     $maintenanceCleanupCompleted = $false
+    $maintenanceGcStartedUtc = [DateTime]::MinValue
 
     while ($true) {
         Reap-PoolProcesses
@@ -1290,7 +1293,8 @@ function Invoke-PoolBrokerLoop {
             # worker, deadline, network, or terminal-evidence processing.
         }
 
-        $maintenance = Test-Path -LiteralPath $maintenancePath -PathType Leaf
+        $maintenanceItem = Get-Item -LiteralPath $maintenancePath -Force -ErrorAction SilentlyContinue
+        $maintenance = $null -ne $maintenanceItem
         if ($maintenance) {
             foreach ($state in Get-PoolWorkerStates -BrokerRoot $BrokerRoot -Config $Config) {
                 if ($state.Status -eq 'Ready') {
@@ -1316,7 +1320,9 @@ function Invoke-PoolBrokerLoop {
             -MaintenanceCleanupCompleted $maintenanceCleanupCompleted `
             -AllWorkerStatesOff $allWorkerStatesOff `
             -NowUtc $nowUtc `
-            -NextCleanupUtc $nextCleanupUtc
+            -NextCleanupUtc $nextCleanupUtc `
+            -MaintenanceRequestedUtc $(if ($maintenance) { $maintenanceItem.LastWriteTimeUtc } else { [DateTime]::MinValue }) `
+            -MaintenanceCleanupStartedUtc $maintenanceGcStartedUtc
         if ($cleanupDue) {
             $runningWorkerVms = @($Config.PoolWorkers | Where-Object {
                 $workerVm = Get-VM -Name ([string]$_.VmName) -ErrorAction SilentlyContinue

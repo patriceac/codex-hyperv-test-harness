@@ -67,7 +67,8 @@ function Resolve-GuestPowerTestPolicy {
     if (-not ($hasPlan -or $hasFixture)) { throw 'Power-test operation requires a restart plan or credential fixture.' }
     if ($hasFixture -and ($Request.GuestCredentialFixture -isnot [bool] -or -not $Request.GuestCredentialFixture)) { throw 'GuestCredentialFixture must be exact Boolean true.' }
     foreach ($flag in @('ResetToBaseline', 'StopAfter')) { if ($Request.$flag -isnot [bool] -or -not $Request.$flag) { throw "Power tests require $flag=true." } }
-    if ($Request.ExpectGuestPowerOff -or $Request.SystemPrompts -or @($Request.HostInputs).Count -gt 0 -or $Request.Network.Profile -notin @('None', 'IsolatedTestNet')) { throw 'Power tests permit only None or IsolatedTestNet, without host inputs, system prompts, or expected power-off.' }
+    if (($names -contains 'ExpectGuestPowerOff' -and $Request.ExpectGuestPowerOff) -or ($names -contains 'SystemPrompts' -and $Request.SystemPrompts) -or
+        ($names -contains 'HostInputs' -and @($Request.HostInputs).Count -gt 0) -or $Request.Network.Profile -notin @('None', 'IsolatedTestNet')) { throw 'Power tests permit only None or IsolatedTestNet, without host inputs, system prompts, or expected power-off.' }
     $plan = if ($hasPlan) { Resolve-GuestRestartPlan $Request.GuestRestartPlan $PayloadManifest ([bool]$hasFixture) } else { $null }
     [pscustomobject]@{ Plan = $plan; CredentialFixture = [bool]$hasFixture }
 }

@@ -145,6 +145,9 @@ try {
     $poolPath = Join-Path $reuseRoot 'Software\Harness\pool-definition.json'
     Write-CodexJsonAtomic -Path $poolPath -Value @{ SourceCheckpointId = $trustedManifest.BaselineCheckpointId }
     Assert-True ([bool](Get-RecoveryReusePlanReadiness -Root $reuseRoot).Ready) 'An unchanged, verified baseline was not reusable.'
+    [IO.File]::SetAttributes((Join-Path $reuseRoot 'Recovery\Current\BaselineExport\Test\Virtual Machines\test.vmcx'), [IO.FileAttributes]::Hidden -bor [IO.FileAttributes]::System)
+    Assert-True ([bool](Get-RecoveryReusePlanReadiness -Root $reuseRoot).Ready) 'A hidden/system manifest member incorrectly prevented recovery reuse.'
+    $scenarios.Add('hidden-system-manifest-members-remain-reusable')
     Write-CodexJsonAtomic -Path $poolPath -Value @{ SourceCheckpointId = [Guid]::NewGuid().ToString() }
     $changedCheckpoint = Get-RecoveryReusePlanReadiness -Root $reuseRoot
     Assert-True (-not [bool]$changedCheckpoint.Ready -and $changedCheckpoint.Reason -match 'current pool checkpoint') 'A fix-forward release planned reuse of the baseline from before guest promotion.'

@@ -248,7 +248,7 @@ finally {
 & {
     # Exercise one real broker iteration without filesystem or VM operations.
     foreach ($stub in @(
-        'New-Item', 'Test-Path', 'Recover-PoolBrokerState', 'Recover-OrphanedHostInputResources',
+        'New-Item', 'Test-Path', 'Get-Item', 'Recover-PoolBrokerState', 'Recover-OrphanedHostInputResources',
         'Invoke-WithRequestNetworkLifecycleMutex', 'Reap-PoolProcesses', 'Reconcile-PoolRecoveryRequests',
         'Complete-PoolQueuedTerminalRequests', 'Write-PoolQueuePositions', 'Route-LiveEvidenceRequests',
         'Reconcile-LiveEvidenceCommands', 'Assign-PoolRequests', 'Ensure-PoolDemandCapacity',

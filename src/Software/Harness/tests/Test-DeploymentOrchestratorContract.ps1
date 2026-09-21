@@ -149,6 +149,13 @@ if ($poolBrokerSource -notmatch '\$maintenanceGcState\.Status -eq ''Completed'''
 }
 $scenarios.Add('strict-release-audits-use-maintenance-drain-and-immediate-acl-cleanup')
 
+$maintenanceTiming = @{ MaintenanceActive = $true; MaintenanceCleanupCompleted = $true; AllWorkerStatesOff = $true; NowUtc = $cleanupNowUtc; NextCleanupUtc = $cleanupNowUtc.AddMinutes(5); MaintenanceRequestedUtc = $cleanupNowUtc }
+if (-not (Test-PoolPayloadCleanupDue @maintenanceTiming -MaintenanceCleanupStartedUtc $cleanupNowUtc.AddSeconds(-1)) -or
+    (Test-PoolPayloadCleanupDue @maintenanceTiming -MaintenanceCleanupStartedUtc $cleanupNowUtc.AddSeconds(1))) {
+    throw 'A replacement maintenance marker must get fresh cleanup even when no loop observed the previous marker disappear.'
+}
+$scenarios.Add('replacement-maintenance-owner-requires-fresh-cleanup')
+
 $parsedUtf8Actions = Get-Content -LiteralPath (Join-Path $softwareRoot 'Canaries\release-utf8-actions.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 $utf8Actions = @()
 foreach ($parsedUtf8Action in $parsedUtf8Actions) { $utf8Actions += $parsedUtf8Action }
