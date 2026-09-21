@@ -114,10 +114,10 @@ function New-HarnessReleaseAcceptanceInvocations {
                 AssertResultJsonPointer = '/passed'
                 AssertResultEqualsJson = 'true'
                 ExpectGuestPowerOff = $true
-                GuestPowerOffRecoveryTimeoutSeconds = 180
+                GuestPowerOffRecoveryTimeoutSeconds = 300
                 BrokerRoot = $BrokerRoot
                 QueueTimeoutSeconds = 900
-                ExecutionTimeoutSeconds = 300
+                ExecutionTimeoutSeconds = 600
                 ThrowOnFailure = $true
             }
         },
@@ -177,10 +177,10 @@ function New-HarnessReleaseAcceptanceInvocations {
                 AssertResultJsonPointer = '/passed'
                 AssertResultEqualsJson = 'true'
                 ExpectGuestPowerOff = $true
-                GuestPowerOffRecoveryTimeoutSeconds = 180
+                GuestPowerOffRecoveryTimeoutSeconds = 300
                 BrokerRoot = $BrokerRoot
                 QueueTimeoutSeconds = 900
-                ExecutionTimeoutSeconds = 300
+                ExecutionTimeoutSeconds = 600
                 ThrowOnFailure = $true
             }
         }

@@ -30,7 +30,7 @@ Use `Get-HyperVExecutableTestQueue.ps1` and check `PlatformHealthy`, `PlatformSt
 
 Regression guardrails cover queued demand behind failed recyclers, duplicate-start prevention, normal cold/idle/maintenance states, immediate account-failure detection, bounded readiness probes, diagnostic retention, and account policy in both provisioning and baseline promotion. Release acceptance must still pass in real isolated guests; synthetic tests alone do not establish pool health.
 
-For external monitoring, poll the queue JSON once a minute and alert on `PlatformStatus = Degraded`, including `HealthReasons`; treat planned `Maintenance` separately. Keep the five isolated release checks as the deployment gate.
+For external monitoring, poll the queue JSON once a minute and alert on `PlatformStatus = Degraded`, including `HealthReasons`; treat planned `Maintenance` separately. Keep the seven isolated release checks as the deployment gate.
 
 ## Physical screen
 

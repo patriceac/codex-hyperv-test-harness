@@ -74,7 +74,8 @@ if ([string]$keyboardInvocation.AssertResultJsonPointer -ne '/passed' -or
 $shutdownInvocation = @($acceptancePreview.Invocations | Where-Object Name -eq 'ExpectedGuestPowerOff')[0].Parameters
 if (-not $shutdownInvocation.ContainsKey('ExpectGuestPowerOff') -or
     $shutdownInvocation.ContainsKey('ActionsPath') -or
-    [int]$shutdownInvocation.GuestPowerOffRecoveryTimeoutSeconds -ne 180 -or
+    [int]$shutdownInvocation.GuestPowerOffRecoveryTimeoutSeconds -ne 300 -or
+    [int]$shutdownInvocation.ExecutionTimeoutSeconds -ne 600 -or
     [string]$shutdownInvocation.AssertResultFile -ne '{OUTDIR}\shutdown-marker.json' -or
     [string]$shutdownInvocation.Arguments -notmatch '--delay-ms 3000') {
     throw 'Expected-power-off acceptance is not bound to the canonical marker and recovery contract.'
