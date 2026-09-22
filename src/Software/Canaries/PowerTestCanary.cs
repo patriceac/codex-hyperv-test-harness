@@ -36,6 +36,16 @@ internal static class PowerTestCanary {
             key.SetValue("CodexHarnessPowerCanary", Quote(Installed) + " " + mode + " " + Quote(output));
         }
     }
+    static void ObserveStartupNetwork(string output, string mode) {
+        object firewall = Activator.CreateInstance(Type.GetTypeFromProgID("HNetCfg.FwPolicy2"));
+        try {
+            int profiles = (int)firewall.GetType().InvokeMember("CurrentProfileTypes", System.Reflection.BindingFlags.GetProperty, null, firewall, null);
+            File.WriteAllText(Path.Combine(output, "startup-" + mode + ".json"), Json.Serialize(new {
+                passed = profiles == 2, firewallProfileTypes = profiles, observedUtc = DateTime.UtcNow.ToString("o")
+            }));
+            if (profiles != 2) throw new Exception("Autonomous startup did not observe only the Private firewall profile.");
+        } finally { System.Runtime.InteropServices.Marshal.FinalReleaseComObject(firewall); }
+    }
     // A request-scoped challenge proves traffic between two broker-owned guests.
     // Discovery stays inside the isolated cohort; no host endpoint is involved.
     static void NetworkPeer(string output, string token) {
@@ -132,6 +142,7 @@ internal static class PowerTestCanary {
                 Marker(Path.Combine(output, "before-boot-1.json"));
                 Power("/r");
             } else if (mode == "after-auto" || mode == "after-manual") {
+                ObserveStartupNetwork(output, mode);
                 Marker(Path.Combine(output, mode + ".json"));
             } else if (mode == "observe-first") {
                 WaitFor(Path.Combine(output, "after-auto.json"));

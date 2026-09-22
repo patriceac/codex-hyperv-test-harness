@@ -127,19 +127,21 @@ if ($acceptancePreview.RestartNetworkPeer.Profile -ne 'IsolatedTestNet' -or -not
     }
     function Wait-Job { }
     function Remove-Job { }
-    function Invoke-AcceptanceTest { [pscustomobject]@{ PoolWorkerId = 1; ResultPath = 'C:\synthetic\restart'; Network = @{ GuestAddress = '10.254.0.101' }; GuestRestart = @{ NetworkChecks = @(@{ Succeeded = $true; Evidence = @{ Before = $true; After = $true } }, @{ Succeeded = $true; Evidence = @{ Before = $true; After = $true } }) } } }
+    function Invoke-AcceptanceTest { [pscustomobject]@{ PoolWorkerId = 1; ResultPath = 'C:\synthetic\restart'; Network = @{ GuestAddress = '10.254.0.101' }; GuestRestart = @{ NetworkChecks = @(@{ Succeeded = $true; Evidence = @{ Before = $true; After = $true; Restored = @() } }, @{ Succeeded = $true; Evidence = @{ Before = $true; After = $true; Restored = @() } }) } } }
     function Receive-Job { @{ Success = $true; PayloadChildDeleted = $true; VmFinalState = 'Off'; PoolWorkerId = $peerWorker; Network = @{ GuestAddress = '10.254.0.102' }; ResultPath = 'C:\synthetic\peer'; RequestId = 'peer' } | ConvertTo-Json -Depth 8 }
     function Read-JsonIfPresent {
         param($Path)
         if ($Path.EndsWith('peer.json')) { return [pscustomobject]@{ passed = $true; token = 'challenge'; address = '10.254.0.101'; automatic = $true; manual = $true } }
+        if ($Path.Contains('startup-after-')) { return [pscustomobject]@{ passed = -not $publicStartup; firewallProfileTypes = $(if ($publicStartup) { 4 } else { 2 }) } }
         [pscustomobject]@{ passed = -not ($missingManual -and $Path.EndsWith('network-manual.json')); token = 'challenge'; phase = $(if ($Path.EndsWith('network-auto.json')) { 'auto' } else { 'manual' }); peerAddress = '10.254.0.102' }
     }
-    $peerWorker = 2; $missingManual = $false
+    $peerWorker = 2; $missingManual = $false; $publicStartup = $false
     $definition = @{ Parameters = @{ NetworkCohort = 'synthetic' } }
     $result = Invoke-RestartAcceptanceWithPeer -Definition $definition -Token 'challenge'
     if (-not $result.NetworkPeer.Success) { throw 'Two-guest boot acceptance did not retain the peer receipt.' }
-    foreach ($fault in @('same-worker','missing-manual')) {
+    foreach ($fault in @('same-worker','missing-manual','public-startup')) {
         $peerWorker = if ($fault -eq 'same-worker') { 1 } else { 2 }; $missingManual = $fault -eq 'missing-manual'
+        $publicStartup = $fault -eq 'public-startup'
         $rejected = $false
         try { Invoke-RestartAcceptanceWithPeer -Definition $definition -Token 'challenge' | Out-Null } catch { $rejected = $true }
         if (-not $rejected) { throw "Restart peer acceptance accepted $fault." }

@@ -17,13 +17,15 @@ function Get-NetConnectionProfile { [pscustomobject]@{ InterfaceIndex = $script:
 function Get-NetFirewallProfile { [pscustomobject]@{ Enabled = 'True'; DefaultInboundAction = 'Block'; DisabledInterfaceAliases = $script:state.Aliases } }
 function Set-NetConnectionProfile { param($InterfaceIndex, $NetworkCategory) $script:mutations++; $script:state.Category = $NetworkCategory }
 function Set-NetFirewallProfile { param($Name, $DisabledInterfaceAliases) $script:mutations++; $script:state.Aliases = $DisabledInterfaceAliases }
+function Get-ItemPropertyValue { param($LiteralPath, $Name) $script:state.PolicyCategory }
 $runtime = [pscustomobject]@{ Profile = 'IsolatedTestNet'; AdapterMacAddress = '00155D000001'; GuestAddress = '10.254.0.101'; PrefixLength = 24 }
 $initial = [pscustomobject]@{ BoundaryAttested = $true; InterfaceAlias = 'Ethernet 3'; InterfaceIndex = 19; Routes = @([pscustomobject]@{ DestinationPrefix = '10.254.0.0/24'; NextHop = '0.0.0.0' }) }
+$initial | Add-Member IsolatedFirewallInterfaceExemption @{ BootLocationPolicy = @(@{Name='Identifying';Path='synthetic-identifying'},@{Name='Unidentified';Path='synthetic-unidentified'}) }
 $boot = '2026-01-01T00:03:00Z'
 function Reset-State {
     $script:mutations = 0
     $script:state = @{
-        Boot = $boot; Category = 'Private'; Aliases = @('Ethernet 3'); Dns = @(); IPv6 = $false
+        Boot = $boot; Category = 'Private'; Aliases = @('Ethernet 3'); Dns = @(); IPv6 = $false; PolicyCategory = 1
         Adapters = @([pscustomobject]@{ InterfaceAlias = 'Ethernet 3'; ifIndex = 19; MacAddress = '00-15-5D-00-00-01'; Status = 'Up' })
         Addresses = @([pscustomobject]@{ InterfaceIndex = 19; IPAddress = '10.254.0.101'; PrefixLength = 24; AddressState = 'Preferred' })
         Routes = @([pscustomobject]@{ InterfaceIndex = 19; DestinationPrefix = '10.254.0.0/24'; NextHop = '0.0.0.0' })
@@ -37,9 +39,9 @@ $receipt = Confirm-GuestRequestNetworkAfterBoot -Runtime $runtime -InitialAttest
 Check 'boot-interface-renumbering-keeps-the-same-leased-mac' ($receipt.Succeeded -and $mutations -eq 0 -and $receipt.Before.MatchingAdapters[0].ifIndex -eq 4)
 Reset-State; $state.Category = 'Public'; $state.Aliases = @()
 $receipt = Confirm-GuestRequestNetworkAfterBoot -Runtime $runtime -InitialAttestation $initial -ExpectedBootTimeUtc $boot
-Check 'only-owned-category-and-exemption-restored-with-observations' ($receipt.Succeeded -and $mutations -eq 2 -and $receipt.Before.Profiles[0].NetworkCategory -eq 'Public' -and $receipt.After.Profiles[0].NetworkCategory -eq 'Private' -and $receipt.Restored.Count -eq 2)
-foreach ($fault in @('boot','address','route','dns','ipv6','foreign-interface','foreign-exemption')) {
-    Reset-State; $state.Category = 'Public'
+Check 'public-at-boot-fails-without-late-repair' (-not $receipt.Succeeded -and $mutations -eq 0 -and $receipt.Before.Profiles[0].NetworkCategory -eq 'Public' -and $receipt.After.Profiles[0].NetworkCategory -eq 'Public' -and $receipt.Restored.Count -eq 0)
+foreach ($fault in @('boot','address','route','dns','ipv6','foreign-interface','foreign-exemption','missing-exemption','boot-policy')) {
+    Reset-State
     switch ($fault) {
         boot { $state.Boot = '2026-01-01T00:04:00Z' }
         address { $state.Addresses[0].IPAddress = '10.254.0.102' }
@@ -48,6 +50,8 @@ foreach ($fault in @('boot','address','route','dns','ipv6','foreign-interface','
         ipv6 { $state.IPv6 = $true }
         foreign-interface { $state.Adapters += [pscustomobject]@{ InterfaceAlias = 'Foreign'; ifIndex = 20; MacAddress = '00155D000002'; Status = 'Up' } }
         foreign-exemption { $state.Aliases = @('Foreign') }
+        missing-exemption { $state.Aliases = @() }
+        boot-policy { $state.PolicyCategory = 0 }
     }
     $receipt = Confirm-GuestRequestNetworkAfterBoot -Runtime $runtime -InitialAttestation $initial -ExpectedBootTimeUtc $boot
     Check ($fault + '-fails-before-mutation-with-evidence') (-not $receipt.Succeeded -and $mutations -eq 0 -and $receipt.Error -and $receipt.Before -and $receipt.After)

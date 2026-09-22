@@ -457,10 +457,12 @@ function Invoke-RestartAcceptanceWithPeer {
         $peerEvidence = Read-JsonIfPresent -Path (Join-Path $peer.ResultPath 'peer.json')
         if (-not $peerEvidence.passed -or $peerEvidence.token -cne $Token -or $peerEvidence.address -cne $summary.Network.GuestAddress -or -not $peerEvidence.automatic -or -not $peerEvidence.manual) { throw 'The restart peer did not observe both boot challenges from the leased guest.' }
         foreach ($phase in @('auto','manual')) {
+            $startup = Read-JsonIfPresent -Path (Join-Path $summary.ResultPath ('startup-after-' + $phase + '.json'))
+            if (-not $startup.passed -or $startup.firewallProfileTypes -ne 2) { throw "Autonomous $phase startup did not observe the Private firewall profile." }
             $evidence = Read-JsonIfPresent -Path (Join-Path $summary.ResultPath ('network-' + $phase + '.json'))
             if (-not $evidence.passed -or $evidence.token -cne $Token -or $evidence.phase -cne $phase -or $evidence.peerAddress -cne $peer.Network.GuestAddress) { throw "Cross-guest traffic after $phase sign-in was not proven." }
         }
-        if (@($summary.GuestRestart.NetworkChecks).Count -ne 2 -or @($summary.GuestRestart.NetworkChecks | Where-Object { -not $_.Succeeded -or -not $_.Evidence.Before -or -not $_.Evidence.After }).Count -ne 0) { throw 'Both restarted guest network attestations are required.' }
+        if (@($summary.GuestRestart.NetworkChecks).Count -ne 2 -or @($summary.GuestRestart.NetworkChecks | Where-Object { -not $_.Succeeded -or -not $_.Evidence.Before -or -not $_.Evidence.After -or @($_.Evidence.Restored).Count -ne 0 }).Count -ne 0) { throw 'Both restarted guests require network attestation without late repair.' }
         $summary | Add-Member -NotePropertyName NetworkPeer -NotePropertyValue @{ RequestId = $peer.RequestId; ResultPath = $peer.ResultPath; Success = $true }
         $summary
     }
