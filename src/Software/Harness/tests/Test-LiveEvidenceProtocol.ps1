@@ -122,6 +122,37 @@ try {
     try { $oversizedStream.SetLength(4MB + 1) } finally { $oversizedStream.Dispose() }
     Assert-Throws -Operation { Copy-GuestLiveEvidenceFileStable -Source (Get-Item -LiteralPath $oversizedPath) -Destination (Join-Path $testRoot 'stable-copy\oversized.bin') -RelativePath 'oversized.bin' -AuthorizedRoot $outDir | Out-Null } -Message 'An oversized guest evidence file was copied.'
     $hostBrokerText = Get-Content -LiteralPath $hostBrokerPath -Raw
+    $hostAst = [Management.Automation.Language.Parser]::ParseInput($hostBrokerText, [ref]$null, [ref]$null)
+    $copyFunction = $hostAst.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Copy-GuestLiveEvidenceBounded' }, $true)
+    $pathsParameter = $copyFunction.Body.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'RequestedGuestPaths' }
+    $bindPaths = [scriptblock]::Create('param(' + $pathsParameter.Extent.Text + ') @($RequestedGuestPaths).Count')
+    Assert-True ((& $bindPaths -RequestedGuestPaths @()) -eq 0) 'Screenshot-only capture rejected an empty file allowlist.'
+    Assert-True ((& $bindPaths -RequestedGuestPaths @('lease.json')) -eq 1) 'Capture rejected a populated file allowlist.'
+    $scenarios.Add('screenshot-only-copy-parameter-binding')
+
+    $manifest = $hostAst.Find({ param($node) $node -is [Management.Automation.Language.HashtableAst] -and @($node.KeyValuePairs | Where-Object { $_.Item1.Value -eq 'ApplicationRunningBeforeCapture' }).Count -gt 0 }, $true)
+    $guestResult = [pscustomobject]@{ Success=$false; ApplicationRunningBeforeCapture=$false; ApplicationRunningAfterCapture=$false }
+    foreach ($field in @($manifest.KeyValuePairs | Where-Object { $_.Item1.Value -in @('ApplicationRunningBeforeCapture','ApplicationRunningAfterCapture') })) {
+        $value = [scriptblock]::Create($field.Item2.Extent.Text)
+        Assert-True ($null -eq (& $value)) 'A failed capture presented a placeholder as a process observation.'
+        $guestResult.Success = $true
+        Assert-True ((& $value) -ceq $false) 'A measured stopped process was lost.'
+        $guestResult.ApplicationRunningBeforeCapture = $true; $guestResult.ApplicationRunningAfterCapture = $true
+        Assert-True ((& $value) -ceq $true) 'A measured running process was lost.'
+        $guestResult.Success = $false
+        $guestResult.ApplicationRunningBeforeCapture = $false; $guestResult.ApplicationRunningAfterCapture = $false
+    }
+    $liveness = $hostAst.Find({ param($node) $node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -eq '$remainedActive' }, $true)
+    $observeLiveness = [scriptblock]::Create($liveness.Right.Extent.Text)
+    $binding = [pscustomobject]@{Valid=$true}; $RequestStateRoot=$testRoot; $currentLifecycle='GuestAction'; $ApplicationProcessId=4242
+    $guestProcessStillRunning = $true
+    Assert-True ([bool](& $observeLiveness)) 'Capture failure hid the separate live process and lease observation.'
+    $guestProcessStillRunning = $false
+    Assert-True (-not (& $observeLiveness)) 'A stopped process was reported active after failed capture.'
+    $guestResult.Success = $true; $guestProcessStillRunning = $true
+    Assert-True (-not (& $observeLiveness)) 'A successful capture lost its measured process-exit gate.'
+    $scenarios.Add('failed-capture-unknown-process-observations')
+
     Assert-True ($hostBrokerText.Contains('C:\Windows\Temp\CodexLiveEvidenceHostStage') -and $hostBrokerText.Contains('Source grew beyond its broker transfer bound') -and $hostBrokerText.Contains('$stageAcl.SetAccessRuleProtection($true, $false)')) 'The host broker is missing its ACL-restricted bounded guest staging contract.'
     $guestAgentText = Get-Content -LiteralPath (Join-Path $HarnessRoot 'seed\guest\GuestAgent.ps1') -Raw
     Assert-True ($guestAgentText.Contains('Invoke-GuestLiveEvidenceHeartbeat -NotAfterUtc $deadline') -and $guestAgentText.Contains('Invoke-GuestLiveEvidenceHeartbeat -NotAfterUtc $waitDeadline') -and $guestAgentText.Contains('$process.ExitTime.ToUniversalTime() -le $waitDeadline')) 'Live observation is not charged against the original guest action deadlines.'

@@ -3024,7 +3024,7 @@ function Copy-GuestLiveEvidenceBounded {
         [Parameter(Mandatory = $true)] [string] $GuestResponseRoot,
         [Parameter(Mandatory = $true)] [string] $HostStageRoot,
         [Parameter(Mandatory = $true)] $GuestResult,
-        [Parameter(Mandatory = $true)] [string[]] $RequestedGuestPaths
+        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [string[]] $RequestedGuestPaths
     )
 
     $allowed = New-Object 'Collections.Generic.Dictionary[string,string]' ([StringComparer]::OrdinalIgnoreCase)
@@ -3349,7 +3349,7 @@ function Invoke-HostLiveEvidenceService {
                 param($ProcessId)
                 $null -ne (Get-Process -Id ([int]$ProcessId) -ErrorAction SilentlyContinue)
             } -ArgumentList $ApplicationProcessId
-            $remainedActive = [bool]$guestResult.ApplicationRunningAfterCapture -and [bool]$guestProcessStillRunning -and [bool]$binding.Valid -and
+            $remainedActive = (-not $guestResult.Success -or [bool]$guestResult.ApplicationRunningAfterCapture) -and [bool]$guestProcessStillRunning -and [bool]$binding.Valid -and
                 -not (Test-Path -LiteralPath (Join-Path $RequestStateRoot 'broker-result.json') -PathType Leaf) -and
                 (Get-LiveEvidenceLifecycleDisposition -LifecycleStage $currentLifecycle -ApplicationProcessId $ApplicationProcessId) -eq 'Supported'
 
@@ -3391,8 +3391,9 @@ function Invoke-HostLiveEvidenceService {
                 LifecycleStage = [string]$command.BoundLifecycleStage
                 LifecycleStageAfterCapture = $currentLifecycle
                 ApplicationProcessId = $ApplicationProcessId
-                ApplicationRunningBeforeCapture = [bool]$guestResult.ApplicationRunningBeforeCapture
-                ApplicationRunningAfterCapture = [bool]$guestResult.ApplicationRunningAfterCapture
+                # Guest failure manifests contain placeholder false values, not observations.
+                ApplicationRunningBeforeCapture = if ($guestResult.Success) { [bool]$guestResult.ApplicationRunningBeforeCapture } else { $null }
+                ApplicationRunningAfterCapture = if ($guestResult.Success) { [bool]$guestResult.ApplicationRunningAfterCapture } else { $null }
                 RequestRemainedActiveAfterCapture = [bool]$remainedActive
                 Screenshot = $screenshotRecord
                 GuestEvidenceFiles = @($guestResult.GuestEvidenceFiles | ForEach-Object {
