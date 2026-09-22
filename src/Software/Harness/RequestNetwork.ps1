@@ -2366,6 +2366,8 @@ function Confirm-GuestRequestNetworkAfterBoot {
         $ErrorActionPreference = 'Stop'
         $receipt = [ordered]@{ Succeeded = $false; ExpectedBootTimeUtc = $ExpectedBoot; Before = $null; After = $null; Restored = @(); Error = $null }
         function Observe {
+            # Use the native startup-canary API for exemptions; retain the CIM projection for diagnosis.
+            $firewallPolicy = New-Object -ComObject HNetCfg.FwPolicy2
             $adapters = @(Get-NetAdapter -IncludeHidden | Select-Object InterfaceAlias, ifIndex, MacAddress, @{ Name = 'Status'; Expression = { [string]$_.Status } })
             $matching = @($adapters | Where-Object { (($_.MacAddress -replace '[:-]', '') -eq ($Runtime.AdapterMacAddress -replace '[:-]', '')) })
             $index = if ($matching.Count -eq 1) { [int]$matching[0].ifIndex } else { -1 }
@@ -2380,6 +2382,7 @@ function Confirm-GuestRequestNetworkAfterBoot {
                 IPInterfaces = @(Get-NetIPInterface -AddressFamily IPv4 | Where-Object InterfaceIndex -eq $index | ForEach-Object { [pscustomobject]@{ Dhcp = [string]$_.Dhcp; Forwarding = [string]$_.Forwarding; WeakHostSend = [string]$_.WeakHostSend; WeakHostReceive = [string]$_.WeakHostReceive } })
                 Profiles = @(Get-NetConnectionProfile | Where-Object InterfaceIndex -eq $index | Select-Object @{ Name = 'NetworkCategory'; Expression = { [string]$_.NetworkCategory } })
                 Firewall = @(Get-NetFirewallProfile -PolicyStore ActiveStore -Name Private | Select-Object @{ Name = 'Enabled'; Expression = { [string]$_.Enabled } }, @{ Name = 'DefaultInboundAction'; Expression = { [string]$_.DefaultInboundAction } }, DisabledInterfaceAliases)
+                EffectiveFirewallExcludedInterfaces = @($firewallPolicy.ExcludedInterfaces(2))
                 BootLocationPolicy = @($Initial.IsolatedFirewallInterfaceExemption.BootLocationPolicy | ForEach-Object {
                     [pscustomobject]@{ Name = $_.Name; Path = $_.Path; Category = (Get-ItemPropertyValue -LiteralPath $_.Path -Name Category -ErrorAction SilentlyContinue) }
                 })
@@ -2404,7 +2407,7 @@ function Confirm-GuestRequestNetworkAfterBoot {
             if ($State.BootLocationPolicy.Count -ne 2 -or @($State.BootLocationPolicy | Where-Object Category -ne 1).Count -ne 0) { throw 'Guest boot network location policy drifted.' }
             if ($State.Profiles.Count -ne 1 -or $State.Profiles[0].NetworkCategory -ne 'Private') { throw 'Guest connection profile was not Private from boot.' }
             if ($State.Firewall.Count -ne 1 -or [string]$State.Firewall[0].Enabled -ne 'True' -or [string]$State.Firewall[0].DefaultInboundAction -ne 'Block') { throw 'Guest Private firewall policy drifted.' }
-            $aliases = @($State.Firewall[0].DisabledInterfaceAliases | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and $_ -ne 'NotConfigured' })
+            $aliases = @($State.EffectiveFirewallExcludedInterfaces | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and $_ -ne 'NotConfigured' })
             if ($aliases.Count -gt 1 -or ($aliases.Count -eq 1 -and $aliases[0] -cne $adapter.InterfaceAlias)) { throw 'Guest firewall contains a foreign interface exemption.' }
             if ($aliases.Count -ne 1) { throw 'Guest request-owned network exemption did not survive boot.' }
         }

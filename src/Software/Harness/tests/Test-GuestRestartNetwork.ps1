@@ -4,6 +4,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path (Split-Path -Parent $PSScriptRoot) 'RequestNetwork.ps1')
 $checks = New-Object Collections.Generic.List[string]
 function Check($Name, [bool] $Value) { if (-not $Value) { throw $Name }; $checks.Add($Name) }
+function New-Object { param($ComObject) [pscustomobject]@{} | Add-Member -MemberType ScriptMethod -Name ExcludedInterfaces -Value { param($profile) if ($profile -ne 2) { throw 'Expected Private profile' }; $script:state.Aliases } -PassThru }
 # Execute the actual remote gate with synthetic Windows network cmdlets.
 function Invoke-Command { param($VmName, $Credential, $ScriptBlock, $ArgumentList) & $ScriptBlock @ArgumentList }
 function Get-CimInstance { [pscustomobject]@{ LastBootUpTime = [DateTime]::Parse($script:state.Boot).ToUniversalTime() } }
@@ -14,7 +15,7 @@ function Get-DnsClientServerAddress { [pscustomobject]@{ InterfaceIndex = $scrip
 function Get-NetAdapterBinding { [pscustomobject]@{ Enabled = $script:state.IPv6 } }
 function Get-NetIPInterface { [pscustomobject]@{ InterfaceIndex = $script:state.Adapters[0].ifIndex; Dhcp = 'Disabled'; Forwarding = 'Disabled'; WeakHostSend = 'Disabled'; WeakHostReceive = 'Disabled' } }
 function Get-NetConnectionProfile { [pscustomobject]@{ InterfaceIndex = $script:state.Adapters[0].ifIndex; NetworkCategory = $script:state.Category } }
-function Get-NetFirewallProfile { [pscustomobject]@{ Enabled = 'True'; DefaultInboundAction = 'Block'; DisabledInterfaceAliases = $script:state.Aliases } }
+function Get-NetFirewallProfile { [pscustomobject]@{ Enabled = 'True'; DefaultInboundAction = 'Block'; DisabledInterfaceAliases = $(if (-not $script:state.ProviderMissing) { $script:state.Aliases }) } }
 function Set-NetConnectionProfile { param($InterfaceIndex, $NetworkCategory) $script:mutations++; $script:state.Category = $NetworkCategory }
 function Set-NetFirewallProfile { param($Name, $DisabledInterfaceAliases, $PolicyStore) $script:mutations++; $script:state.Aliases = $DisabledInterfaceAliases; $script:policyStore = $PolicyStore }
 function Get-ItemPropertyValue { param($LiteralPath, $Name) $script:state.PolicyCategory }
@@ -34,6 +35,9 @@ function Reset-State {
 Reset-State
 $receipt = Confirm-GuestRequestNetworkAfterBoot -Runtime $runtime -InitialAttestation $initial -ExpectedBootTimeUtc $boot
 Check 'unchanged-boot-network-is-read-only' ($receipt.Succeeded -and $mutations -eq 0 -and $receipt.Before -and $receipt.After)
+Reset-State; $state.ProviderMissing = $true
+$receipt = Confirm-GuestRequestNetworkAfterBoot -Runtime $runtime -InitialAttestation $initial -ExpectedBootTimeUtc $boot
+Check 'native-exemption-survives-empty-cim-projection' ($receipt.Succeeded -and $mutations -eq 0 -and -not $receipt.Before.Firewall[0].DisabledInterfaceAliases -and $receipt.Before.EffectiveFirewallExcludedInterfaces[0] -ceq 'Ethernet 3')
 Reset-State; $state.Adapters[0].ifIndex = 4; $state.Addresses[0].InterfaceIndex = 4; $state.Routes[0].InterfaceIndex = 4
 $receipt = Confirm-GuestRequestNetworkAfterBoot -Runtime $runtime -InitialAttestation $initial -ExpectedBootTimeUtc $boot
 Check 'boot-interface-renumbering-keeps-the-same-leased-mac' ($receipt.Succeeded -and $mutations -eq 0 -and $receipt.Before.MatchingAdapters[0].ifIndex -eq 4)
