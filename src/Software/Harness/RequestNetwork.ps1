@@ -2045,7 +2045,8 @@ function Initialize-GuestRequestNetwork {
     param(
         [Parameter(Mandatory = $true)] [Management.Automation.Runspaces.PSSession] $Session,
         [Parameter(Mandatory = $true)] $Runtime,
-        [scriptblock] $ActivityCheck
+        [scriptblock] $ActivityCheck,
+        [switch] $PersistAcrossRestart
     )
 
     if ($ActivityCheck) { & $ActivityCheck }
@@ -2054,7 +2055,7 @@ function Initialize-GuestRequestNetwork {
     }
     else { @() }
     $remoteJob = Invoke-Command -Session $Session -AsJob -ErrorAction Stop -ScriptBlock {
-        param($ExpectedMac, $Profile, $GuestAddress, $PrefixLength, $GatewayAddress, $GatewayMacAddress, $DnsServers, $ExpectedConnectedPrefixes)
+        param($ExpectedMac, $Profile, $GuestAddress, $PrefixLength, $GatewayAddress, $GatewayMacAddress, $DnsServers, $ExpectedConnectedPrefixes, $PersistAcrossRestart)
 
         $normalizedMac = $ExpectedMac -replace '[:-]', ''
         $deadline = [DateTime]::UtcNow.AddSeconds(30)
@@ -2154,6 +2155,9 @@ function Initialize-GuestRequestNetwork {
                 throw 'The disposable guest entered IsolatedTestNet with an unexpected pre-existing firewall-disabled interface.'
             }
             Set-NetFirewallProfile -Name Private -DisabledInterfaceAliases ([string[]]@([string]$adapter.InterfaceAlias)) -ErrorAction Stop
+            if ($PersistAcrossRestart) {
+                Set-NetFirewallProfile -PolicyStore localhost -Name Private -DisabledInterfaceAliases ([string[]]@([string]$adapter.InterfaceAlias)) -ErrorAction Stop
+            }
             $privateProfiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore -Name Private -ErrorAction Stop)
             if ($privateProfiles.Count -ne 1) { throw 'The guest Private firewall profile did not resolve uniquely after isolated-interface exemption.' }
             $disabledAliases = @($privateProfiles[0].DisabledInterfaceAliases | ForEach-Object { [string]$_ } | Where-Object {
@@ -2184,6 +2188,7 @@ function Initialize-GuestRequestNetwork {
                 DisabledInterfaceAliases = @($disabledAliases)
                 InterfaceAlias = [string]$adapter.InterfaceAlias
                 BootLocationPolicy = $bootLocationPolicy
+                PersistedForRestart = [bool]$PersistAcrossRestart
             }
         }
 
@@ -2334,7 +2339,7 @@ function Initialize-GuestRequestNetwork {
             IsolatedFirewallInterfaceExemption = $isolatedFirewallInterfaceExemption
             BoundaryAttested = $true
         }
-    } -ArgumentList ([string]$Runtime.AdapterMacAddress), ([string]$Runtime.Profile), ([string]$Runtime.GuestAddress), ([int]$Runtime.PrefixLength), ([string]$Runtime.GatewayAddress), ([string]$Runtime.GatewayMacAddress), @($Runtime.DnsServers), @($expectedConnectedPrefixes) | Select-Object -Last 1
+    } -ArgumentList ([string]$Runtime.AdapterMacAddress), ([string]$Runtime.Profile), ([string]$Runtime.GuestAddress), ([int]$Runtime.PrefixLength), ([string]$Runtime.GatewayAddress), ([string]$Runtime.GatewayMacAddress), @($Runtime.DnsServers), @($expectedConnectedPrefixes), ([bool]$PersistAcrossRestart) | Select-Object -Last 1
     try {
         while ([string]$remoteJob.State -in @('NotStarted', 'Running')) {
             if ($ActivityCheck) { & $ActivityCheck }

@@ -3843,7 +3843,7 @@ function Invoke-GuestRequest {
             Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
             $requestNetworkLastHostEvidence = $requestNetworkConnection.HostPolicyCheck
             $requestNetworkHostPolicyCheckCount++
-            $requestNetworkGuestEvidence = Initialize-GuestRequestNetwork -Session $session -Runtime $requestNetworkRuntime -ActivityCheck $activityCheck
+            $requestNetworkGuestEvidence = Initialize-GuestRequestNetwork -Session $session -Runtime $requestNetworkRuntime -ActivityCheck $activityCheck -PersistAcrossRestart:([bool]($guestPowerPolicy -and $guestPowerPolicy.Plan))
             Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
             $requestNetworkPrelaunchHostEvidence = Assert-RequestNetworkHostPolicyCurrent -Runtime $requestNetworkRuntime -BrokerRoot $BrokerRoot
             Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc

@@ -40,10 +40,12 @@ internal static class PowerTestCanary {
         object firewall = Activator.CreateInstance(Type.GetTypeFromProgID("HNetCfg.FwPolicy2"));
         try {
             int profiles = (int)firewall.GetType().InvokeMember("CurrentProfileTypes", System.Reflection.BindingFlags.GetProperty, null, firewall, null);
+            var excluded = (Array)firewall.GetType().InvokeMember("ExcludedInterfaces", System.Reflection.BindingFlags.GetProperty, null, firewall, new object[] { 2 });
+            bool passed = profiles == 2 && excluded != null && excluded.Length == 1;
             File.WriteAllText(Path.Combine(output, "startup-" + mode + ".json"), Json.Serialize(new {
-                passed = profiles == 2, firewallProfileTypes = profiles, observedUtc = DateTime.UtcNow.ToString("o")
+                passed, firewallProfileTypes = profiles, firewallExcludedInterfaces = excluded, observedUtc = DateTime.UtcNow.ToString("o")
             }));
-            if (profiles != 2) throw new Exception("Autonomous startup did not observe only the Private firewall profile.");
+            if (!passed) throw new Exception("Autonomous startup did not observe the Private firewall profile and isolated interface exemption.");
         } finally { System.Runtime.InteropServices.Marshal.FinalReleaseComObject(firewall); }
     }
     // A request-scoped challenge proves traffic between two broker-owned guests.

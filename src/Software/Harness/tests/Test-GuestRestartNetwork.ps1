@@ -16,7 +16,7 @@ function Get-NetIPInterface { [pscustomobject]@{ InterfaceIndex = $script:state.
 function Get-NetConnectionProfile { [pscustomobject]@{ InterfaceIndex = $script:state.Adapters[0].ifIndex; NetworkCategory = $script:state.Category } }
 function Get-NetFirewallProfile { [pscustomobject]@{ Enabled = 'True'; DefaultInboundAction = 'Block'; DisabledInterfaceAliases = $script:state.Aliases } }
 function Set-NetConnectionProfile { param($InterfaceIndex, $NetworkCategory) $script:mutations++; $script:state.Category = $NetworkCategory }
-function Set-NetFirewallProfile { param($Name, $DisabledInterfaceAliases) $script:mutations++; $script:state.Aliases = $DisabledInterfaceAliases }
+function Set-NetFirewallProfile { param($Name, $DisabledInterfaceAliases, $PolicyStore) $script:mutations++; $script:state.Aliases = $DisabledInterfaceAliases; $script:policyStore = $PolicyStore }
 function Get-ItemPropertyValue { param($LiteralPath, $Name) $script:state.PolicyCategory }
 $runtime = [pscustomobject]@{ Profile = 'IsolatedTestNet'; AdapterMacAddress = '00155D000001'; GuestAddress = '10.254.0.101'; PrefixLength = 24 }
 $initial = [pscustomobject]@{ BoundaryAttested = $true; InterfaceAlias = 'Ethernet 3'; InterfaceIndex = 19; Routes = @([pscustomobject]@{ DestinationPrefix = '10.254.0.0/24'; NextHop = '0.0.0.0' }) }
@@ -56,4 +56,15 @@ foreach ($fault in @('boot','address','route','dns','ipv6','foreign-interface','
     $receipt = Confirm-GuestRequestNetworkAfterBoot -Runtime $runtime -InitialAttestation $initial -ExpectedBootTimeUtc $boot
     Check ($fault + '-fails-before-mutation-with-evidence') (-not $receipt.Succeeded -and $mutations -eq 0 -and $receipt.Error -and $receipt.Before -and $receipt.After)
 }
+$networkPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'RequestNetwork.ps1'
+$networkAst = [Management.Automation.Language.Parser]::ParseFile($networkPath, [ref]$null, [ref]$null)
+$policyGate = $networkAst.Find({ param($node) $node -is [Management.Automation.Language.IfStatementAst] -and $node.Clauses[0].Item1.Extent.Text -ceq '$PersistAcrossRestart' }, $true)
+$policyScript = [scriptblock]::Create($policyGate.Extent.Text)
+foreach ($persist in @($false, $true)) {
+    Reset-State; $PersistAcrossRestart = $persist; $adapter = $state.Adapters[0]; $script:policyStore = $null
+    & $policyScript
+    Check ('local-policy-is-restart-scoped-' + $persist) ($mutations -eq [int]$persist -and (-not $persist -or ($policyStore -ceq 'localhost' -and $state.Aliases.Count -eq 1 -and $state.Aliases[0] -ceq $adapter.InterfaceAlias)))
+}
+$brokerText = Get-Content -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'HostBroker.ps1') -Raw
+Check 'only-a-restart-plan-enables-persistent-exemption' ($brokerText.Contains('-PersistAcrossRestart:([bool]($guestPowerPolicy -and $guestPowerPolicy.Plan))'))
 [pscustomobject]@{ Success = $true; ScenarioCount = $checks.Count; Checks = $checks.ToArray() } | ConvertTo-Json -Depth 5

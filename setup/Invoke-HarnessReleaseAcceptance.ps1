@@ -458,7 +458,7 @@ function Invoke-RestartAcceptanceWithPeer {
         if (-not $peerEvidence.passed -or $peerEvidence.token -cne $Token -or $peerEvidence.address -cne $summary.Network.GuestAddress -or -not $peerEvidence.automatic -or -not $peerEvidence.manual) { throw 'The restart peer did not observe both boot challenges from the leased guest.' }
         foreach ($phase in @('auto','manual')) {
             $startup = Read-JsonIfPresent -Path (Join-Path $summary.ResultPath ('startup-after-' + $phase + '.json'))
-            if (-not $startup.passed -or $startup.firewallProfileTypes -ne 2) { throw "Autonomous $phase startup did not observe the Private firewall profile." }
+            if (-not $startup.passed -or $startup.firewallProfileTypes -ne 2 -or -not $startup.firewallExcludedInterfaces -or @($startup.firewallExcludedInterfaces).Count -ne 1) { throw "Autonomous $phase startup did not observe the Private firewall profile and isolated interface exemption." }
             $evidence = Read-JsonIfPresent -Path (Join-Path $summary.ResultPath ('network-' + $phase + '.json'))
             if (-not $evidence.passed -or $evidence.token -cne $Token -or $evidence.phase -cne $phase -or $evidence.peerAddress -cne $peer.Network.GuestAddress) { throw "Cross-guest traffic after $phase sign-in was not proven." }
         }
