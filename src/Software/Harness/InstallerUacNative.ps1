@@ -3,6 +3,7 @@ function Initialize-InstallerNative {
     Add-Type -TypeDefinition @'
 using System;
 using System.ComponentModel;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
@@ -14,6 +15,7 @@ public sealed class CodexInstallerProcessIdentity {
     public string ImagePath, UserSid;
     public bool Elevated, AdministratorGroup, AdministratorDenyOnly;
 }
+public sealed class CodexInstallerWindow {public long Handle;public int ProcessId;public string Desktop,Class;public bool Visible;}
 public sealed class CodexInstallerProcess : IDisposable {
     internal IntPtr Handle;
     public CodexInstallerProcessIdentity Identity;
@@ -72,6 +74,10 @@ public static class CodexInstallerNative {
     [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr window,StringBuilder name,int length);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window,out int pid);
     [DllImport("user32.dll",SetLastError=true)] static extern IntPtr OpenInputDesktop(uint flags,bool inherit,uint access);
+    [DllImport("user32.dll",SetLastError=true,CharSet=CharSet.Unicode)] static extern IntPtr OpenDesktop(string name,uint flags,bool inherit,uint access);
+    delegate bool EnumWindow(IntPtr window,IntPtr argument);
+    [DllImport("user32.dll",SetLastError=true)] static extern bool EnumDesktopWindows(IntPtr desktop,EnumWindow callback,IntPtr argument);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll",SetLastError=true,CharSet=CharSet.Unicode)] static extern bool GetUserObjectInformation(IntPtr handle,int index,StringBuilder value,int length,out int needed);
     [DllImport("user32.dll")] static extern bool CloseDesktop(IntPtr desktop);
     [DllImport("user32.dll",SetLastError=true)] static extern uint SendInput(uint count,Input[] inputs,int size);
@@ -153,6 +159,23 @@ public static class CodexInstallerNative {
     public static string InputDesktopName() {
         IntPtr desktop=OpenInputDesktop(0,false,1);if(desktop==IntPtr.Zero)throw new Win32Exception(Marshal.GetLastWin32Error());
         try {return ObjectName(desktop);}finally{CloseDesktop(desktop);}
+    }
+    public static CodexInstallerWindow[] ConsentWindows(int expectedPid) {
+        RequireSystem();var windows=new List<CodexInstallerWindow>();
+        foreach(string name in new[]{"Default","Winlogon"}) {
+            IntPtr desktop=OpenDesktop(name,0,false,1);if(desktop==IntPtr.Zero)throw new Win32Exception(Marshal.GetLastWin32Error());
+            try {
+                bool limit=false;EnumWindow callback=delegate(IntPtr window,IntPtr ignored) {
+                    int pid;GetWindowThreadProcessId(window,out pid);if(pid!=expectedPid)return true;
+                    if(windows.Count>=32){limit=true;return false;}
+                    var cls=new StringBuilder(256);GetClassName(window,cls,cls.Capacity);
+                    windows.Add(new CodexInstallerWindow {Handle=window.ToInt64(),ProcessId=pid,Desktop=name,Class=cls.ToString(),Visible=IsWindowVisible(window)});return true;
+                };
+                bool okay=EnumDesktopWindows(desktop,callback,IntPtr.Zero);GC.KeepAlive(callback);
+                if(limit)throw new InvalidOperationException("Too many consent-owned windows.");Check(okay);
+            }finally{CloseDesktop(desktop);}
+        }
+        return windows.ToArray();
     }
     public static int SecureForeground() {
         if(!String.Equals(InputDesktopName(),"Winlogon",StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("Secure input desktop is not active.");
