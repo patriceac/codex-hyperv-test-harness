@@ -41,10 +41,10 @@ function Invoke-ExpectedPowerOffEvidenceTransferBounded {
     [pscustomobject]@{HostStageRoot=$stage}
 }
 try {
-    $guestRestartStarted = $true; $success = $false; $evidenceTransferSucceeded = $false
+    $guestRestartStarted = $true; $installerStarted = $false; $success = $false; $evidenceTransferSucceeded = $false
     $vmName = 'synthetic'; $requestId = 'synthetic'; $guestOutbox = 'C:\CodexGuest\Outbox\synthetic'; $Config = @{ClientSid=$sid}
     $failureKind = 'Cancelled'; $cancelled = $true; $guestResult = $null; $failureStage = 'GuestRestartContinuation'; $errorMessage = 'original cancellation'
-    $gate = $ast.Find({ param($n) $n -is [Management.Automation.Language.IfStatementAst] -and $n.Clauses[0].Item1.Extent.Text -eq '$guestRestartStarted -and -not $success -and -not $evidenceTransferSucceeded' }, $true)
+    $gate = $ast.Find({ param($n) $n -is [Management.Automation.Language.IfStatementAst] -and $n.Clauses[0].Item1.Extent.Text -eq '($guestRestartStarted -or $installerStarted) -and -not $success -and -not $evidenceTransferSucceeded' }, $true)
     Check ($null -ne $gate) 'Failure harvest cleanup gate is missing.'
     . ([scriptblock]::Create($gate.Extent.Text))
     Check ($transferCalls -eq 1 -and $failureEvidence.Retained -and -not $failureEvidence.Partial -and $failureEvidence.CopiedFiles -eq 2) 'Failure files were not retained once.'
@@ -53,6 +53,7 @@ try {
     Check ($failureKind -eq 'Cancelled' -and $cancelled -and $null -eq $guestResult -and -not $success -and $failureStage -eq 'GuestRestartContinuation' -and $errorMessage -eq 'original cancellation') 'Diagnostic collection changed the original failure.'
     Check $publishedAcl 'Diagnostics were published without applying the client-read ACL.'
     $ResultRoot = Join-Path $testRoot 'unavailable'; New-Item -ItemType Directory -Path $ResultRoot | Out-Null
+    $guestRestartStarted = $false; $installerStarted = $true
     $script:transferError = $true; $failureKind = 'Harness'; $cancelled = $false
     . ([scriptblock]::Create($gate.Extent.Text))
     Check (-not $failureEvidence.Retained -and $failureEvidence.Error -eq 'synthetic unavailable guest' -and $failureKind -eq 'Harness' -and -not $cancelled -and $null -eq $guestResult) 'Harvest failure replaced the original early failure.'

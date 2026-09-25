@@ -13,18 +13,34 @@ $secureCheckpoints=@()
 function Write-InstallerCheckpoint([string]$Phase) {
     $script:secureCheckpoints+= [pscustomobject]@{Phase=$Phase;AtUtc=[DateTime]::UtcNow.ToString('o')}
     Write-InstallerJson @(ConvertTo-InstallerSecureProgress $script:secureCheckpoints) (Join-Path $RequestRoot 'secure-progress.json')
+    Write-InstallerJson @(ConvertTo-InstallerSecureProgress $script:secureCheckpoints) (Join-Path $context.Outbox 'installer-secure-progress.json')
 }
-if($SecureUi){
-    if([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18'){throw 'Installer controller requires guest SYSTEM.'}
-    Write-InstallerCheckpoint 'Initializing'
+function Write-InstallerControllerCheckpoint([string]$Phase,[DateTime]$DeadlineUtc=([DateTimeOffset]::Parse($context.DeadlineUtc).UtcDateTime)) {
+    $requestDeadline=[DateTimeOffset]::Parse($context.DeadlineUtc).UtcDateTime
+    if($DeadlineUtc -gt $requestDeadline){$DeadlineUtc=$requestDeadline}
+    if(-not $script:controllerStatus -or $script:controllerStatus.Phase -cne $Phase){
+        $script:controllerStatus=[pscustomobject]@{Phase=$Phase;AtUtc=[DateTime]::UtcNow.ToString('o');DeadlineUtc=$DeadlineUtc.ToString('o');ProcessId=$PID;ProcessStartUtc=$controllerStartUtc;BeforePassed=$null;AfterPassed=$null;ElevatedProcessId=$null;ElevatedCreationFileTime=$null;ExitCode=$null}
+    }
+    $script:controllerStatus.BeforePassed=if($evidence -and $evidence.Before){$evidence.Before.Passed}else{$null}
+    $script:controllerStatus.AfterPassed=if($evidence -and $evidence.After){$evidence.After.Passed}else{$null}
+    if($evidence -and $evidence.ElevatedProcess){
+        $high=@($evidence.ElevatedProcess)[0]
+        $script:controllerStatus.ElevatedProcessId=$high.ProcessId;$script:controllerStatus.ElevatedCreationFileTime=$high.CreationFileTime
+    }
+    $script:controllerStatus.ExitCode=if($evidence){$evidence.ExitCode}else{$null}
+    Write-InstallerJson (ConvertTo-InstallerControllerStatus $script:controllerStatus) (Join-Path $context.Outbox 'installer-progress.json')
 }
+if([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18'){throw 'Installer controller requires guest SYSTEM.'}
+$context = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $RequestRoot 'context.json') | ConvertFrom-Json
+$policy = $context.Policy
+$secretPath = Join-Path $RequestRoot 'administrator.bin'
+$controllerStatus=$null;$evidence=$null
+if($SecureUi){Write-InstallerCheckpoint 'Initializing'}
+elseif(-not $WaitForDesktop){$controllerStartUtc=[Diagnostics.Process]::GetCurrentProcess().StartTime.ToUniversalTime().ToString('o');Write-InstallerControllerCheckpoint 'Initializing' ([DateTime]::UtcNow.AddSeconds(120))}
 Initialize-InstallerNative
 Initialize-InstallerPathObservation
 [CodexInstallerNative]::RequireSystem()
 Add-Type -AssemblyName System.Security
-$context = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $RequestRoot 'context.json') | ConvertFrom-Json
-$policy = $context.Policy
-$secretPath = Join-Path $RequestRoot 'administrator.bin'
 function Get-InstallerDesktopContext {
     $value=[pscustomobject]@{Process=[CodexInstallerNative]::Observe($PID);WindowStation=[CodexInstallerNative]::WindowStationName();ThreadDesktop=[CodexInstallerNative]::ThreadDesktopName();InputDesktop=[CodexInstallerNative]::InputDesktopName()}
     if($value.Process.SessionId -ne [int][CodexInstallerNative]::WTSGetActiveConsoleSessionId() -or $value.WindowStation -ine 'WinSta0' -or $value.ThreadDesktop -ine 'Winlogon'){throw 'Installer desktop helper is not on the console secure desktop.'}
@@ -188,6 +204,7 @@ if($SecureUi) {
         if($imageLease){$imageLease.Dispose()}
         if(Test-Path -LiteralPath $secretPath){Remove-Item -LiteralPath $secretPath}
         Write-InstallerJson $receipt (Join-Path $RequestRoot 'decision.json')
+        Write-InstallerJson @{Decision=$receipt.Decision;Success=$receipt.Success;InputStarted=$receipt.InputStarted;CredentialEntered=$receipt.CredentialEntered} (Join-Path $context.Outbox 'installer-decision.json')
     }
     exit
 }
@@ -238,6 +255,8 @@ function Read-InstallerSecureUiEvidence {
 }
 function Invoke-InstallerVerifier([string]$Phase) {
     Assert-InstallerDeadline
+    $limit=[DateTime]::UtcNow.AddSeconds($policy.Verifier.TimeoutSeconds)
+    Write-InstallerControllerCheckpoint ('Verifying'+$Phase) $limit
     foreach($account in @($identity.Initiator,$identity.ElevationAccount)){
         $registered=(Get-ItemProperty ('HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\'+$account.Sid)).ProfileImagePath
         if([Environment]::ExpandEnvironmentVariables($registered) -ine $account.ProfilePath -or (Get-LocalUser -Name $account.Name).SID.Value -cne $account.Sid){throw 'Account SID and real Windows profile binding changed.'}
@@ -256,7 +275,6 @@ function Invoke-InstallerVerifier([string]$Phase) {
     try {
         if($process.Identity.Elevated -or $process.Identity.IntegrityRid -ne 8192 -or ($policy.InitiatingUser -ceq 'StandardUser' -and $process.Identity.AdministratorGroup) -or
             ($policy.InitiatingUser -ceq 'ManagedAdministrator' -and (-not $process.Identity.AdministratorGroup -or -not $process.Identity.AdministratorDenyOnly))){throw 'Verifier did not start as the required initiating user.'}
-        $limit=[DateTime]::UtcNow.AddSeconds($policy.Verifier.TimeoutSeconds)
         while(-not $process.Exited){Assert-InstallerDeadline;if([DateTime]::UtcNow -gt $limit){throw 'Verifier timed out.'};Start-Sleep -Milliseconds 100}
         if($process.ExitCode -ne 0){throw "The $Phase verifier failed to produce its observation (exit $($process.ExitCode))."}
         $json=Read-InstallerBoundJson (Join-Path $out $policy.Verifier.ResultFile)
@@ -291,6 +309,7 @@ $installerTree=[Collections.Generic.List[object]]::new()
 $imageLease=$null;$verifierLease=$null;$application=$null;$ui=$null;$trace=$null;$restarting=$false
 try {
     if($context.Phase -ceq 'Prepare' -and $policy.InitiatingUser -ceq 'StandardUser'){
+        Write-InstallerControllerCheckpoint 'PreparingAccounts' ([DateTime]::UtcNow.AddSeconds(300))
         $suffix=([Guid]::NewGuid().ToString('N')).Substring(0,10)
         $admin=New-InstallerAccount ('CIa'+$suffix) $true
         $standard=New-InstallerAccount ('CIs'+$suffix) $false
@@ -301,13 +320,15 @@ try {
         $context | Add-Member -NotePropertyName Identity -NotePropertyValue ([pscustomobject]@{Initiator=$standard;ElevationAccount=$admin})
         $context.Phase='Run'
         Write-InstallerJson $context (Join-Path $RequestRoot 'context.json')
+        Write-InstallerControllerCheckpoint 'Rebooting' ([DateTime]::UtcNow.AddSeconds(300))
         $restarting=$true
-        Restart-Computer -Force
+        try{Restart-Computer -Force}catch{$restarting=$false;throw}
         exit
     }
     $marker=Join-Path $RequestRoot 'launch-once'
     $once=[IO.File]::Open($marker,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None);$once.Dispose()
     $limit=[DateTime]::UtcNow.AddSeconds(120)
+    Write-InstallerControllerCheckpoint 'WaitingForDesktop' $limit
     do {
         Assert-InstallerDeadline
         $consoleFlags=-1
@@ -346,16 +367,20 @@ try {
     $null=New-Item -ItemType Directory -Path $sharedRoot -Force
     Set-InstallerDirectoryAcl $context.Outbox $identity.Initiator.Sid
     Set-InstallerDirectoryAcl $sharedRoot $identity.Initiator.Sid
+    Write-InstallerControllerCheckpoint 'BindingFiles'
     $imageLease=[CodexInstallerPathObservation]::OpenBoundFile($context.Job.executable,$policy.ExecutableSha256,2147483648)
     $verifierLease=[CodexInstallerPathObservation]::OpenBoundFile((Join-Path $context.PayloadRoot $policy.Verifier.ExecutableRelativePath),$policy.Verifier.ExecutableSha256,2147483648)
     # A first logon can expose Explorer and an unlocked WTS session before leaving Winlogon.
-    $ui=[CodexInstallerNative]::StartOnSecureDesktop($PSCommandPath,$RequestRoot,$true)
     $readyLimit=[DateTime]::UtcNow.AddSeconds(130)
+    Write-InstallerControllerCheckpoint 'WaitingForInputDesktop' $readyLimit
+    $ui=[CodexInstallerNative]::StartOnSecureDesktop($PSCommandPath,$RequestRoot,$true)
     while(-not $ui.Exited){Assert-InstallerDeadline;if([DateTime]::UtcNow -gt $readyLimit){throw 'Input-desktop readiness handler timed out.'};Start-Sleep -Milliseconds 100}
     $evidence['DesktopReady']=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $RequestRoot 'desktop-ready.json') | ConvertFrom-Json
     $ui.Dispose();$ui=$null
     if(-not $evidence.DesktopReady.Success){throw "Input desktop was not ready: $($evidence.DesktopReady.Error)"}
     $evidence.Before=Invoke-InstallerVerifier 'Before'
+    $limit=[DateTime]::UtcNow.AddSeconds($policy.PromptTimeoutSeconds)
+    Write-InstallerControllerCheckpoint 'WaitingForPrompt' $limit
     $trace='CodexInstaller-'+$context.RequestId
     $etl=Join-Path $RequestRoot 'uac.etl'
     & "$env:SystemRoot\System32\logman.exe" start $trace -p '{d37e7910-79c8-57c4-da77-52bb646364cd}' 0xFFFFFFFFFFFFFFFF 5 -o $etl -ets | Out-Null
@@ -364,7 +389,6 @@ try {
     $root=$application.Identity;$tracked.Add($root);$installerTree.Add($root)
     if($root.Elevated -or $root.IntegrityRid -ne 8192 -or ($policy.InitiatingUser -ceq 'StandardUser' -and $root.AdministratorGroup) -or
         ($policy.InitiatingUser -ceq 'ManagedAdministrator' -and (-not $root.AdministratorGroup -or -not $root.AdministratorDenyOnly))){throw 'Installer initiating token does not satisfy the requested account mode.'}
-    $limit=[DateTime]::UtcNow.AddSeconds($policy.PromptTimeoutSeconds)
     $prompts=@()
     do {
         Assert-InstallerDeadline;Update-InstallerProcessTree
@@ -374,6 +398,7 @@ try {
         Start-Sleep -Milliseconds 100
     }while([DateTime]::UtcNow -lt $limit)
     if($prompts.Count -ne 1){throw 'No unique UAC prompt appeared.'}
+    Write-InstallerControllerCheckpoint 'BindingPrompt' ([DateTime]::UtcNow.AddSeconds(30))
     Start-Sleep -Milliseconds 500
     Update-InstallerProcessTree
     & "$env:SystemRoot\System32\logman.exe" stop $trace -ets | Out-Null
@@ -396,12 +421,14 @@ try {
     $gate=[pscustomobject]@{Event=$event;Requester=$requester;Consent=$consent;Root=$root;EstablishedUtc=$established.ToString('o');DeadlineUtc=$uiLimit.ToString('o')}
     $evidence.Prompt=$gate
     Write-InstallerJson $gate (Join-Path $RequestRoot 'gate.json')
+    Write-InstallerControllerCheckpoint 'HandlingPrompt' $uiLimit
     $ui=[CodexInstallerNative]::StartOnSecureDesktop($PSCommandPath,$RequestRoot,$false)
     while(-not $ui.Exited){Assert-InstallerDeadline;if([DateTime]::UtcNow -ge $uiLimit){throw 'Secure UAC handler timed out.'};Start-Sleep -Milliseconds 100}
     $decision=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $RequestRoot 'decision.json') | ConvertFrom-Json
     $evidence.Input=$decision
     if(-not $decision.Success){throw "Secure UAC handler refused: $($decision.Error)"}
     if(Test-Path -LiteralPath $secretPath){Remove-Item -LiteralPath $secretPath}
+    Write-InstallerControllerCheckpoint 'WaitingForInstallerExit'
     $high=[Collections.Generic.Dictionary[int,object]]::new()
     do {
         Assert-InstallerDeadline;Update-InstallerProcessTree
@@ -413,6 +440,7 @@ try {
             }
         }
         if($high.Count -gt 1 -or ($policy.Decision -ceq 'Decline' -and $high.Count -gt 0)){throw 'Unexpected elevated installer instance.'}
+        if($high.Count -eq 1 -and $null -eq $evidence.ElevatedProcess){$evidence.ElevatedProcess=@($high.Values);Write-InstallerControllerCheckpoint 'WaitingForInstallerExit'}
         $highRunning=$false
         foreach($entry in $high.Values){if([CodexInstallerNative]::IsAlive($entry)){$highRunning=$true}}
         if($application.Exited -and -not $highRunning){break}
@@ -429,6 +457,7 @@ try {
 finally {
     if(-not $restarting){
         $clean=$true
+        try{Write-InstallerControllerCheckpoint 'CleaningUp' ([DateTime]::UtcNow.AddSeconds(30))}catch{}
         if($trace){& "$env:SystemRoot\System32\logman.exe" stop $trace -ets 2>$null | Out-Null}
         if($ui){try{if(-not $ui.Exited){[CodexInstallerNative]::StopExact($ui.Identity)}}catch{$clean=$false};$ui.Dispose()}
         if($evidence.Prompt){try{Read-InstallerSecureUiEvidence}catch{$evidence['SecureUiEvidenceError']='Secure UI evidence was unavailable or invalid.'}}
@@ -451,6 +480,7 @@ finally {
         $null=New-Item -ItemType Directory -Path $context.Outbox -Force
         Write-InstallerJson $result (Join-Path $context.Outbox 'result.json')
         Write-InstallerJson $result (Join-Path $RequestRoot 'result.json')
+        try{Write-InstallerControllerCheckpoint 'Completed'}catch{}
         Write-InstallerJson @{Complete=$true;Success=$result.Success} (Join-Path $RequestRoot 'complete.json')
     }
 }

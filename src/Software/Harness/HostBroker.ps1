@@ -3533,6 +3533,7 @@ function Invoke-GuestRequest {
     $guestRestartEvidence = $null
     $guestRestartStarted = $false
     $installerPolicy = $null
+    $installerStarted = $false
     $failureEvidence = $null
     $guestCredentialFile = $null
     $expectGuestPowerOff = $false
@@ -4077,13 +4078,27 @@ function Invoke-GuestRequest {
         elseif ($installerPolicy) {
             $failureStage = 'InstallerUac'
             Write-RequestState -ResultRoot $RequestStateRoot -RequestId $requestId -Status 'Running' -Message 'Running the attributed installer UAC workflow; no request replay or credential screenshots are permitted.' -CreatedUtc $createdUtc -ClaimedUtc $ClaimedUtc -ExecutionDeadlineUtc $executionDeadlineUtc -WorkerId $workerId
+            $installerStarted=$true
             $installerRoot = Start-InstallerUacV2 -Session $session -Policy $installerPolicy -Job $job -RequestId $requestId -PayloadRoot $guestPayloadRoot -Outbox $guestOutbox -ResultRoot $ResultRoot -ExecutionDeadlineUtc $executionDeadlineUtc
             $jobSubmissionAttempts = 1
             Remove-PSSession -Session $session -ErrorAction SilentlyContinue; $session = $null
+            $installerLastStatus=$null;$installerLastPhase=$null;$installerObservedUtc=$null
             do {
                 Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
-                $installerStatus = Invoke-InstallerGuestStatus -VmName $vmName -RequestId $requestId -GuestRoot $installerRoot -ExecutionDeadlineUtc $executionDeadlineUtc
-                if ($installerStatus -and $installerStatus.Complete) { break }
+                $installerProbe = Invoke-InstallerGuestStatus -VmName $vmName -RequestId $requestId -GuestRoot $installerRoot -GuestOutbox $guestOutbox -ExecutionDeadlineUtc $executionDeadlineUtc
+                $installerStatus=if($installerProbe.Available){$installerProbe.Snapshot}else{$installerLastStatus}
+                if($installerProbe.Available){$installerObservedUtc=[DateTime]::UtcNow.ToString('o')}
+                Write-JsonAtomic -Path (Join-Path $ResultRoot 'installer-status.json') -Value @{ProbeUtc=[DateTime]::UtcNow.ToString('o');LastObservedUtc=$installerObservedUtc;ProbeAvailable=$installerProbe.Available;ProbeFailure=$installerProbe.Failure;LastKnown=$installerStatus}
+                if($installerStatus){
+                    $installerFailure=Get-InstallerSupervisionFailure $installerStatus $installerLastStatus ([DateTime]::UtcNow) $executionDeadlineUtc
+                    if($installerFailure){$failureKind=$installerFailure;throw ('Installer supervision stopped the workflow: '+$installerFailure+'.')}
+                    $installerLastStatus=$installerStatus
+                    if($installerStatus.Complete){break}
+                    if($installerStatus.Controller -and $installerLastPhase -cne $installerStatus.Controller.Phase){
+                        $installerLastPhase=$installerStatus.Controller.Phase
+                        Write-RequestState -ResultRoot $RequestStateRoot -RequestId $requestId -Status 'Running' -Message ('Installer workflow: '+$installerLastPhase+'.') -CreatedUtc $createdUtc -ClaimedUtc $ClaimedUtc -ExecutionDeadlineUtc $executionDeadlineUtc -WorkerId $workerId
+                    }
+                }
                 Start-Sleep -Seconds 2
             } while ($true)
         }
@@ -5025,7 +5040,7 @@ function Invoke-GuestRequest {
             }
         }
 
-        if ($guestRestartStarted -and -not $success -and -not $evidenceTransferSucceeded) {
+        if (($guestRestartStarted -or $installerStarted) -and -not $success -and -not $evidenceTransferSucceeded) {
             $failureEvidence = Save-GuestRestartFailureEvidence -VmName $vmName -RequestId $requestId -GuestOutbox $guestOutbox -ResultRoot $ResultRoot -ClientSid ([string]$Config.ClientSid)
         }
 

@@ -1,13 +1,14 @@
 $installerContractPath=Join-Path $PSScriptRoot 'InstallerUacContract.ps1'
 if(-not(Test-Path -LiteralPath $installerContractPath)){$installerContractPath=Join-Path $PSScriptRoot '..\Skill\scripts\InstallerUacContract.ps1'}
 . $installerContractPath
+. (Join-Path $PSScriptRoot 'InstallerUacGate.ps1')
 
 function Invoke-InstallerGuestStatus {
-    param([string]$VmName,[string]$RequestId,[string]$GuestRoot,[DateTime]$ExecutionDeadlineUtc)
+    param([string]$VmName,[string]$RequestId,[string]$GuestRoot,[string]$GuestOutbox,[DateTime]$ExecutionDeadlineUtc)
     $base=Join-Path $probePath ($RequestId+'-installer-'+[Guid]::NewGuid().ToString('N'))
     $inputPath=$base+'.input.json';$outputPath=$base+'.json';$leasePath=$base+'.process.json';$process=$null
     try {
-        Write-JsonAtomic -Path $inputPath -Value @{VmName=$VmName;GuestRoot=$GuestRoot;CredentialPath=$credentialPath}
+        Write-JsonAtomic -Path $inputPath -Value @{VmName=$VmName;GuestRoot=$GuestRoot;GuestOutbox=$GuestOutbox;CredentialPath=$credentialPath}
         $command=@'
 $ErrorActionPreference='Stop'
 try {
@@ -15,20 +16,20 @@ try {
     $saved=Get-Content -Raw -LiteralPath $data.CredentialPath | ConvertFrom-Json
     $credential=[Management.Automation.PSCredential]::new($saved.UserName,(ConvertTo-SecureString $saved.Password -AsPlainText -Force))
     $value=Invoke-Command -VMName $data.VmName -Credential $credential -ScriptBlock {
-        param($Root)
-        $path=Join-Path $Root 'complete.json'
-        if(Test-Path -LiteralPath $path){Get-Content -Raw -LiteralPath $path | ConvertFrom-Json}else{$null}
-    } -ArgumentList $data.GuestRoot
-    @{Success=$true;Value=$value} | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath __OUTPUT__ -Encoding UTF8
+        param($Root,$Outbox)
+        . (Join-Path $Root 'InstallerUacGate.ps1')
+        Get-InstallerStatusSnapshot $Root $Outbox
+    } -ArgumentList $data.GuestRoot,$data.GuestOutbox
+    @{Success=$true;Value=$value} | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath __OUTPUT__ -Encoding UTF8
 } catch { @{Success=$false} | ConvertTo-Json | Set-Content -LiteralPath __OUTPUT__ -Encoding UTF8 }
 '@
         $command=$command.Replace('__INPUT__',(ConvertTo-PowerShellSingleQuotedLiteral $inputPath)).Replace('__OUTPUT__',(ConvertTo-PowerShellSingleQuotedLiteral $outputPath))
         $process=Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-EncodedCommand',[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))) -WindowStyle Hidden -PassThru
         Write-JsonAtomic -Path $leasePath -Value @{ProcessId=$process.Id;ProcessStartUtc=$process.StartTime.ToUniversalTime().ToString('o');CreatedUtc=[DateTime]::UtcNow.ToString('o')}
         $limit=[DateTime]::UtcNow.AddSeconds(15)
-        while(-not $process.HasExited){Assert-RequestActive -RequestId $RequestId -ExecutionDeadlineUtc $ExecutionDeadlineUtc;if([DateTime]::UtcNow -ge $limit){return $null};Start-Sleep -Milliseconds 200;$process.Refresh()}
-        if(Test-Path -LiteralPath $outputPath){$result=Read-BrokerJsonWithRetry -Path $outputPath;if($result.Success){return $result.Value}}
-        return $null
+        while(-not $process.HasExited){Assert-RequestActive -RequestId $RequestId -ExecutionDeadlineUtc $ExecutionDeadlineUtc;if([DateTime]::UtcNow -ge $limit){return [pscustomobject]@{Available=$false;Failure='ProbeTimeout';Snapshot=$null}};Start-Sleep -Milliseconds 200;$process.Refresh()}
+        if(Test-Path -LiteralPath $outputPath){$result=Read-BrokerJsonWithRetry -Path $outputPath;if($result.Success){return [pscustomobject]@{Available=$true;Failure=$null;Snapshot=ConvertTo-InstallerStatusSnapshot $result.Value}}}
+        [pscustomobject]@{Available=$false;Failure='StatusUnavailable';Snapshot=$null}
     } finally {
         if($process){Stop-GuestProbeProcess -Process $process -LeasePath $leasePath}
         foreach($path in @($inputPath,$outputPath)){Remove-Item -LiteralPath $path -ErrorAction SilentlyContinue}
