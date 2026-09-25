@@ -29,8 +29,8 @@ function Assert-InstallerSecurePrompt($Gate) {
     Assert-InstallerPromptAttribution $Gate.Event $requester $consent $Gate.Root $context.Job.executable $policy.ExecutableSha256 $policy.ExecutableSha256 ([DateTime]::UtcNow)
     if([CodexInstallerNative]::SecureForeground() -ne $consent.ProcessId){throw 'The attributed UAC prompt is not the secure foreground.'}
     $condition=[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ProcessIdProperty,[int]$consent.ProcessId)
-    $windows=[Windows.Automation.AutomationElement]::RootElement.FindAll([Windows.Automation.TreeScope]::Children,$condition)
-    if($windows.Count -ne 1 -or $windows[0].Current.ClassName -cne 'Credential Dialog Xaml Host' -or -not $windows[0].Current.IsEnabled){throw 'UAC window is unknown or ambiguous.'}
+    $windows=@([Windows.Automation.AutomationElement]::RootElement.FindAll([Windows.Automation.TreeScope]::Children,$condition) | Where-Object {$_.Current.ClassName -ceq 'Credential Dialog Xaml Host' -and $_.Current.ControlType -eq [Windows.Automation.ControlType]::Window})
+    if($windows.Count -ne 1 -or -not $windows[0].Current.IsEnabled -or $windows[0].Current.IsOffscreen){throw 'UAC window is unknown or ambiguous.'}
     $windows[0]
 }
 function Get-InstallerControl($Window,[string]$Id) {

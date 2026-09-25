@@ -24,4 +24,11 @@ $nativeEvent | Add-Member ScriptMethod ToXml {'<Event><System><Execution Process
 $parsed=$nativeEvent | ForEach-Object $parser
 Assert-InstallerPromptAttribution $parsed $requester $consent $root 'D:\Payload\setup.exe' ('A'*64) ('A'*64) $now
 $count++
+Add-Type -AssemblyName UIAutomationTypes
+$windowFilter=$controller.Find({param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Where-Object' -and $node.Extent.Text.Contains('Credential Dialog Xaml Host')},$true).CommandElements[-1].ScriptBlock.GetScriptBlock()
+$dialog=[pscustomobject]@{Current=[pscustomobject]@{ClassName='Credential Dialog Xaml Host';ControlType=[Windows.Automation.ControlType]::Window}}
+$background=[pscustomobject]@{Current=[pscustomobject]@{ClassName='$$$Secure UAP Background Window Class';ControlType=[Windows.Automation.ControlType]::Pane}}
+$selected=@(@($dialog,$background) | Where-Object $windowFilter)
+if($selected.Count -ne 1 -or -not [object]::ReferenceEquals($selected[0],$dialog)){throw 'The consent background pane was confused with its credential dialog.'}
+$count++
 [pscustomobject]@{Success=$true;ScenarioCount=$count}
