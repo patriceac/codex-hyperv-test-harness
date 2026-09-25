@@ -15,3 +15,19 @@ function Resolve-InstallerConsentActivationWindow($Windows,[int]$ConsentProcessI
     if($matches.Count -ne 1){throw 'Deferred UAC activation window is missing or ambiguous.'}
     $matches[0]
 }
+function Get-InstallerPromptDeadline([DateTime]$EstablishedUtc,[int]$TimeoutSeconds,[DateTime]$RequestDeadlineUtc,[DateTime]$NowUtc) {
+    if($TimeoutSeconds -lt 5 -or $TimeoutSeconds -gt 600 -or $EstablishedUtc -gt $NowUtc){throw 'Invalid UAC prompt lifetime.'}
+    $deadline=$EstablishedUtc.AddSeconds($TimeoutSeconds)
+    if($RequestDeadlineUtc -lt $deadline){$deadline=$RequestDeadlineUtc}
+    if($NowUtc -ge $deadline){throw 'Bound UAC prompt deadline expired.'}
+    $deadline
+}
+function ConvertTo-InstallerSecureProgress($Value) {
+    $phases=@('Initializing','InspectingPrompt','BindingImage','Activating','CheckingControls','EnteringCredentials','InvokingDecision','DecisionReturned','FailureDiagnostics')
+    $rows=@($Value);$seen=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    if($rows.Count -gt $phases.Count){throw 'Too many secure UI checkpoints.'}
+    foreach($row in $rows){
+        if($row.Phase -cnotin $phases -or -not $seen.Add([string]$row.Phase)){throw 'Invalid secure UI checkpoint phase.'}
+        [pscustomobject]@{Phase=[string]$row.Phase;AtUtc=[DateTimeOffset]::Parse($row.AtUtc).UtcDateTime.ToString('o')}
+    }
+}

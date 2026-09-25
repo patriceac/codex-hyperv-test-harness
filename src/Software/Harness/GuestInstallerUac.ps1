@@ -4,6 +4,20 @@ Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'InstallerUacNative.ps1')
 . (Join-Path $PSScriptRoot 'InstallerUacObservations.ps1')
 . (Join-Path $PSScriptRoot 'InstallerUacGate.ps1')
+function Write-InstallerJson($Value, [string]$Path) {
+    $temporary=$Path+'.tmp'
+    [IO.File]::WriteAllText($temporary,($Value | ConvertTo-Json -Depth 30),[Text.UTF8Encoding]::new($false))
+    Move-Item -LiteralPath $temporary -Destination $Path -Force
+}
+$secureCheckpoints=@()
+function Write-InstallerCheckpoint([string]$Phase) {
+    $script:secureCheckpoints+= [pscustomobject]@{Phase=$Phase;AtUtc=[DateTime]::UtcNow.ToString('o')}
+    Write-InstallerJson @(ConvertTo-InstallerSecureProgress $script:secureCheckpoints) (Join-Path $RequestRoot 'secure-progress.json')
+}
+if($SecureUi){
+    if([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18'){throw 'Installer controller requires guest SYSTEM.'}
+    Write-InstallerCheckpoint 'Initializing'
+}
 Initialize-InstallerNative
 Initialize-InstallerPathObservation
 [CodexInstallerNative]::RequireSystem()
@@ -11,11 +25,6 @@ Add-Type -AssemblyName System.Security
 $context = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $RequestRoot 'context.json') | ConvertFrom-Json
 $policy = $context.Policy
 $secretPath = Join-Path $RequestRoot 'administrator.bin'
-function Write-InstallerJson($Value, [string]$Path) {
-    $temporary=$Path+'.tmp'
-    [IO.File]::WriteAllText($temporary,($Value | ConvertTo-Json -Depth 30),[Text.UTF8Encoding]::new($false))
-    Move-Item -LiteralPath $temporary -Destination $Path -Force
-}
 function Get-InstallerDesktopContext {
     $value=[pscustomobject]@{Process=[CodexInstallerNative]::Observe($PID);WindowStation=[CodexInstallerNative]::WindowStationName();ThreadDesktop=[CodexInstallerNative]::ThreadDesktopName();InputDesktop=[CodexInstallerNative]::InputDesktopName()}
     if($value.Process.SessionId -ne [int][CodexInstallerNative]::WTSGetActiveConsoleSessionId() -or $value.WindowStation -ine 'WinSta0' -or $value.ThreadDesktop -ine 'Winlogon'){throw 'Installer desktop helper is not on the console secure desktop.'}
@@ -43,12 +52,20 @@ function Test-SameInstallerProcess($Expected) {
     }
     $live
 }
-function Assert-InstallerSecurePrompt($Gate,[switch]$WaitForReady) {
+function Assert-InstallerLivePrompt($Gate) {
+    $established=[DateTimeOffset]::Parse($Gate.EstablishedUtc).UtcDateTime
+    $deadline=Get-InstallerPromptDeadline $established $policy.PromptTimeoutSeconds ([DateTimeOffset]::Parse($context.DeadlineUtc).UtcDateTime) ([DateTime]::UtcNow)
+    if($deadline -ne [DateTimeOffset]::Parse($Gate.DeadlineUtc).UtcDateTime){throw 'Bound UAC prompt deadline changed.'}
+    $requester=Test-SameInstallerProcess $Gate.Requester
+    $consent=Test-SameInstallerProcess $Gate.Consent
+    # Fresh when established; the fixed lifetime and exact live identities are checked on every use.
+    Assert-InstallerPromptAttribution $Gate.Event $requester $consent $Gate.Root $context.Job.executable $policy.ExecutableSha256 $policy.ExecutableSha256 $established
+    $consent
+}
+function Assert-InstallerSecurePrompt($Gate,[switch]$WaitForReady,$ExpectedWindow=$null) {
     $readyUntil=[DateTime]::UtcNow.AddSeconds(5)
     do {
-        $requester=Test-SameInstallerProcess $Gate.Requester
-        $consent=Test-SameInstallerProcess $Gate.Consent
-        Assert-InstallerPromptAttribution $Gate.Event $requester $consent $Gate.Root $context.Job.executable $policy.ExecutableSha256 $policy.ExecutableSha256 ([DateTime]::UtcNow)
+        $consent=Assert-InstallerLivePrompt $Gate
         $foreground=0;$desktopError=$null
         try{$foreground=[CodexInstallerNative]::SecureForeground()}catch{if(-not $WaitForReady){throw};$desktopError=$_.Exception.Message}
         if($foreground -eq $consent.ProcessId){break}
@@ -62,12 +79,14 @@ function Assert-InstallerSecurePrompt($Gate,[switch]$WaitForReady) {
     $condition=[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ProcessIdProperty,[int]$consent.ProcessId)
     $windows=@([Windows.Automation.AutomationElement]::RootElement.FindAll([Windows.Automation.TreeScope]::Children,$condition) | Where-Object {$_.Current.ClassName -ceq 'Credential Dialog Xaml Host' -and $_.Current.ControlType -eq [Windows.Automation.ControlType]::Window})
     if($windows.Count -ne 1 -or -not $windows[0].Current.IsEnabled -or $windows[0].Current.IsOffscreen){throw 'UAC window is unknown or ambiguous.'}
+    if($ExpectedWindow -and -not [Windows.Automation.Automation]::Compare($ExpectedWindow,$windows[0])){throw 'The bound UAC window changed.'}
     $windows[0]
 }
-function Get-InstallerControl($Window,[string]$Id) {
+function Get-InstallerControl($Window,[string]$Id,$ExpectedControl=$null) {
     $condition=[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::AutomationIdProperty,$Id)
     $matches=$Window.FindAll([Windows.Automation.TreeScope]::Descendants,$condition)
     if($matches.Count -ne 1 -or -not $matches[0].Current.IsEnabled -or $matches[0].Current.IsOffscreen){throw 'UAC control is missing, disabled or ambiguous.'}
+    if($ExpectedControl -and -not [Windows.Automation.Automation]::Compare($ExpectedControl,$matches[0])){throw 'The bound UAC control changed.'}
     $matches[0]
 }
 function Test-InstallerControlDescendant($Node,$Ancestor) {
@@ -79,21 +98,24 @@ if($SecureUi) {
     $secret=$null;$imageLease=$null
     $receipt=[ordered]@{Success=$false;InputStarted=$false;Decision=$policy.Decision;CredentialEntered=$false;Error=$null}
     try {
+        Write-InstallerCheckpoint 'InspectingPrompt'
         Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes,WindowsBase
         $gate=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $RequestRoot 'gate.json') | ConvertFrom-Json
         $receipt['DesktopContext']=Get-InstallerDesktopContext
         if($receipt.DesktopContext.Process.SessionId -ne $gate.Consent.SessionId){throw 'Secure handler and consent process are in different sessions.'}
+        Write-InstallerCheckpoint 'BindingImage'
         $imageLease=[CodexInstallerPathObservation]::OpenBoundFile($context.Job.executable,$policy.ExecutableSha256,2147483648)
         if([CodexInstallerNative]::InputDesktopName() -ieq 'Default'){
-            $requester=Test-SameInstallerProcess $gate.Requester;$consent=Test-SameInstallerProcess $gate.Consent
-            Assert-InstallerPromptAttribution $gate.Event $requester $consent $gate.Root $context.Job.executable $policy.ExecutableSha256 $policy.ExecutableSha256 ([DateTime]::UtcNow)
+            $consent=Assert-InstallerLivePrompt $gate
             $observed=[CodexInstallerNative]::ConsentWindows($consent.ProcessId)
             if([CodexInstallerNative]::InputDesktopName() -ieq 'Default'){
                 $pending=Resolve-InstallerConsentActivationWindow $observed.Windows $consent.ProcessId
+                Write-InstallerCheckpoint 'Activating'
                 $receipt['PromptActivation']=[ordered]@{Window=$pending;Attempted=$true;ActivationMessageDelivered=$false}
                 $receipt.PromptActivation.ActivationMessageDelivered=[CodexInstallerNative]::ActivateConsentWindow($pending.Handle,$consent.ProcessId,$consent.CreationFileTime,$consent.SessionId,$pending.Class)
             }
         }
+        Write-InstallerCheckpoint 'CheckingControls'
         $window=Assert-InstallerSecurePrompt $gate -WaitForReady
         $passwordCondition=[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::IsPasswordProperty,$true)
         $passwordNodes=$window.FindAll([Windows.Automation.TreeScope]::Descendants,$passwordCondition)
@@ -114,24 +136,33 @@ if($SecureUi) {
             $valuePattern=$username.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern)
             $secret=[Security.Cryptography.ProtectedData]::Unprotect([IO.File]::ReadAllBytes($secretPath),$null,[Security.Cryptography.DataProtectionScope]::LocalMachine)
             if($secret.Length -ne 64){throw 'Invalid disposable credential.'}
-            $null=Assert-InstallerSecurePrompt $gate
+            Write-InstallerCheckpoint 'EnteringCredentials'
+            $null=Assert-InstallerSecurePrompt $gate -ExpectedWindow $window
+            $null=Get-InstallerControl $window 'EditField_1' $username
             $receipt.InputStarted=$true
             $valuePattern.SetValue($context.Identity.ElevationAccount.QualifiedName)
+            $null=Assert-InstallerSecurePrompt $gate -ExpectedWindow $window
+            $null=Get-InstallerControl $window 'PasswordField_2' $password
             $password.SetFocus()
             for($index=0;$index -lt $secret.Length;$index+=2){
-                $null=Assert-InstallerSecurePrompt $gate
+                $null=Assert-InstallerSecurePrompt $gate -ExpectedWindow $window
+                $null=Get-InstallerControl $window 'PasswordField_2' $password
                 $focused=[Windows.Automation.AutomationElement]::FocusedElement
                 if(-not $focused -or -not $focused.Current.IsPassword -or -not(Test-InstallerControlDescendant $focused $password)){throw 'Password focus changed; further input refused.'}
                 [CodexInstallerNative]::TypeSecureCharacter([BitConverter]::ToUInt16($secret,$index),$gate.Consent.ProcessId)
             }
             $receipt.CredentialEntered=$true
         } elseif($policy.Decision -ceq 'Accept' -and $passwordNodes.Count -gt 0) {throw 'Managed-administrator acceptance requires a consent-only prompt.'}
-        $null=Assert-InstallerSecurePrompt $gate
+        Write-InstallerCheckpoint 'InvokingDecision'
+        $null=Assert-InstallerSecurePrompt $gate -ExpectedWindow $window
+        $null=Get-InstallerControl $window $buttonId $button
         $receipt.InputStarted=$true
         $invoke.Invoke()
+        Write-InstallerCheckpoint 'DecisionReturned'
         $receipt.Success=$true
     } catch {
         $receipt.Error=$_.Exception.Message
+        try{Write-InstallerCheckpoint 'FailureDiagnostics'}catch{}
         if(-not $receipt.InputStarted){
             try{$receipt['UacPolicy']=Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' | Select-Object EnableLUA,PromptOnSecureDesktop,ConsentPromptBehaviorAdmin,ConsentPromptBehaviorUser,EnableUIADesktopToggle}catch{$receipt['UacPolicyError']=$_.Exception.Message}
             try {
@@ -199,6 +230,12 @@ function Read-InstallerBoundJson([string]$Path) {
     $lease=[CodexInstallerPathObservation]::OpenBoundFile($Path,[NullString]::Value,1048576)
     try {$reader=[IO.StreamReader]::new($lease.Stream,[Text.Encoding]::UTF8,$true);try{$reader.ReadToEnd() | ConvertFrom-Json}finally{$reader.Dispose()}}finally{$lease.Dispose()}
 }
+function Read-InstallerSecureUiEvidence {
+    $decisionPath=Join-Path $RequestRoot 'decision.json'
+    if($null -eq $evidence.Input -and (Test-Path -LiteralPath $decisionPath)){$evidence.Input=Read-InstallerBoundJson $decisionPath}
+    $progressPath=Join-Path $RequestRoot 'secure-progress.json'
+    if(Test-Path -LiteralPath $progressPath){$evidence.SecureUiProgress=@(ConvertTo-InstallerSecureProgress (Read-InstallerBoundJson $progressPath))}
+}
 function Invoke-InstallerVerifier([string]$Phase) {
     Assert-InstallerDeadline
     foreach($account in @($identity.Initiator,$identity.ElevationAccount)){
@@ -248,7 +285,7 @@ function Update-InstallerProcessTree {
 }
 
 $result=[ordered]@{JobId=$context.RequestId;StartedUtc=[DateTime]::UtcNow.ToString('o');CompletedUtc=$null;Success=$false;HarnessSucceeded=$false;OverallSucceeded=$false;TestEvaluated=$false;TestPassed=$false;TestFailureKind=$null;TestFailureMessage=$null;FailureKind='InstallerUacFailed';Error=$null;InstallerUac=$null;Screenshots=@();Actions=@();ProcessCleanup=$null}
-$evidence=[ordered]@{FormatVersion=2;RequestId=$context.RequestId;Decision=$policy.Decision;InitiatingUser=$policy.InitiatingUser;ExecutableSha256=$policy.ExecutableSha256;VerifierSha256=$policy.Verifier.ExecutableSha256;Identity=$null;Before=$null;After=$null;Prompt=$null;Input=$null;ElevatedProcess=$null;ExitCode=$null;CleanupStartedUtc=$null;CleanupSucceeded=$false;ContractProven=$false}
+$evidence=[ordered]@{FormatVersion=2;RequestId=$context.RequestId;Decision=$policy.Decision;InitiatingUser=$policy.InitiatingUser;ExecutableSha256=$policy.ExecutableSha256;VerifierSha256=$policy.Verifier.ExecutableSha256;Identity=$null;Before=$null;After=$null;Prompt=$null;Input=$null;SecureUiProgress=$null;ElevatedProcess=$null;ExitCode=$null;CleanupStartedUtc=$null;CleanupSucceeded=$false;ContractProven=$false}
 $tracked=[Collections.Generic.List[object]]::new()
 $installerTree=[Collections.Generic.List[object]]::new()
 $imageLease=$null;$verifierLease=$null;$application=$null;$ui=$null;$trace=$null;$restarting=$false
@@ -353,13 +390,14 @@ try {
     $consent=[CodexInstallerNative]::Observe($prompts[0].Id)
     $signature=Get-AuthenticodeSignature -LiteralPath $consent.ImagePath
     if($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Microsoft'){throw 'Consent executable signature is unverified.'}
-    Assert-InstallerPromptAttribution $event $requester $consent $root $context.Job.executable $policy.ExecutableSha256 $policy.ExecutableSha256 ([DateTime]::UtcNow)
-    $gate=[pscustomobject]@{Event=$event;Requester=$requester;Consent=$consent;Root=$root}
+    $established=[DateTime]::UtcNow
+    Assert-InstallerPromptAttribution $event $requester $consent $root $context.Job.executable $policy.ExecutableSha256 $policy.ExecutableSha256 $established
+    $uiLimit=Get-InstallerPromptDeadline $established $policy.PromptTimeoutSeconds ([DateTimeOffset]::Parse($context.DeadlineUtc).UtcDateTime) $established
+    $gate=[pscustomobject]@{Event=$event;Requester=$requester;Consent=$consent;Root=$root;EstablishedUtc=$established.ToString('o');DeadlineUtc=$uiLimit.ToString('o')}
     $evidence.Prompt=$gate
     Write-InstallerJson $gate (Join-Path $RequestRoot 'gate.json')
     $ui=[CodexInstallerNative]::StartOnSecureDesktop($PSCommandPath,$RequestRoot,$false)
-    $uiLimit=[DateTime]::UtcNow.AddSeconds(25)
-    while(-not $ui.Exited){Assert-InstallerDeadline;if([DateTime]::UtcNow -gt $uiLimit){throw 'Secure UAC handler timed out.'};Start-Sleep -Milliseconds 100}
+    while(-not $ui.Exited){Assert-InstallerDeadline;if([DateTime]::UtcNow -ge $uiLimit){throw 'Secure UAC handler timed out.'};Start-Sleep -Milliseconds 100}
     $decision=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $RequestRoot 'decision.json') | ConvertFrom-Json
     $evidence.Input=$decision
     if(-not $decision.Success){throw "Secure UAC handler refused: $($decision.Error)"}
@@ -393,6 +431,7 @@ finally {
         $clean=$true
         if($trace){& "$env:SystemRoot\System32\logman.exe" stop $trace -ets 2>$null | Out-Null}
         if($ui){try{if(-not $ui.Exited){[CodexInstallerNative]::StopExact($ui.Identity)}}catch{$clean=$false};$ui.Dispose()}
+        if($evidence.Prompt){try{Read-InstallerSecureUiEvidence}catch{$evidence['SecureUiEvidenceError']='Secure UI evidence was unavailable or invalid.'}}
         if(Test-Path -LiteralPath $secretPath){Remove-Item -LiteralPath $secretPath}
         $evidence.CleanupStartedUtc=[DateTime]::UtcNow.ToString('o')
         for($i=$tracked.Count-1;$i -ge 0;$i--){try{[CodexInstallerNative]::StopExact($tracked[$i])}catch{$clean=$false}}
