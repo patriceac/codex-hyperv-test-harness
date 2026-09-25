@@ -115,7 +115,7 @@ function New-InstallerAccount([string]$Name,[bool]$Administrator) {
         for($i=0;$i -lt 32;$i++){$character=if($i -lt 4){'Aa9!'[$i]}else{$alphabet[[int]$random[$i]%$alphabet.Length]};$secret.AppendChar($character);$bytes[$i*2]=[byte][char]$character}
         $user=New-LocalUser -Name $Name -Password $secret -AccountNeverExpires -PasswordNeverExpires
         $group=if($Administrator){'S-1-5-32-544'}else{'S-1-5-32-545'}
-        Add-LocalGroupMember -SID $group -Member $user.SID
+        Add-LocalGroupMember -SID $group -Member $user
         if($Administrator){[IO.File]::WriteAllBytes($secretPath,[Security.Cryptography.ProtectedData]::Protect($bytes,$null,[Security.Cryptography.DataProtectionScope]::LocalMachine))}
         else {
             # Disposable preparation only. Cleared before either verifier or installer is launched.

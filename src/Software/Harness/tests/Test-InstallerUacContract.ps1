@@ -60,4 +60,18 @@ Assert-Rejected {param($r) $r.InstallerUac.PrivilegedObservations=@(@{Name='priv
 $legacy=[pscustomobject]@{Operation='RunGuestJob'}
 if($null -ne (Resolve-InstallerUacPolicyV2 $legacy $null)) { throw 'Legacy request acquired installer authority.' }
 $checks++
+& {
+    Import-Module Microsoft.PowerShell.LocalAccounts -ErrorAction Stop
+    $user=[Microsoft.PowerShell.Commands.LocalUser]::new('synthetic')
+    $user.SID=[Security.Principal.SecurityIdentifier]::new('S-1-5-21-1-2-3-1001')
+    $group='S-1-5-32-544'
+    function Add-LocalGroupMember {
+        param([Security.Principal.SecurityIdentifier]$SID,[Microsoft.PowerShell.Commands.LocalPrincipal[]]$Member)
+        if($SID.Value -ne $group -or $Member.Count -ne 1 -or -not [object]::ReferenceEquals($Member[0],$user)){throw 'Account group membership did not bind the exact created principal.'}
+    }
+    $controller=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot '..\GuestInstallerUac.ps1'),[ref]$null,[ref]$null)
+    $membership=$controller.Find({param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Add-LocalGroupMember'},$true)
+    Invoke-Expression $membership.Extent.Text
+}
+$checks++
 @{Success=$true;ScenarioCount=$checks} | ConvertTo-Json
