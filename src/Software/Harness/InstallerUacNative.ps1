@@ -64,6 +64,9 @@ public static class CodexInstallerNative {
     [DllImport("advapi32.dll")] static extern IntPtr GetSidSubAuthority(IntPtr sid,uint index);
     [DllImport("advapi32.dll",SetLastError=true,CharSet=CharSet.Unicode)] static extern bool CreateProcessAsUser(IntPtr token,string application,StringBuilder command,IntPtr processAttributes,IntPtr threadAttributes,bool inherit,uint flags,IntPtr environment,string directory,ref StartupInfo startup,out ProcessInfo info);
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")] static extern IntPtr GetThreadDesktop(uint thread);
+    [DllImport("user32.dll")] static extern IntPtr GetProcessWindowStation();
     [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr window,uint command);
     [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr window,uint flags);
     [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr window,StringBuilder name,int length);
@@ -134,19 +137,25 @@ public static class CodexInstallerNative {
             return value.Data.SessionFlags;
         }finally{WTSFreeMemory(buffer);}
     }
-    public static CodexInstallerProcess StartOnSecureDesktop(string script,string requestRoot) {
+    public static CodexInstallerProcess StartOnSecureDesktop(string script,string requestRoot,bool waitForDesktop) {
         RequireSystem();EnablePrivilege("SeDebugPrivilege");EnablePrivilege("SeAssignPrimaryTokenPrivilege");EnablePrivilege("SeIncreaseQuotaPrivilege");
         Process logon=null;foreach(var p in Process.GetProcessesByName("winlogon"))if(p.SessionId==(int)WTSGetActiveConsoleSessionId()){if(logon!=null)throw new InvalidOperationException("Ambiguous console Winlogon.");logon=p;}
         if(logon==null)throw new InvalidOperationException("Console Winlogon not found.");
         IntPtr process=OpenProcess(0x1000,false,logon.Id),token=IntPtr.Zero,duplicate=IntPtr.Zero;
         if(process==IntPtr.Zero)throw new Win32Exception(Marshal.GetLastWin32Error());
-        try {Check(OpenProcessToken(process,0xB,out token));Check(DuplicateTokenEx(token,0xF01FF,IntPtr.Zero,2,1,out duplicate));return Start(duplicate,System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),"WindowsPowerShell\\v1.0\\powershell.exe"),"-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "+Quote(script)+" -RequestRoot "+Quote(requestRoot)+" -SecureUi","winsta0\\winlogon");}
+        try {Check(OpenProcessToken(process,0xB,out token));Check(DuplicateTokenEx(token,0xF01FF,IntPtr.Zero,2,1,out duplicate));return Start(duplicate,System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),"WindowsPowerShell\\v1.0\\powershell.exe"),"-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "+Quote(script)+" -RequestRoot "+Quote(requestRoot)+(waitForDesktop?" -WaitForDesktop":" -SecureUi"),"winsta0\\winlogon");}
         finally {if(duplicate!=IntPtr.Zero)CloseHandle(duplicate);if(token!=IntPtr.Zero)CloseHandle(token);CloseHandle(process);}
     }
     public static string NewProfile(string sid,string user) {var path=new StringBuilder(260);int hr=CreateProfile(sid,user,path,(uint)path.Capacity);if(hr<0)Marshal.ThrowExceptionForHR(hr);return path.ToString();}
-    public static int SecureForeground() {
+    static string ObjectName(IntPtr handle) {if(handle==IntPtr.Zero)throw new Win32Exception(Marshal.GetLastWin32Error());var name=new StringBuilder(128);int needed;Check(GetUserObjectInformation(handle,2,name,256,out needed));return name.ToString();}
+    public static string ThreadDesktopName() {return ObjectName(GetThreadDesktop(GetCurrentThreadId()));}
+    public static string WindowStationName() {return ObjectName(GetProcessWindowStation());}
+    public static string InputDesktopName() {
         IntPtr desktop=OpenInputDesktop(0,false,1);if(desktop==IntPtr.Zero)throw new Win32Exception(Marshal.GetLastWin32Error());
-        try {var name=new StringBuilder(128);int needed;Check(GetUserObjectInformation(desktop,2,name,256,out needed));if(!String.Equals(name.ToString(),"Winlogon",StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("Secure input desktop is not active.");}finally{CloseDesktop(desktop);}
+        try {return ObjectName(desktop);}finally{CloseDesktop(desktop);}
+    }
+    public static int SecureForeground() {
+        if(!String.Equals(InputDesktopName(),"Winlogon",StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("Secure input desktop is not active.");
         int pid;GetWindowThreadProcessId(GetForegroundWindow(),out pid);return pid;
     }
     public static string ForegroundClass() {var name=new StringBuilder(256);return GetClassName(GetForegroundWindow(),name,name.Capacity)>0?name.ToString():"unobservable";}

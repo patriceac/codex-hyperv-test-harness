@@ -1,4 +1,4 @@
-param([Parameter(Mandatory=$true)][string] $RequestRoot, [switch] $SecureUi)
+param([Parameter(Mandatory=$true)][string] $RequestRoot, [switch] $SecureUi, [switch] $WaitForDesktop)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'InstallerUacNative.ps1')
@@ -15,6 +15,26 @@ function Write-InstallerJson($Value, [string]$Path) {
     $temporary=$Path+'.tmp'
     [IO.File]::WriteAllText($temporary,($Value | ConvertTo-Json -Depth 30),[Text.UTF8Encoding]::new($false))
     Move-Item -LiteralPath $temporary -Destination $Path -Force
+}
+function Get-InstallerDesktopContext {
+    $value=[pscustomobject]@{Process=[CodexInstallerNative]::Observe($PID);WindowStation=[CodexInstallerNative]::WindowStationName();ThreadDesktop=[CodexInstallerNative]::ThreadDesktopName();InputDesktop=[CodexInstallerNative]::InputDesktopName()}
+    if($value.Process.SessionId -ne [int][CodexInstallerNative]::WTSGetActiveConsoleSessionId() -or $value.WindowStation -ine 'WinSta0' -or $value.ThreadDesktop -ine 'Winlogon'){throw 'Installer desktop helper is not on the console secure desktop.'}
+    $value
+}
+if($WaitForDesktop){
+    $ready=[ordered]@{Success=$false;Initial=$null;Ready=$null;Error=$null}
+    try {
+        $ready.Initial=Get-InstallerDesktopContext
+        $limit=[DateTime]::UtcNow.AddSeconds(120)
+        do {
+            $desktop=Get-InstallerDesktopContext
+            if($desktop.InputDesktop -ieq 'Default' -and [CodexInstallerNative]::ConsoleSessionFlags() -eq 1){$ready.Ready=$desktop;$ready.Success=$true;break}
+            if([DateTime]::UtcNow -ge $limit -or [DateTime]::UtcNow -ge [DateTimeOffset]::Parse($context.DeadlineUtc).UtcDateTime){throw 'The user input desktop did not become ready before installer launch.'}
+            Start-Sleep -Milliseconds 250
+        }while($true)
+    }catch{$ready.Error=$_.Exception.Message}
+    Write-InstallerJson $ready (Join-Path $RequestRoot 'desktop-ready.json')
+    exit
 }
 function Test-SameInstallerProcess($Expected) {
     $live=[CodexInstallerNative]::Observe($Expected.ProcessId)
@@ -60,6 +80,8 @@ if($SecureUi) {
     try {
         Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes,WindowsBase
         $gate=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $RequestRoot 'gate.json') | ConvertFrom-Json
+        $receipt['DesktopContext']=Get-InstallerDesktopContext
+        if($receipt.DesktopContext.Process.SessionId -ne $gate.Consent.SessionId){throw 'Secure handler and consent process are in different sessions.'}
         $imageLease=[CodexInstallerPathObservation]::OpenBoundFile($context.Job.executable,$policy.ExecutableSha256,2147483648)
         $window=Assert-InstallerSecurePrompt $gate -WaitForReady
         $passwordCondition=[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::IsPasswordProperty,$true)
@@ -273,6 +295,13 @@ try {
     Set-InstallerDirectoryAcl $sharedRoot $identity.Initiator.Sid
     $imageLease=[CodexInstallerPathObservation]::OpenBoundFile($context.Job.executable,$policy.ExecutableSha256,2147483648)
     $verifierLease=[CodexInstallerPathObservation]::OpenBoundFile((Join-Path $context.PayloadRoot $policy.Verifier.ExecutableRelativePath),$policy.Verifier.ExecutableSha256,2147483648)
+    # A first logon can expose Explorer and an unlocked WTS session before leaving Winlogon.
+    $ui=[CodexInstallerNative]::StartOnSecureDesktop($PSCommandPath,$RequestRoot,$true)
+    $readyLimit=[DateTime]::UtcNow.AddSeconds(130)
+    while(-not $ui.Exited){Assert-InstallerDeadline;if([DateTime]::UtcNow -gt $readyLimit){throw 'Input-desktop readiness handler timed out.'};Start-Sleep -Milliseconds 100}
+    $evidence['DesktopReady']=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $RequestRoot 'desktop-ready.json') | ConvertFrom-Json
+    $ui.Dispose();$ui=$null
+    if(-not $evidence.DesktopReady.Success){throw "Input desktop was not ready: $($evidence.DesktopReady.Error)"}
     $evidence.Before=Invoke-InstallerVerifier 'Before'
     $trace='CodexInstaller-'+$context.RequestId
     $etl=Join-Path $RequestRoot 'uac.etl'
@@ -312,7 +341,7 @@ try {
     $gate=[pscustomobject]@{Event=$event;Requester=$requester;Consent=$consent;Root=$root}
     $evidence.Prompt=$gate
     Write-InstallerJson $gate (Join-Path $RequestRoot 'gate.json')
-    $ui=[CodexInstallerNative]::StartOnSecureDesktop($PSCommandPath,$RequestRoot)
+    $ui=[CodexInstallerNative]::StartOnSecureDesktop($PSCommandPath,$RequestRoot,$false)
     $uiLimit=[DateTime]::UtcNow.AddSeconds(25)
     while(-not $ui.Exited){Assert-InstallerDeadline;if([DateTime]::UtcNow -gt $uiLimit){throw 'Secure UAC handler timed out.'};Start-Sleep -Milliseconds 100}
     $decision=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $RequestRoot 'decision.json') | ConvertFrom-Json

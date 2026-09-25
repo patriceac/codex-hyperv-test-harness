@@ -64,4 +64,12 @@ foreach($consoleFlags in @(-1,0,1)){
     if((& $ready) -ne ($consoleFlags -eq 1)){throw 'An unknown or locked console passed installer readiness, or an unlocked console was rejected.'}
     $count++
 }
+[void](Add-Type -TypeDefinition 'public static class InstallerDesktopTest { public static int Flags; public static int ConsoleSessionFlags() { return Flags; } }')
+$desktopGuard=$controller.Find({param($node) $node -is [Management.Automation.Language.IfStatementAst] -and $node.Clauses[0].Item1.Extent.Text.Contains('$desktop.InputDesktop')},$true)
+$ready=[scriptblock]::Create($desktopGuard.Clauses[0].Item1.Extent.Text.Replace('[CodexInstallerNative]','[InstallerDesktopTest]'))
+foreach($case in @(@{Desktop='Winlogon';Flags=1;Ready=$false},@{Desktop='Default';Flags=0;Ready=$false},@{Desktop='Default';Flags=1;Ready=$true})){
+    $desktop=[pscustomobject]@{InputDesktop=$case.Desktop};[InstallerDesktopTest]::Flags=$case.Flags
+    if((& $ready) -ne $case.Ready){throw 'Installer readiness accepted the sign-in desktop or a locked session.'}
+    $count++
+}
 [pscustomobject]@{Success=$true;ScenarioCount=$count}

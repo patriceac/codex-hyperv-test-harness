@@ -122,6 +122,8 @@ function Test-InstallerUacReceipt {
             $Receipt.InitiatingUser -cne $Policy.InitiatingUser -or $Receipt.ExecutableSha256 -cne $Policy.ExecutableSha256 -or
             $Receipt.VerifierSha256 -cne $Policy.Verifier.ExecutableSha256 -or $Receipt.Input.Success -isnot [bool] -or -not $Receipt.Input.Success -or $Receipt.Input.Decision -cne $Policy.Decision){return $false}
         $sid=$Receipt.Identity.Initiator.Sid
+        if($Receipt.DesktopReady.Success -isnot [bool] -or -not $Receipt.DesktopReady.Success -or $Receipt.DesktopReady.Ready.InputDesktop -ine 'Default' -or
+            $Receipt.DesktopReady.Ready.Process.SessionId -ne $Receipt.Before.Process.SessionId -or $Receipt.Input.DesktopContext.Process.SessionId -ne $Receipt.Before.Process.SessionId){return $false}
         foreach($phase in @('Before','After')){
             $record=$Receipt.$phase
             if($record.Phase -cne $phase -or $record.Process.UserSid -cne $sid -or $record.Process.Elevated -isnot [bool] -or $record.Process.Elevated -or
