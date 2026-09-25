@@ -84,6 +84,16 @@ if($SecureUi) {
         $receipt['DesktopContext']=Get-InstallerDesktopContext
         if($receipt.DesktopContext.Process.SessionId -ne $gate.Consent.SessionId){throw 'Secure handler and consent process are in different sessions.'}
         $imageLease=[CodexInstallerPathObservation]::OpenBoundFile($context.Job.executable,$policy.ExecutableSha256,2147483648)
+        if([CodexInstallerNative]::InputDesktopName() -ieq 'Default'){
+            $requester=Test-SameInstallerProcess $gate.Requester;$consent=Test-SameInstallerProcess $gate.Consent
+            Assert-InstallerPromptAttribution $gate.Event $requester $consent $gate.Root $context.Job.executable $policy.ExecutableSha256 $policy.ExecutableSha256 ([DateTime]::UtcNow)
+            $observed=[CodexInstallerNative]::ConsentWindows($consent.ProcessId)
+            if([CodexInstallerNative]::InputDesktopName() -ieq 'Default'){
+                $pending=Resolve-InstallerConsentActivationWindow $observed.Windows $consent.ProcessId
+                $receipt['PromptActivation']=[ordered]@{Window=$pending;Attempted=$true;ForegroundRequested=$false}
+                $receipt.PromptActivation.ForegroundRequested=[CodexInstallerNative]::ActivateConsentWindow($pending.Handle,$consent.ProcessId,$consent.CreationFileTime,$consent.SessionId,$pending.Class)
+            }
+        }
         $window=Assert-InstallerSecurePrompt $gate -WaitForReady
         $passwordCondition=[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::IsPasswordProperty,$true)
         $passwordNodes=$window.FindAll([Windows.Automation.TreeScope]::Descendants,$passwordCondition)

@@ -8,6 +8,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Text;
+using System.Threading;
 
 public sealed class CodexInstallerProcessIdentity {
     public int ProcessId, SessionId, IntegrityRid, ElevationType;
@@ -68,7 +69,10 @@ public static class CodexInstallerNative {
     [DllImport("advapi32.dll",SetLastError=true,CharSet=CharSet.Unicode)] static extern bool CreateProcessAsUser(IntPtr token,string application,StringBuilder command,IntPtr processAttributes,IntPtr threadAttributes,bool inherit,uint flags,IntPtr environment,string directory,ref StartupInfo startup,out ProcessInfo info);
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
     [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+    [DllImport("kernel32.dll",SetLastError=true)] static extern void SetLastError(uint error);
     [DllImport("user32.dll")] static extern IntPtr GetThreadDesktop(uint thread);
+    [DllImport("user32.dll",SetLastError=true)] static extern bool SetThreadDesktop(IntPtr desktop);
+    [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr window);
     [DllImport("user32.dll")] static extern IntPtr GetProcessWindowStation();
     [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr window,uint command);
     [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr window,uint flags);
@@ -173,11 +177,31 @@ public static class CodexInstallerNative {
                     var cls=new StringBuilder(256);GetClassName(window,cls,cls.Capacity);
                     windows.Add(new CodexInstallerWindow {Handle=window.ToInt64(),ProcessId=pid,Desktop=name,Class=cls.ToString(),Visible=IsWindowVisible(window)});return true;
                 };
-                bool okay=EnumDesktopWindows(desktop,callback,IntPtr.Zero);GC.KeepAlive(callback);
-                if(limit)throw new InvalidOperationException("Too many consent-owned windows.");Check(okay);
+                SetLastError(0);bool okay=EnumDesktopWindows(desktop,callback,IntPtr.Zero);int error=Marshal.GetLastWin32Error();GC.KeepAlive(callback);
+                if(limit)throw new InvalidOperationException("Too many consent-owned windows.");
+                if(!okay && error!=0)throw new Win32Exception(error);
             }catch(Exception error){errors.Add(name+": "+error.Message);}finally{CloseDesktop(desktop);}
         }
         return new CodexInstallerWindowsObservation {Windows=windows.ToArray(),Errors=errors.ToArray()};
+    }
+    public static bool ActivateConsentWindow(long handle,int expectedPid,long created,int session,string expectedClass) {
+        RequireSystem();Exception failure=null;bool requested=false;
+        var thread=new Thread(delegate() {
+            IntPtr original=GetThreadDesktop(GetCurrentThreadId()),desktop=OpenDesktop("Default",0,false,0x81);
+            try {
+                if(desktop==IntPtr.Zero)throw new Win32Exception(Marshal.GetLastWin32Error());Check(SetThreadDesktop(desktop));
+                string input=InputDesktopName();if(String.Equals(input,"Winlogon",StringComparison.OrdinalIgnoreCase))return;
+                if(!String.Equals(input,"Default",StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("Unexpected input desktop before prompt activation.");
+                var owner=Observe(expectedPid);
+                if(owner.CreationFileTime!=created || owner.SessionId!=session || session!=(int)WTSGetActiveConsoleSessionId() || owner.UserSid!="S-1-5-18" || !String.Equals(owner.ImagePath,System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),"consent.exe"),StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("Consent identity changed before activation.");
+                var window=new IntPtr(handle);int pid;GetWindowThreadProcessId(window,out pid);var cls=new StringBuilder(256);GetClassName(window,cls,cls.Capacity);
+                if(pid!=expectedPid || cls.ToString()!=expectedClass || !IsWindowVisible(window))throw new InvalidOperationException("Consent activation window changed.");
+                requested=SetForegroundWindow(window);
+            }catch(Exception error){failure=error;}
+            finally{SetThreadDesktop(original);if(desktop!=IntPtr.Zero)CloseDesktop(desktop);}
+        });
+        thread.IsBackground=true;thread.Start();if(!thread.Join(3000))throw new TimeoutException("Consent window activation timed out.");
+        if(failure!=null)throw failure;return requested;
     }
     public static int SecureForeground() {
         if(!String.Equals(InputDesktopName(),"Winlogon",StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("Secure input desktop is not active.");

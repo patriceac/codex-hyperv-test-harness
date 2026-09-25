@@ -17,6 +17,17 @@ foreach($change in @(@('RequestorProcessId',101),@('EmitterProcessId',201),@('Ap
 $rejected=$false
 try{Assert-InstallerPromptAttribution ([pscustomobject]$template) $requester $consent $root 'D:\Payload\setup.exe' ('B'*64) ('A'*64) $now}catch{$rejected=$true}
 if(-not $rejected){throw 'Prompt gate accepted a wrong image hash.'};$count++
+$interim=[pscustomobject]@{Handle=66210;ProcessId=200;Desktop='Default';Class='$$$Secure UAP Dummy Window Class For Interim Dialog';Visible=$true}
+$ime=[pscustomobject]@{Handle=66214;ProcessId=200;Desktop='Default';Class='IME';Visible=$false}
+if((Resolve-InstallerConsentActivationWindow @($interim,$ime) 200).Handle -ne 66210){throw 'The attributed interim window was not selected.'};$count++
+foreach($change in @(@('ProcessId',201),@('Desktop','Winlogon'),@('Class','Unrelated'),@('Visible',$false))){
+    $window=$interim | ConvertTo-Json | ConvertFrom-Json;$window.($change[0])=$change[1];$rejected=$false
+    try{Resolve-InstallerConsentActivationWindow @($window,$ime) 200}catch{$rejected=$true}
+    if(-not $rejected){throw "Prompt activation accepted a changed $($change[0])."};$count++
+}
+$rejected=$false
+try{Resolve-InstallerConsentActivationWindow @($interim,$interim) 200}catch{$rejected=$true}
+if(-not $rejected){throw 'Prompt activation accepted ambiguous windows.'};$count++
 $controller=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot '..\GuestInstallerUac.ps1'),[ref]$null,[ref]$null)
 $parser=$controller.Find({param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'ForEach-Object' -and $node.Extent.Text.Contains('$xml.Event.EventData.Data')},$true).CommandElements[-1].ScriptBlock.GetScriptBlock()
 $nativeEvent=[pscustomobject]@{ProviderName='Microsoft-Antimalware-UacScan';Id=1201;TimeCreated=$now}

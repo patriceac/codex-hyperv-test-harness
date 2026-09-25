@@ -10,3 +10,8 @@ function Assert-InstallerPromptAttribution {
         $Root.Elevated -or $Root.IntegrityRid -ne 8192 -or $Consent.SessionId -ne $Root.SessionId -or $Consent.UserSid -cne 'S-1-5-18' -or
         $Consent.ImagePath -ine ($env:SystemRoot+'\System32\consent.exe')) { throw 'UAC process tokens or session are inconsistent.' }
 }
+function Resolve-InstallerConsentActivationWindow($Windows,[int]$ConsentProcessId) {
+    $matches=@($Windows | Where-Object {$_.ProcessId -eq $ConsentProcessId -and $_.Desktop -ceq 'Default' -and $_.Class -ceq '$$$Secure UAP Dummy Window Class For Interim Dialog' -and $_.Visible -is [bool] -and $_.Visible -and $_.Handle -gt 0})
+    if($matches.Count -ne 1){throw 'Deferred UAC activation window is missing or ambiguous.'}
+    $matches[0]
+}
