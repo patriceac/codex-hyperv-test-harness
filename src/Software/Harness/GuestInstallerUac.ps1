@@ -23,11 +23,17 @@ function Test-SameInstallerProcess($Expected) {
     }
     $live
 }
-function Assert-InstallerSecurePrompt($Gate) {
-    $requester=Test-SameInstallerProcess $Gate.Requester
-    $consent=Test-SameInstallerProcess $Gate.Consent
-    Assert-InstallerPromptAttribution $Gate.Event $requester $consent $Gate.Root $context.Job.executable $policy.ExecutableSha256 $policy.ExecutableSha256 ([DateTime]::UtcNow)
-    if([CodexInstallerNative]::SecureForeground() -ne $consent.ProcessId){throw 'The attributed UAC prompt is not the secure foreground.'}
+function Assert-InstallerSecurePrompt($Gate,[switch]$WaitForReady) {
+    $readyUntil=[DateTime]::UtcNow.AddSeconds(5)
+    do {
+        $requester=Test-SameInstallerProcess $Gate.Requester
+        $consent=Test-SameInstallerProcess $Gate.Consent
+        Assert-InstallerPromptAttribution $Gate.Event $requester $consent $Gate.Root $context.Job.executable $policy.ExecutableSha256 $policy.ExecutableSha256 ([DateTime]::UtcNow)
+        $foreground=[CodexInstallerNative]::SecureForeground()
+        if($foreground -eq $consent.ProcessId){break}
+        if(-not $WaitForReady -or [DateTime]::UtcNow -ge $readyUntil){throw "The attributed UAC prompt is not the secure foreground (expected PID $($consent.ProcessId), observed $foreground)."}
+        Start-Sleep -Milliseconds 100
+    }while($true)
     $condition=[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ProcessIdProperty,[int]$consent.ProcessId)
     $windows=@([Windows.Automation.AutomationElement]::RootElement.FindAll([Windows.Automation.TreeScope]::Children,$condition) | Where-Object {$_.Current.ClassName -ceq 'Credential Dialog Xaml Host' -and $_.Current.ControlType -eq [Windows.Automation.ControlType]::Window})
     if($windows.Count -ne 1 -or -not $windows[0].Current.IsEnabled -or $windows[0].Current.IsOffscreen){throw 'UAC window is unknown or ambiguous.'}
@@ -51,7 +57,7 @@ if($SecureUi) {
         Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes,WindowsBase
         $gate=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $RequestRoot 'gate.json') | ConvertFrom-Json
         $imageLease=[CodexInstallerPathObservation]::OpenBoundFile($context.Job.executable,$policy.ExecutableSha256,2147483648)
-        $window=Assert-InstallerSecurePrompt $gate
+        $window=Assert-InstallerSecurePrompt $gate -WaitForReady
         $passwordCondition=[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::IsPasswordProperty,$true)
         $passwordNodes=$window.FindAll([Windows.Automation.TreeScope]::Descendants,$passwordCondition)
         $buttonId=if($policy.Decision -ceq 'Decline'){'CancelButton'}else{'OkButton'}
