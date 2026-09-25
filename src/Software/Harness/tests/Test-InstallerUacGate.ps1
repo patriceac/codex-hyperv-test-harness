@@ -31,7 +31,7 @@ $background=[pscustomobject]@{Current=[pscustomobject]@{ClassName='$$$Secure UAP
 $selected=@(@($dialog,$background) | Where-Object $windowFilter)
 if($selected.Count -ne 1 -or -not [object]::ReferenceEquals($selected[0],$dialog)){throw 'The consent background pane was confused with its credential dialog.'}
 $count++
-[void](Add-Type -TypeDefinition 'public static class InstallerForegroundTest { public static System.Collections.Generic.Queue<int> Values = new System.Collections.Generic.Queue<int>(); public static int SecureForeground() { return Values.Dequeue(); } }')
+[void](Add-Type -TypeDefinition 'public static class InstallerForegroundTest { public static System.Collections.Generic.Queue<int> Values = new System.Collections.Generic.Queue<int>(); public static int SecureForeground() { int value=Values.Dequeue(); if(value<0)throw new System.InvalidOperationException("Secure input desktop is not active."); return value; } }')
 $promptFunction=$controller.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Assert-InstallerSecurePrompt'},$true)
 $waitLoop=$promptFunction.Find({param($node) $node -is [Management.Automation.Language.DoWhileStatementAst]},$true)
 $wait=[scriptblock]::Create($waitLoop.Extent.Text.Replace('[CodexInstallerNative]','[InstallerForegroundTest]'))
@@ -41,6 +41,8 @@ $context=[pscustomobject]@{Job=[pscustomobject]@{executable='D:\Payload\setup.ex
 $policy=[pscustomobject]@{ExecutableSha256=('A'*64)}
 foreach($case in @(
     @{Wait=$true;Expired=$false;Values=@(0,200);Rejected=$false;Checks=4},
+    @{Wait=$true;Expired=$false;Values=@(-1,200);Rejected=$false;Checks=4},
+    @{Wait=$false;Expired=$false;Values=@(-1,200);Rejected=$true;Checks=2},
     @{Wait=$false;Expired=$false;Values=@(0,200);Rejected=$true;Checks=2},
     @{Wait=$true;Expired=$true;Values=@(0);Rejected=$true;Checks=2}
 )){
@@ -50,7 +52,7 @@ foreach($case in @(
     $readyUntil=[DateTime]::UtcNow.AddSeconds($(if($case.Expired){-1}else{1}))
     $script:liveChecks=0;$message=$null
     try{& $wait}catch{$message=$_.Exception.Message}
-    if($case.Rejected){if($message -notlike 'The attributed UAC prompt is not the secure foreground*'){throw 'The foreground gate did not reject the missing prompt.'}}
+    if($case.Rejected){if($message -notlike 'The attributed UAC prompt is not the secure foreground*' -and $message -notlike '*Secure input desktop is not active.*'){throw 'The foreground gate did not reject the missing prompt.'}}
     elseif($message){throw $message}
     if($script:liveChecks -ne $case.Checks){throw 'The readiness wait did not revalidate process identities or immediate input checks waited.'}
     $count++
