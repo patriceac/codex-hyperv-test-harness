@@ -80,9 +80,14 @@ foreach($consoleFlags in @(-1,0,1)){
 [void](Add-Type -TypeDefinition 'public static class InstallerDesktopTest { public static int Flags; public static int ConsoleSessionFlags() { return Flags; } }')
 $desktopGuard=$controller.Find({param($node) $node -is [Management.Automation.Language.IfStatementAst] -and $node.Clauses[0].Item1.Extent.Text.Contains('$desktop.InputDesktop')},$true)
 $ready=[scriptblock]::Create($desktopGuard.Clauses[0].Item1.Extent.Text.Replace('[CodexInstallerNative]','[InstallerDesktopTest]'))
-foreach($case in @(@{Desktop='Winlogon';Flags=1;Ready=$false},@{Desktop='Default';Flags=0;Ready=$false},@{Desktop='Default';Flags=1;Ready=$true})){
-    $desktop=[pscustomobject]@{InputDesktop=$case.Desktop};[InstallerDesktopTest]::Flags=$case.Flags
+foreach($case in @(@{Desktop='Winlogon';Flags=1;Idle=200000;Ready=$false},@{Desktop='Default';Flags=0;Idle=200000;Ready=$false},@{Desktop='Default';Flags=1;Idle=200000;Ready=$true},@{Desktop='Default';Flags=1;Idle=199999;Ready=$false})){
+    $desktop=[pscustomobject]@{InputDesktop=$case.Desktop;ForegroundTiming=[pscustomobject]@{LockTimeoutMilliseconds=200000;IdleMilliseconds=$case.Idle}};[InstallerDesktopTest]::Flags=$case.Flags
     if((& $ready) -ne $case.Ready){throw 'Installer readiness accepted the sign-in desktop or a locked session.'}
     $count++
+}
+. (Join-Path $PSScriptRoot '..\InstallerUacNative.ps1')
+Initialize-InstallerNative
+foreach($case in @(@{Now=200500;Last=500;Idle=200000},@{Now=100;Last=4294967196;Idle=200},@{Now=100;Last=101;Idle=0})){
+    if([CodexInstallerNative]::IdleMilliseconds([uint32]$case.Now,[uint32]$case.Last) -ne $case.Idle){throw 'Session idle calculation mishandled elapsed time, tick wrap, or a future input timestamp.'};$count++
 }
 [pscustomobject]@{Success=$true;ScenarioCount=$count}

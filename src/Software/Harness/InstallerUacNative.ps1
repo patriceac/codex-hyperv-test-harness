@@ -18,6 +18,7 @@ public sealed class CodexInstallerProcessIdentity {
 }
 public sealed class CodexInstallerWindow {public long Handle;public int ProcessId;public string Desktop,Class;public bool Visible;}
 public sealed class CodexInstallerWindowsObservation {public CodexInstallerWindow[] Windows;public string[] Errors;}
+public sealed class CodexInstallerForegroundTiming {public uint LockTimeoutMilliseconds,IdleMilliseconds;}
 public sealed class CodexInstallerProcess : IDisposable {
     internal IntPtr Handle;
     public CodexInstallerProcessIdentity Identity;
@@ -28,6 +29,7 @@ public sealed class CodexInstallerProcess : IDisposable {
 public static class CodexInstallerNative {
     [StructLayout(LayoutKind.Sequential,CharSet=CharSet.Unicode)] struct StartupInfo { public int cb;public string reserved,desktop,title;public int x,y,width,height,xChars,yChars,fill,flags;public short show,reserved2;public IntPtr reservedPointer,input,output,error; }
     [StructLayout(LayoutKind.Sequential)] struct ProcessInfo {public IntPtr process,thread;public int pid,tid;}
+    [StructLayout(LayoutKind.Sequential)] struct LastInputInfo {public uint size,tick;}
     [StructLayout(LayoutKind.Sequential)] struct Luid {public uint low;public int high;}
     [StructLayout(LayoutKind.Sequential)] struct Privilege {public uint count;public Luid luid;public uint attributes;}
     [StructLayout(LayoutKind.Sequential)] struct SidAttributes {public IntPtr sid;public uint attributes;}
@@ -73,6 +75,8 @@ public static class CodexInstallerNative {
     [DllImport("user32.dll")] static extern IntPtr GetThreadDesktop(uint thread);
     [DllImport("user32.dll",SetLastError=true)] static extern bool SetThreadDesktop(IntPtr desktop);
     [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr window);
+    [DllImport("user32.dll",SetLastError=true)] static extern bool GetLastInputInfo(ref LastInputInfo info);
+    [DllImport("user32.dll",SetLastError=true,CharSet=CharSet.Unicode)] static extern bool SystemParametersInfo(uint action,uint parameter,out uint value,uint flags);
     [DllImport("user32.dll")] static extern IntPtr GetProcessWindowStation();
     [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr window,uint command);
     [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr window,uint flags);
@@ -184,24 +188,43 @@ public static class CodexInstallerNative {
         }
         return new CodexInstallerWindowsObservation {Windows=windows.ToArray(),Errors=errors.ToArray()};
     }
-    public static bool ActivateConsentWindow(long handle,int expectedPid,long created,int session,string expectedClass) {
-        RequireSystem();Exception failure=null;bool requested=false;
+    static void OnDefaultDesktop(Action action) {
+        RequireSystem();Exception failure=null;
         var thread=new Thread(delegate() {
             IntPtr original=GetThreadDesktop(GetCurrentThreadId()),desktop=OpenDesktop("Default",0,false,0x81);
             try {
                 if(desktop==IntPtr.Zero)throw new Win32Exception(Marshal.GetLastWin32Error());Check(SetThreadDesktop(desktop));
-                string input=InputDesktopName();if(String.Equals(input,"Winlogon",StringComparison.OrdinalIgnoreCase))return;
-                if(!String.Equals(input,"Default",StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("Unexpected input desktop before prompt activation.");
-                var owner=Observe(expectedPid);
-                if(owner.CreationFileTime!=created || owner.SessionId!=session || session!=(int)WTSGetActiveConsoleSessionId() || owner.UserSid!="S-1-5-18" || !String.Equals(owner.ImagePath,System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),"consent.exe"),StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("Consent identity changed before activation.");
-                var window=new IntPtr(handle);int pid;GetWindowThreadProcessId(window,out pid);var cls=new StringBuilder(256);GetClassName(window,cls,cls.Capacity);
-                if(pid!=expectedPid || cls.ToString()!=expectedClass || !IsWindowVisible(window))throw new InvalidOperationException("Consent activation window changed.");
-                requested=SetForegroundWindow(window);
+                action();
             }catch(Exception error){failure=error;}
             finally{SetThreadDesktop(original);if(desktop!=IntPtr.Zero)CloseDesktop(desktop);}
         });
-        thread.IsBackground=true;thread.Start();if(!thread.Join(3000))throw new TimeoutException("Consent window activation timed out.");
-        if(failure!=null)throw failure;return requested;
+        thread.IsBackground=true;thread.Start();if(!thread.Join(3000))throw new TimeoutException("Default desktop operation timed out.");
+        if(failure!=null)throw failure;
+    }
+    public static uint IdleMilliseconds(uint now,uint lastInput) {
+        uint elapsed=unchecked(now-lastInput);return elapsed<=Int32.MaxValue?elapsed:0;
+    }
+    public static CodexInstallerForegroundTiming ForegroundTiming() {
+        var value=new CodexInstallerForegroundTiming();
+        OnDefaultDesktop(delegate() {
+            Check(SystemParametersInfo(0x2000,0,out value.LockTimeoutMilliseconds,0));
+            var input=new LastInputInfo();input.size=(uint)Marshal.SizeOf(input);Check(GetLastInputInfo(ref input));
+            value.IdleMilliseconds=IdleMilliseconds(unchecked((uint)Environment.TickCount),input.tick);
+        });
+        return value;
+    }
+    public static bool ActivateConsentWindow(long handle,int expectedPid,long created,int session,string expectedClass) {
+        bool requested=false;
+        OnDefaultDesktop(delegate() {
+            string input=InputDesktopName();if(String.Equals(input,"Winlogon",StringComparison.OrdinalIgnoreCase))return;
+            if(!String.Equals(input,"Default",StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("Unexpected input desktop before prompt activation.");
+            var owner=Observe(expectedPid);
+            if(owner.CreationFileTime!=created || owner.SessionId!=session || session!=(int)WTSGetActiveConsoleSessionId() || owner.UserSid!="S-1-5-18" || !String.Equals(owner.ImagePath,System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),"consent.exe"),StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("Consent identity changed before activation.");
+            var window=new IntPtr(handle);int pid;GetWindowThreadProcessId(window,out pid);var cls=new StringBuilder(256);GetClassName(window,cls,cls.Capacity);
+            if(pid!=expectedPid || cls.ToString()!=expectedClass || !IsWindowVisible(window))throw new InvalidOperationException("Consent activation window changed.");
+            requested=SetForegroundWindow(window);
+        });
+        return requested;
     }
     public static int SecureForeground() {
         if(!String.Equals(InputDesktopName(),"Winlogon",StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("Secure input desktop is not active.");
