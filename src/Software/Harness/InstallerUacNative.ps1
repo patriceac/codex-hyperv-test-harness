@@ -16,7 +16,7 @@ public sealed class CodexInstallerProcessIdentity {
     public string ImagePath, UserSid;
     public bool Elevated, AdministratorGroup, AdministratorDenyOnly;
 }
-public sealed class CodexInstallerWindow {public long Handle;public int ProcessId;public string Desktop,Class;public bool Visible;}
+public sealed class CodexInstallerWindow {public long Handle;public int ProcessId;public string Desktop,Class;public bool Visible,Minimized;}
 public sealed class CodexInstallerWindowsObservation {public CodexInstallerWindow[] Windows;public string[] Errors;}
 public sealed class CodexInstallerProcess : IDisposable {
     internal IntPtr Handle;
@@ -73,6 +73,7 @@ public static class CodexInstallerNative {
     [DllImport("user32.dll")] static extern IntPtr GetThreadDesktop(uint thread);
     [DllImport("user32.dll",SetLastError=true)] static extern bool SetThreadDesktop(IntPtr desktop);
     [DllImport("user32.dll",SetLastError=true,CharSet=CharSet.Unicode)] static extern IntPtr SendMessageTimeout(IntPtr window,uint message,UIntPtr wparam,IntPtr lparam,uint flags,uint timeout,out UIntPtr result);
+    [DllImport("user32.dll")] static extern bool IsIconic(IntPtr window);
     [DllImport("user32.dll")] static extern IntPtr GetProcessWindowStation();
     [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr window,uint command);
     [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr window,uint flags);
@@ -175,7 +176,7 @@ public static class CodexInstallerNative {
                     int pid;GetWindowThreadProcessId(window,out pid);if(pid!=expectedPid)return true;
                     if(windows.Count>=32){limit=true;return false;}
                     var cls=new StringBuilder(256);GetClassName(window,cls,cls.Capacity);
-                    windows.Add(new CodexInstallerWindow {Handle=window.ToInt64(),ProcessId=pid,Desktop=name,Class=cls.ToString(),Visible=IsWindowVisible(window)});return true;
+                    windows.Add(new CodexInstallerWindow {Handle=window.ToInt64(),ProcessId=pid,Desktop=name,Class=cls.ToString(),Visible=IsWindowVisible(window),Minimized=IsIconic(window)});return true;
                 };
                 SetLastError(0);bool okay=EnumDesktopWindows(desktop,callback,IntPtr.Zero);int error=Marshal.GetLastWin32Error();GC.KeepAlive(callback);
                 if(limit)throw new InvalidOperationException("Too many consent-owned windows.");
@@ -196,8 +197,8 @@ public static class CodexInstallerNative {
                 if(owner.CreationFileTime!=created || owner.SessionId!=session || session!=(int)WTSGetActiveConsoleSessionId() || owner.UserSid!="S-1-5-18" || !String.Equals(owner.ImagePath,System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),"consent.exe"),StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("Consent identity changed before activation.");
                 var window=new IntPtr(handle);int pid;GetWindowThreadProcessId(window,out pid);var cls=new StringBuilder(256);GetClassName(window,cls,cls.Capacity);
                 if(pid!=expectedPid || cls.ToString()!=expectedClass || !IsWindowVisible(window))throw new InvalidOperationException("Consent activation window changed.");
-                // Notify only the attributed interim window; secure foreground is verified separately.
-                UIntPtr result;requested=SendMessageTimeout(window,0x0006,new UIntPtr(1),IntPtr.Zero,0x23,2000,out result)!=IntPtr.Zero;
+                // Restore only the attributed interim window; secure foreground is verified separately.
+                UIntPtr result;requested=SendMessageTimeout(window,0x0112,new UIntPtr(0xF120),IntPtr.Zero,0x23,2000,out result)!=IntPtr.Zero;
             }catch(Exception error){failure=error;}
             finally{SetThreadDesktop(original);if(desktop!=IntPtr.Zero)CloseDesktop(desktop);}
         });
