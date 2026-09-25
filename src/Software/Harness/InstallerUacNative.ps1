@@ -64,6 +64,8 @@ public static class CodexInstallerNative {
     [DllImport("advapi32.dll")] static extern IntPtr GetSidSubAuthority(IntPtr sid,uint index);
     [DllImport("advapi32.dll",SetLastError=true,CharSet=CharSet.Unicode)] static extern bool CreateProcessAsUser(IntPtr token,string application,StringBuilder command,IntPtr processAttributes,IntPtr threadAttributes,bool inherit,uint flags,IntPtr environment,string directory,ref StartupInfo startup,out ProcessInfo info);
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr window,uint command);
+    [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr window,uint flags);
     [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr window,StringBuilder name,int length);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window,out int pid);
     [DllImport("user32.dll",SetLastError=true)] static extern IntPtr OpenInputDesktop(uint flags,bool inherit,uint access);
@@ -148,6 +150,8 @@ public static class CodexInstallerNative {
         int pid;GetWindowThreadProcessId(GetForegroundWindow(),out pid);return pid;
     }
     public static string ForegroundClass() {var name=new StringBuilder(256);return GetClassName(GetForegroundWindow(),name,name.Capacity)>0?name.ToString():"unobservable";}
+    public static int WindowOwnerProcess(int window) {int pid;GetWindowThreadProcessId(GetWindow(new IntPtr(window),4),out pid);return pid;}
+    public static int WindowRootOwnerProcess(int window) {int pid;GetWindowThreadProcessId(GetAncestor(new IntPtr(window),3),out pid);return pid;}
     public static void TypeSecureCharacter(ushort value,int expectedConsentPid) {
         if(SecureForeground()!=expectedConsentPid)throw new InvalidOperationException("Secure foreground changed.");
         var events=new Input[2];events[0].type=1;events[0].data.keyboard.scan=value;events[0].data.keyboard.flags=4;events[1]=events[0];events[1].data.keyboard.flags=6;

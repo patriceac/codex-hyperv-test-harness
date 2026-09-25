@@ -97,7 +97,23 @@ if($SecureUi) {
         $receipt.InputStarted=$true
         $invoke.Invoke()
         $receipt.Success=$true
-    } catch {$receipt.Error=$_.Exception.Message}
+    } catch {
+        $receipt.Error=$_.Exception.Message
+        if(-not $receipt.InputStarted){
+            try {
+                $foreground=[CodexInstallerNative]::SecureForeground()
+                $receipt['Foreground']=[CodexInstallerNative]::Observe($foreground)
+                $condition=[Windows.Automation.OrCondition]::new([Windows.Automation.Condition[]]@(
+                    [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ProcessIdProperty,[int]$gate.Consent.ProcessId),
+                    [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ProcessIdProperty,[int]$foreground)))
+                $receipt['UiMetadata']=@([Windows.Automation.AutomationElement]::RootElement.FindAll([Windows.Automation.TreeScope]::Descendants,$condition) | Select-Object -First 96 | ForEach-Object {
+                    $c=$_.Current;$parent=[Windows.Automation.TreeWalker]::RawViewWalker.GetParent($_)
+                    # Never read control names or values; collect only pre-input ownership and control metadata.
+                    [pscustomobject]@{ProcessId=$c.ProcessId;ParentProcessId=$(if($parent){$parent.Current.ProcessId}else{0});Class=$c.ClassName;AutomationId=$c.AutomationId;Type=$c.ControlType.ProgrammaticName;Password=$c.IsPassword;Focused=$c.HasKeyboardFocus;Enabled=$c.IsEnabled;Offscreen=$c.IsOffscreen;Handle=$c.NativeWindowHandle;OwnerProcessId=[CodexInstallerNative]::WindowOwnerProcess($c.NativeWindowHandle);RootOwnerProcessId=[CodexInstallerNative]::WindowRootOwnerProcess($c.NativeWindowHandle)}
+                })
+            }catch{$receipt['UiMetadataError']='Unavailable'}
+        }
+    }
     finally {
         if($secret){[Array]::Clear($secret,0,$secret.Length)}
         if($imageLease){$imageLease.Dispose()}
