@@ -93,4 +93,21 @@ $harvest=$hostAst.Find({param($node) $node -is [Management.Automation.Language.I
     if(-not $failureEvidence.Retained){throw 'An installer failure skipped bounded evidence collection.'}
 }
 $count++
+# Execute the actual guest probe body with policy/task/file mocks; never change host policy.
+$probeAst=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot '..\InstallerUac.ps1'),[ref]$null,[ref]$null)
+$childSource=$probeAst.Find({param($node) $node -is [Management.Automation.Language.StringConstantExpressionAst] -and $node.Value.Contains('$value=Invoke-Command -VMName')},$true).Value
+$childAst=[Management.Automation.Language.Parser]::ParseInput($childSource,[ref]$null,[ref]$null)
+$remote=$childAst.Find({param($node) $node -is [Management.Automation.Language.ScriptBlockExpressionAst] -and $node.Parent -is [Management.Automation.Language.CommandAst] -and $node.Parent.GetCommandName() -eq 'Invoke-Command'},$true)
+$gatePath=Join-Path $PSScriptRoot '..\InstallerUacGate.ps1'
+& {
+    $script:probePolicyApplied=$false
+    function Set-ExecutionPolicy {[CmdletBinding()]param($Scope,$ExecutionPolicy,[switch]$Force) if($Scope -cne 'Process' -or $ExecutionPolicy -cne 'Bypass' -or -not $Force){throw 'The probe attempted a persistent or unsupported execution-policy change.'};$script:probePolicyApplied=$true}
+    function Join-Path {param($Path,$ChildPath) if($ChildPath -ceq 'InstallerUacGate.ps1'){if(-not $script:probePolicyApplied){throw 'The probe imported a script before configuring its own process.'};$gatePath}else{[IO.Path]::Combine($Path,$ChildPath)}}
+    function Test-Path {param($LiteralPath,$PathType) $false}
+    function Get-ScheduledTask {[CmdletBinding()]param($TaskName) [pscustomobject]@{State='Ready'}}
+    function Get-ScheduledTaskInfo {[CmdletBinding()]param([Parameter(ValueFromPipeline)]$InputObject) process{[pscustomobject]@{LastRunTime=$now;LastTaskResult=0}}}
+    $snapshot=& $remote.ScriptBlock.GetScriptBlock() 'C:\synthetic-private' 'C:\synthetic-outbox'
+    if(-not $script:probePolicyApplied -or -not $snapshot.TaskRan -or $snapshot.Complete){throw 'The scoped guest probe did not return its real projected snapshot.'}
+}
+$count++
 @{Success=$true;ScenarioCount=$count} | ConvertTo-Json

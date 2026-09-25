@@ -17,6 +17,7 @@ try {
     $credential=[Management.Automation.PSCredential]::new($saved.UserName,(ConvertTo-SecureString $saved.Password -AsPlainText -Force))
     $value=Invoke-Command -VMName $data.VmName -Credential $credential -ScriptBlock {
         param($Root,$Outbox)
+        Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force -ErrorAction Stop
         . (Join-Path $Root 'InstallerUacGate.ps1')
         Get-InstallerStatusSnapshot $Root $Outbox
     } -ArgumentList $data.GuestRoot,$data.GuestOutbox
