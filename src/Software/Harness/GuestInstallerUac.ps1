@@ -132,7 +132,7 @@ function Assert-InstallerDeadline {
     if([DateTime]::UtcNow -ge [DateTimeOffset]::Parse($context.DeadlineUtc).UtcDateTime){throw 'Installer workflow exceeded the request deadline.'}
 }
 function Read-InstallerBoundJson([string]$Path) {
-    $lease=[CodexInstallerPathObservation]::OpenBoundFile($Path,$null,1048576)
+    $lease=[CodexInstallerPathObservation]::OpenBoundFile($Path,[NullString]::Value,1048576)
     try {$reader=[IO.StreamReader]::new($lease.Stream,[Text.Encoding]::UTF8,$true);try{$reader.ReadToEnd() | ConvertFrom-Json}finally{$reader.Dispose()}}finally{$lease.Dispose()}
 }
 function Invoke-InstallerVerifier([string]$Phase) {

@@ -33,4 +33,10 @@ try {
 $rejected=$false
 try{$lease=[CodexInstallerPathObservation]::OpenBoundFile($path,('A'*64),1048576);$lease.Dispose()}catch{$rejected=$true}
 if(-not $rejected){throw 'File lease accepted the wrong executable hash.'}
-@{Success=$true;ScenarioCount=6} | ConvertTo-Json
+$controller=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot '..\GuestInstallerUac.ps1'),[ref]$null,[ref]$null)
+$readerFunction=$controller.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Read-InstallerBoundJson'},$true)
+Invoke-Expression $readerFunction.Extent.Text
+$jsonPath=Join-Path $root 'result.json'
+[IO.File]::WriteAllText($jsonPath,'{"passed":true}')
+if(-not (Read-InstallerBoundJson $jsonPath).passed){throw 'Bound verifier JSON could not be read without an executable hash.'}
+@{Success=$true;ScenarioCount=7} | ConvertTo-Json

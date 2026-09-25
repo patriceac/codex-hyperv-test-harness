@@ -65,6 +65,12 @@ function New-HarnessReleaseAcceptanceInvocations {
     )
 
     $canaryRoot = Join-Path $SoftwareRoot 'Canaries'
+    foreach($name in @('InstallerSelfElevation','InstallerStandardUser','InstallerDecline')) {
+        [pscustomobject][ordered]@{
+            Name=$name
+            Parameters=@{ArtifactPath=$canaryRoot;ExecutableRelativePath='InstallerUacCanary.exe';Arguments=$name;InstallerUacPlanPath=(Join-Path $InstallerPlanRoot ($name+'.json'));BrokerRoot=$BrokerRoot;QueueTimeoutSeconds=900;ExecutionTimeoutSeconds=600;ThrowOnFailure=$true}
+        }
+    }
     @(
         [pscustomobject][ordered]@{
             Name = 'LegacyLaunch'
@@ -202,12 +208,6 @@ function New-HarnessReleaseAcceptanceInvocations {
             }
         }
     )
-    foreach($name in @('InstallerSelfElevation','InstallerStandardUser','InstallerDecline')) {
-        [pscustomobject][ordered]@{
-            Name=$name
-            Parameters=@{ArtifactPath=$canaryRoot;ExecutableRelativePath='InstallerUacCanary.exe';Arguments=$name;InstallerUacPlanPath=(Join-Path $InstallerPlanRoot ($name+'.json'));BrokerRoot=$BrokerRoot;QueueTimeoutSeconds=900;ExecutionTimeoutSeconds=600;ThrowOnFailure=$true}
-        }
-    }
 }
 
 if ($InvocationPreflightOnly) {

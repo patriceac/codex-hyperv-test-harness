@@ -372,7 +372,7 @@ function New-ReleasePlan {
         Operations = $operations.ToArray()
         PrePromotionQualification = 'Exact source parse, build, deterministic tests, invocation contracts, and public-payload audit. No live shadow pool is claimed.'
         LiveShadowPoolAvailable = $false
-        Acceptance = @('LegacyLaunch','Utf8ActionName','KeyboardInput','ExpectedGuestPowerOff','SystemPrompts','GuestRestart','InstalledGuestPowerOff','GuestRestartFailure','InstallerSelfElevation','InstallerStandardUser','InstallerDecline')
+        Acceptance = @('InstallerSelfElevation','InstallerStandardUser','InstallerDecline','LegacyLaunch','Utf8ActionName','KeyboardInput','ExpectedGuestPowerOff','SystemPrompts','GuestRestart','InstalledGuestPowerOff','GuestRestartFailure')
         RecoveryRefreshCount = 1
         AutomaticRollback = $false
         FailurePolicy = 'Stop at the failed checkpoint, preserve valid completed phases, and resume or supersede with a reviewed fix-forward candidate.'
@@ -861,7 +861,7 @@ try {
     $terminalResult = [ordered]@{
         Success = $true; Status = 'Ready'; DeploymentId = [string]$plan.DeploymentId; PlanSha256 = [string]$plan.PlanSha256
         CandidateCommit = [string]$plan.CandidateCommit; StatePath = $statePath; RecoveryRefreshCount = 1
-        AcceptanceTests = @('LegacyLaunch','Utf8ActionName','KeyboardInput','ExpectedGuestPowerOff','SystemPrompts','GuestRestart','InstalledGuestPowerOff','GuestRestartFailure','InstallerSelfElevation','InstallerStandardUser','InstallerDecline')
+        AcceptanceTests = @('InstallerSelfElevation','InstallerStandardUser','InstallerDecline','LegacyLaunch','Utf8ActionName','KeyboardInput','ExpectedGuestPowerOff','SystemPrompts','GuestRestart','InstalledGuestPowerOff','GuestRestartFailure')
         AutomaticRollbackAttempted = $false; ReadyToPush = $true; CompletedUtc = [DateTime]::UtcNow.ToString('o')
     }
     Write-JsonAtomic -Path $resultPath -Value $terminalResult
