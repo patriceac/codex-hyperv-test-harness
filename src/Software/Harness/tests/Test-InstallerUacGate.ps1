@@ -16,4 +16,4 @@ foreach($change in @(@('RequestorProcessId',101),@('EmitterProcessId',201),@('Ap
 $rejected=$false
 try{Assert-InstallerPromptAttribution ([pscustomobject]$template) $requester $consent $root 'D:\Payload\setup.exe' ('B'*64) ('A'*64) $now}catch{$rejected=$true}
 if(-not $rejected){throw 'Prompt gate accepted a wrong image hash.'};$count++
-[pscustomobject]@{Success=$true;Scenarios=$count}
+[pscustomobject]@{Success=$true;ScenarioCount=$count}
