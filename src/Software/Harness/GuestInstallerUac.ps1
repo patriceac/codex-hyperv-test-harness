@@ -268,7 +268,7 @@ try {
     & "$env:SystemRoot\System32\logman.exe" stop $trace -ets | Out-Null
     if($LASTEXITCODE -ne 0){throw 'UAC attribution trace could not be finalized.'};$trace=$null
     $events=@(Get-WinEvent -Path $etl -Oldest | Where-Object {$_.ProviderName -ceq 'Microsoft-Antimalware-UacScan' -and $_.Id -eq 1201} | ForEach-Object {
-        [xml]$xml=$_.ToXml();$fields=@{};foreach($item in $xml.Event.EventData.Data){$fields[$item.Name]=[string]$item.'#text'}
+        [xml]$xml=$_.ToXml();$fields=@{};foreach($item in $xml.Event.EventData.Data){$fields[$item.Name]=[string]$item.InnerText}
         [pscustomobject]@{Provider=$_.ProviderName;Id=$_.Id;TimeUtc=$_.TimeCreated.ToUniversalTime().ToString('o');RequestorProcessId=[int]$fields.requestorProcessId;EmitterProcessId=[int]$xml.Event.System.Execution.ProcessID;ApplicationName=$fields.exeApplicationName;RequestType=[int]$fields.uacRequestType;AutoElevate=$fields.autoElevateRequest}
     })
     if($events.Count -ne 1){throw 'UAC attribution is missing or ambiguous.'}

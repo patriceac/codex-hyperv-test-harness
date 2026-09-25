@@ -1,4 +1,5 @@
 $ErrorActionPreference='Stop'
+Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot '..\InstallerUacGate.ps1')
 $now=[DateTime]::UtcNow
 $root=[pscustomobject]@{ProcessId=100;SessionId=1;UserSid='S-1-5-21-1-2-3-1001';Elevated=$false;IntegrityRid=8192;CreationFileTime=$now.AddSeconds(-3).ToFileTimeUtc()}
@@ -16,4 +17,11 @@ foreach($change in @(@('RequestorProcessId',101),@('EmitterProcessId',201),@('Ap
 $rejected=$false
 try{Assert-InstallerPromptAttribution ([pscustomobject]$template) $requester $consent $root 'D:\Payload\setup.exe' ('B'*64) ('A'*64) $now}catch{$rejected=$true}
 if(-not $rejected){throw 'Prompt gate accepted a wrong image hash.'};$count++
+$controller=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot '..\GuestInstallerUac.ps1'),[ref]$null,[ref]$null)
+$parser=$controller.Find({param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'ForEach-Object' -and $node.Extent.Text.Contains('$xml.Event.EventData.Data')},$true).CommandElements[-1].ScriptBlock.GetScriptBlock()
+$nativeEvent=[pscustomobject]@{ProviderName='Microsoft-Antimalware-UacScan';Id=1201;TimeCreated=$now}
+$nativeEvent | Add-Member ScriptMethod ToXml {'<Event><System><Execution ProcessID="200" /></System><EventData><Data Name="requestorProcessId">100</Data><Data Name="exeApplicationName">D:\Payload\setup.exe</Data><Data Name="uacRequestType">0</Data><Data Name="autoElevateRequest">false</Data><Data Name="emptyField" /></EventData></Event>'}
+$parsed=$nativeEvent | ForEach-Object $parser
+Assert-InstallerPromptAttribution $parsed $requester $consent $root 'D:\Payload\setup.exe' ('A'*64) ('A'*64) $now
+$count++
 [pscustomobject]@{Success=$true;ScenarioCount=$count}
