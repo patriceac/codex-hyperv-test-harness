@@ -123,11 +123,11 @@ if($SecureUi) {
     } catch {
         $receipt.Error=$_.Exception.Message
         if(-not $receipt.InputStarted){
+            try{$receipt['UacPolicy']=Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' | Select-Object EnableLUA,PromptOnSecureDesktop,ConsentPromptBehaviorAdmin,ConsentPromptBehaviorUser,EnableUIADesktopToggle}catch{$receipt['UacPolicyError']=$_.Exception.Message}
             try {
                 $null=Test-SameInstallerProcess $gate.Consent
                 $receipt['ConsentWindows']=[CodexInstallerNative]::ConsentWindows($gate.Consent.ProcessId)
-                $receipt['UacPolicy']=Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' | Select-Object EnableLUA,PromptOnSecureDesktop,ConsentPromptBehaviorAdmin,ConsentPromptBehaviorUser,EnableUIADesktopToggle
-            }catch{$receipt['ConsentWindowsError']='Unavailable'}
+            }catch{$receipt['ConsentWindowsError']=$_.Exception.Message}
             try {
                 $foreground=[CodexInstallerNative]::SecureForeground()
                 $receipt['Foreground']=[CodexInstallerNative]::Observe($foreground)

@@ -16,6 +16,7 @@ public sealed class CodexInstallerProcessIdentity {
     public bool Elevated, AdministratorGroup, AdministratorDenyOnly;
 }
 public sealed class CodexInstallerWindow {public long Handle;public int ProcessId;public string Desktop,Class;public bool Visible;}
+public sealed class CodexInstallerWindowsObservation {public CodexInstallerWindow[] Windows;public string[] Errors;}
 public sealed class CodexInstallerProcess : IDisposable {
     internal IntPtr Handle;
     public CodexInstallerProcessIdentity Identity;
@@ -160,10 +161,11 @@ public static class CodexInstallerNative {
         IntPtr desktop=OpenInputDesktop(0,false,1);if(desktop==IntPtr.Zero)throw new Win32Exception(Marshal.GetLastWin32Error());
         try {return ObjectName(desktop);}finally{CloseDesktop(desktop);}
     }
-    public static CodexInstallerWindow[] ConsentWindows(int expectedPid) {
-        RequireSystem();var windows=new List<CodexInstallerWindow>();
+    public static CodexInstallerWindowsObservation ConsentWindows(int expectedPid) {
+        RequireSystem();var windows=new List<CodexInstallerWindow>();var errors=new List<string>();
         foreach(string name in new[]{"Default","Winlogon"}) {
-            IntPtr desktop=OpenDesktop(name,0,false,1);if(desktop==IntPtr.Zero)throw new Win32Exception(Marshal.GetLastWin32Error());
+            IntPtr desktop=OpenDesktop(name,0,false,1);
+            if(desktop==IntPtr.Zero){errors.Add(name+": OpenDesktop error "+Marshal.GetLastWin32Error());continue;}
             try {
                 bool limit=false;EnumWindow callback=delegate(IntPtr window,IntPtr ignored) {
                     int pid;GetWindowThreadProcessId(window,out pid);if(pid!=expectedPid)return true;
@@ -173,9 +175,9 @@ public static class CodexInstallerNative {
                 };
                 bool okay=EnumDesktopWindows(desktop,callback,IntPtr.Zero);GC.KeepAlive(callback);
                 if(limit)throw new InvalidOperationException("Too many consent-owned windows.");Check(okay);
-            }finally{CloseDesktop(desktop);}
+            }catch(Exception error){errors.Add(name+": "+error.Message);}finally{CloseDesktop(desktop);}
         }
-        return windows.ToArray();
+        return new CodexInstallerWindowsObservation {Windows=windows.ToArray(),Errors=errors.ToArray()};
     }
     public static int SecureForeground() {
         if(!String.Equals(InputDesktopName(),"Winlogon",StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("Secure input desktop is not active.");
