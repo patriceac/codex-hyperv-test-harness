@@ -5473,18 +5473,20 @@ public static class CodexHostSession
         }
         try
         {
-            // WTSINFOEX starts with DWORD Level, followed by the level-1 union.
-            // SessionFlags is the third DWORD in WTSINFOEX_LEVEL1.
-            if (bytesReturned < 16 || Marshal.ReadInt32(buffer, 0) != 1)
-            {
-                return -1;
-            }
-            return Marshal.ReadInt32(buffer, 12);
+            return ReadSessionFlags(buffer, bytesReturned);
         }
         finally
         {
             WTSFreeMemory(buffer);
         }
+    }
+
+    public static int ReadSessionFlags(IntPtr buffer, uint bytesReturned)
+    {
+        // The level-1 union starts at byte 8 because it contains LARGE_INTEGER.
+        // SessionState is at byte 12; the independent lock flag is at byte 16.
+        if (bytesReturned < 20 || Marshal.ReadInt32(buffer, 0) != 1) { return -1; }
+        return Marshal.ReadInt32(buffer, 16);
     }
 
     public static void PreventSleep()

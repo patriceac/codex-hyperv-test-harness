@@ -31,8 +31,19 @@ public static class CodexInstallerNative {
     [StructLayout(LayoutKind.Explicit)] struct InputUnion {[FieldOffset(0)]public Keyboard keyboard;[FieldOffset(0)]public Mouse mouse;}
     [StructLayout(LayoutKind.Sequential)] struct Keyboard {public ushort key,scan;public uint flags,time;public UIntPtr extra;}
     [StructLayout(LayoutKind.Sequential)] struct Mouse {public int x,y;public uint data,flags,time;public UIntPtr extra;}
+    [StructLayout(LayoutKind.Sequential,CharSet=CharSet.Unicode)] struct WtsLevel1 {
+        public uint SessionId;public int SessionState,SessionFlags;
+        [MarshalAs(UnmanagedType.ByValTStr,SizeConst=33)]public string WinStationName;
+        [MarshalAs(UnmanagedType.ByValTStr,SizeConst=21)]public string UserName;
+        [MarshalAs(UnmanagedType.ByValTStr,SizeConst=18)]public string DomainName;
+        public long LogonTime,ConnectTime,DisconnectTime,LastInputTime,CurrentTime;
+        public uint IncomingBytes,OutgoingBytes,IncomingFrames,OutgoingFrames,IncomingCompressedBytes,OutgoingCompressedBytes;
+    }
+    [StructLayout(LayoutKind.Sequential)] struct WtsInfoEx {public uint Level;public WtsLevel1 Data;}
     [DllImport("kernel32.dll")] public static extern uint WTSGetActiveConsoleSessionId();
     [DllImport("wtsapi32.dll",SetLastError=true)] static extern bool WTSQueryUserToken(uint session,out IntPtr token);
+    [DllImport("wtsapi32.dll",SetLastError=true,CharSet=CharSet.Unicode)] static extern bool WTSQuerySessionInformation(IntPtr server,uint session,int kind,out IntPtr buffer,out uint bytes);
+    [DllImport("wtsapi32.dll")] static extern void WTSFreeMemory(IntPtr buffer);
     [DllImport("userenv.dll",SetLastError=true)] static extern bool CreateEnvironmentBlock(out IntPtr environment,IntPtr token,bool inherit);
     [DllImport("userenv.dll")] static extern bool DestroyEnvironmentBlock(IntPtr environment);
     [DllImport("userenv.dll",CharSet=CharSet.Unicode)] static extern int CreateProfile(string sid,string user,[Out] StringBuilder path,uint length);
@@ -110,6 +121,16 @@ public static class CodexInstallerNative {
     }
     public static string ConsoleSid() {
         RequireSystem();EnablePrivilege("SeTcbPrivilege");IntPtr token;Check(WTSQueryUserToken(WTSGetActiveConsoleSessionId(),out token));try{using(var identity=new WindowsIdentity(token))return identity.User.Value;}finally{CloseHandle(token);}
+    }
+    public static int ConsoleSessionFlags() {
+        RequireSystem();uint session=WTSGetActiveConsoleSessionId(),bytes;IntPtr buffer;
+        Check(WTSQuerySessionInformation(IntPtr.Zero,session,25,out buffer,out bytes));
+        try {
+            if(bytes<Marshal.SizeOf(typeof(WtsInfoEx)))throw new InvalidOperationException("Console session information is incomplete.");
+            var value=(WtsInfoEx)Marshal.PtrToStructure(buffer,typeof(WtsInfoEx));
+            if(value.Level!=1 || value.Data.SessionId!=session || value.Data.SessionState!=0)throw new InvalidOperationException("Console session is not active.");
+            return value.Data.SessionFlags;
+        }finally{WTSFreeMemory(buffer);}
     }
     public static CodexInstallerProcess StartOnSecureDesktop(string script,string requestRoot) {
         RequireSystem();EnablePrivilege("SeDebugPrivilege");EnablePrivilege("SeAssignPrimaryTokenPrivilege");EnablePrivilege("SeIncreaseQuotaPrivilege");

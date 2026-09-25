@@ -55,4 +55,13 @@ foreach($case in @(
     if($script:liveChecks -ne $case.Checks){throw 'The readiness wait did not revalidate process identities or immediate input checks waited.'}
     $count++
 }
+$consoleGuard=$controller.Find({param($node) $node -is [Management.Automation.Language.IfStatementAst] -and $node.Clauses[0].Item1.Extent.Text.Contains('$desktopReady -and $consoleFlags')},$true)
+$ready=[scriptblock]::Create($consoleGuard.Clauses[0].Item1.Extent.Text)
+$desktopReady=$true;$consoleSid='S-1-5-21-1-2-3-1003'
+$policy=[pscustomobject]@{InitiatingUser='StandardUser'}
+$context=[pscustomobject]@{Identity=[pscustomobject]@{Initiator=[pscustomobject]@{Sid=$consoleSid}}}
+foreach($consoleFlags in @(-1,0,1)){
+    if((& $ready) -ne ($consoleFlags -eq 1)){throw 'An unknown or locked console passed installer readiness, or an unlocked console was rejected.'}
+    $count++
+}
 [pscustomobject]@{Success=$true;ScenarioCount=$count}

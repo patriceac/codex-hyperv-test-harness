@@ -118,7 +118,7 @@ function Test-InstallerUacReceipt {
     param($Receipt,$Policy,[string]$RequestId)
     try {
         foreach($flag in @('ContractProven','CleanupSucceeded')){if($Receipt.$flag -isnot [bool] -or -not $Receipt.$flag){return $false}}
-        if($Receipt.FormatVersion -ne 2 -or $Receipt.RequestId -cne $RequestId -or $Receipt.Decision -cne $Policy.Decision -or
+        if($Receipt.FormatVersion -ne 2 -or $Receipt.InitialSessionFlags -ne 1 -or $Receipt.RequestId -cne $RequestId -or $Receipt.Decision -cne $Policy.Decision -or
             $Receipt.InitiatingUser -cne $Policy.InitiatingUser -or $Receipt.ExecutableSha256 -cne $Policy.ExecutableSha256 -or
             $Receipt.VerifierSha256 -cne $Policy.Verifier.ExecutableSha256 -or $Receipt.Input.Success -isnot [bool] -or -not $Receipt.Input.Success -or $Receipt.Input.Decision -cne $Policy.Decision){return $false}
         $sid=$Receipt.Identity.Initiator.Sid

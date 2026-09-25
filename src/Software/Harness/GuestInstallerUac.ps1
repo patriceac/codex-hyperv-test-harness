@@ -203,6 +203,7 @@ try {
         $suffix=([Guid]::NewGuid().ToString('N')).Substring(0,10)
         $admin=New-InstallerAccount ('CIa'+$suffix) $true
         $standard=New-InstallerAccount ('CIs'+$suffix) $false
+        New-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' DisableAutomaticRestartSignOn -Value 1 -PropertyType DWord -Force | Out-Null
         New-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' EnableFirstLogonAnimation -Value 0 -PropertyType DWord -Force | Out-Null
         $oobe='HKLM:\SOFTWARE\Policies\Microsoft\Windows\OOBE'
         $null=New-Item $oobe -Force;New-ItemProperty $oobe DisablePrivacyExperience -Value 1 -PropertyType DWord -Force | Out-Null
@@ -218,13 +219,14 @@ try {
     $limit=[DateTime]::UtcNow.AddSeconds(120)
     do {
         Assert-InstallerDeadline
-        try{$consoleSid=[CodexInstallerNative]::ConsoleSid()}catch{$consoleSid=$null}
+        $consoleFlags=-1
+        try{$consoleSid=[CodexInstallerNative]::ConsoleSid();$consoleFlags=[CodexInstallerNative]::ConsoleSessionFlags()}catch{$consoleSid=$null}
         $desktopReady=$false
         foreach($explorer in @(Get-Process explorer -ErrorAction SilentlyContinue)){try{$explorerToken=[CodexInstallerNative]::Observe($explorer.Id);if($explorerToken.UserSid -ceq $consoleSid -and $explorerToken.SessionId -eq [int][CodexInstallerNative]::WTSGetActiveConsoleSessionId()){$desktopReady=$true}}catch{}}
-        if($desktopReady -and $consoleSid -and ($policy.InitiatingUser -cne 'StandardUser' -or $consoleSid -ceq $context.Identity.Initiator.Sid)){break}
+        if($desktopReady -and $consoleFlags -eq 1 -and $consoleSid -and ($policy.InitiatingUser -cne 'StandardUser' -or $consoleSid -ceq $context.Identity.Initiator.Sid)){break}
         Start-Sleep -Milliseconds 500
     }while([DateTime]::UtcNow -lt $limit)
-    if(-not $consoleSid -or -not $desktopReady){throw 'No interactive console desktop became available.'}
+    if(-not $consoleSid -or -not $desktopReady -or $consoleFlags -ne 1){throw "No unlocked interactive console desktop became available (session flags $consoleFlags)."}
     if($policy.InitiatingUser -ceq 'StandardUser'){
         if($consoleSid -cne $context.Identity.Initiator.Sid){throw 'The disposable standard account is not the console user.'}
         $identity=$context.Identity
@@ -240,6 +242,7 @@ try {
         Write-InstallerJson $context (Join-Path $RequestRoot 'context.json')
     }
     $evidence.Identity=$identity
+    $evidence['InitialSessionFlags']=$consoleFlags
     $systemPolicy='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
     Set-ItemProperty $systemPolicy PromptOnSecureDesktop 1
     Set-ItemProperty $systemPolicy ConsentPromptBehaviorAdmin 2
