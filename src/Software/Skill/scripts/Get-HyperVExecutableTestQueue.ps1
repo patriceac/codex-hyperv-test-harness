@@ -26,11 +26,17 @@ function Read-JsonSafe {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         return $null
     }
-    try {
-        Get-Content -Raw -LiteralPath $Path -Encoding UTF8 | ConvertFrom-Json
-    }
-    catch {
-        $null
+    for ($attempt = 1; $attempt -le 5; $attempt++) {
+        try {
+            return (Get-Content -Raw -LiteralPath $Path -Encoding UTF8 | ConvertFrom-Json)
+        }
+        catch [IO.IOException] {
+            # The broker atomically replaces live snapshots. Brief sharing
+            # violations must not manufacture an empty, one-worker pool.
+            if ($attempt -eq 5) { return $null }
+            Start-Sleep -Milliseconds (50 * $attempt)
+        }
+        catch { return $null }
     }
 }
 
@@ -122,11 +128,12 @@ if ($poolState -and $poolState.Workers) {
         }
     }
 }
-$orphanedProcessing = $processingFiles.Count -gt 0 -and
+$orphanedProcessing = $null -ne $poolState -and $processingFiles.Count -gt 0 -and
     [string]$brokerState.Status -ne 'RecoveringQueue' -and
     @($processingIds | Where-Object { -not $workerRequestMap.ContainsKey($_) }).Count -gt 0
 $jobs = @()
-$poolMaxWorkers = if ($poolState -and $poolState.MaxWorkers) { [int]$poolState.MaxWorkers } else { 1 }
+$poolMaxWorkers = if ($poolState -and $poolState.MaxWorkers) { [int]$poolState.MaxWorkers } else { $null }
+$poolCapacityExceeded = $null -ne $poolMaxWorkers -and $processingFiles.Count -gt $poolMaxWorkers
 $poolWorkers = if ($poolState) { @($poolState.Workers) } else { @() }
 $poolLeasedCount = @($poolWorkers | Where-Object Status -in @('Leased', 'RunCompleted')).Count
 $poolWarmAhead = if ($poolState -and $poolState.WarmAhead) { [int]$poolState.WarmAhead } else { 1 }
@@ -141,7 +148,7 @@ $poolWarmSparePotentialCount = @($poolWorkers | Where-Object {
 }).Count
 $poolWarmSpareInvariantSatisfied = $poolWarmSparePotentialCount -ge $poolRequiredWarmSpareCount
 $maintenanceActive = (Test-Path -LiteralPath $maintenancePath -PathType Leaf) -or [bool]($poolState -and $poolState.MaintenanceActive)
-$warmSparePolicyApplicable = -not $maintenanceActive
+$warmSparePolicyApplicable = $null -ne $poolState -and -not $maintenanceActive
 $warmSpareInvariantViolation = $warmSparePolicyApplicable -and -not $poolWarmSpareInvariantSatisfied
 
 foreach ($processingFile in $processingFiles) {
@@ -169,7 +176,7 @@ if (-not $brokerHealthy) { $healthReasons += 'BrokerUnavailable' }
 $poolStateFresh = $false
 try { $poolStateFresh = $poolState -and $poolState.UpdatedUtc -and ([DateTime]::UtcNow - ([DateTime]$poolState.UpdatedUtc).ToUniversalTime()).TotalSeconds -lt 300 } catch { }
 if (-not $poolStateFresh -or $poolWorkers.Count -ne $poolMaxWorkers) { $healthReasons += 'PoolStateUnavailable' }
-if ($orphanedProcessing -or $processingFiles.Count -gt $poolMaxWorkers -or $warmSpareInvariantViolation) { $healthReasons += 'PoolInvariantViolation' }
+if ($orphanedProcessing -or $poolCapacityExceeded -or $warmSpareInvariantViolation) { $healthReasons += 'PoolInvariantViolation' }
 if ($demandStalled) { $healthReasons += 'QueuedDemandStalled' }
 if (-not $maintenanceActive -and $repeatedFaults.Count -gt 0) { $healthReasons += 'RepeatedLifecycleFailure' }
 if (-not $maintenanceActive -and $accountFaults.Count -gt 0) { $healthReasons += 'GuestAccountUnavailable' }
@@ -203,11 +210,11 @@ if ($stalledLifecycles.Count -gt 0) { $healthReasons += 'LifecycleDeadlineExceed
     PoolRequiredWarmSpareCount = $poolRequiredWarmSpareCount
     PoolReadyWarmSpareCount = $poolReadyWarmSpareCount
     PoolWarmSparePotentialCount = $poolWarmSparePotentialCount
-    PoolWarmSpareInvariantSatisfied = $poolWarmSpareInvariantSatisfied
+    PoolWarmSpareInvariantSatisfied = if ($poolState) { $poolWarmSpareInvariantSatisfied } else { $null }
     MaintenanceActive = [bool]$maintenanceActive
     WarmSparePolicyApplicable = [bool]$warmSparePolicyApplicable
     WarmSpareInvariantViolation = [bool]$warmSpareInvariantViolation
     PoolWorkers = if ($poolState) { @($poolState.Workers) } else { @() }
-    InvariantViolation = $processingFiles.Count -gt $poolMaxWorkers -or $orphanedProcessing -or $warmSpareInvariantViolation
+    InvariantViolation = $poolCapacityExceeded -or $orphanedProcessing -or $warmSpareInvariantViolation
     Jobs = @($jobs)
 } | ConvertTo-Json -Depth 8

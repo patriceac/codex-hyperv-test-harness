@@ -182,11 +182,14 @@ $scenarios.Add('firewall-query-user-reconciliation-is-exact-and-fail-closed')
 $runtime = [pscustomobject][ordered]@{
     Policy = $policy
     Complete = $false
+    StartedUtc = [DateTime]::UtcNow
+    PromptDeadlineUtc = [DateTime]::UtcNow.AddSeconds(120)
     FirewallProfileReadiness = @([pscustomobject]@{ Name = 'Private'; NotifyOnListen = 'True' })
     Acceptances = (New-Object Collections.Generic.List[object])
 }
 $emptyEvidence = Get-SystemPromptEvidenceV1 -Runtime $runtime
 Assert-True ($emptyEvidence.Acceptances -is [Array] -and @($emptyEvidence.Acceptances).Count -eq 0 -and @($emptyEvidence.FirewallProfileReadiness).Count -eq 1 -and -not [bool]$emptyEvidence.ContractSatisfied) 'Empty prompt evidence did not retain safe arrays and firewall readiness under Windows PowerShell 5.1.'
+Assert-True (([DateTime]$emptyEvidence.StartedUtc).ToUniversalTime() -eq $runtime.StartedUtc -and ([DateTime]$emptyEvidence.PromptDeadlineUtc).ToUniversalTime() -eq $runtime.PromptDeadlineUtc) 'Prompt timing evidence was lost.'
 $runtime.Acceptances.Add([pscustomobject]@{ Kind = 'Uac'; Success = $true })
 $runtime.Acceptances.Add([pscustomobject]@{ Kind = 'WindowsFirewall'; Success = $true })
 $runtime.Complete = $true
@@ -267,8 +270,25 @@ $runtimeIndex = $brokerText.IndexOf('New-SystemPromptRuntimeV1')
 $setupIndex = $brokerText.IndexOf('Invoke-GuestSetupV1')
 $submitIndex = $brokerText.IndexOf("`$failureStage = 'SubmittingGuestJob'")
 $serviceIndex = $brokerText.IndexOf('Invoke-SystemPromptServiceV1')
-Assert-True ($runtimeIndex -ge 0 -and $setupIndex -gt $runtimeIndex -and $submitIndex -gt $setupIndex -and $serviceIndex -gt $submitIndex) 'The broker no longer prepares prompt policy, completes guest setup, submits the application, and services prompts in that order.'
+Assert-True ($setupIndex -ge 0 -and $runtimeIndex -gt $setupIndex -and $submitIndex -gt $runtimeIndex -and $serviceIndex -gt $submitIndex) 'Guest setup consumed the prompt window, or prompt preparation occurred after application submission.'
 $scenarios.Add('host-secure-desktop-firewall-and-propagation-contract')
+
+& {
+    # No guest or native UI calls: exercise the real fixed-window service.
+    function Get-SystemPromptGuestObservationV1 { [pscustomobject]@{ ConsentProcesses=@(); FirewallProcesses=@(); ApplicationLease=$null } }
+    function Get-SystemPromptFirewallRulesV1 { @() }
+    function Prepare-SystemPromptFirewallProfilesV1 { @() }
+    $fakeSession = [Runtime.Serialization.FormatterServices]::GetUninitializedObject([Management.Automation.Runspaces.PSSession])
+    $beforeLaunch = [DateTime]::UtcNow
+    $window = New-SystemPromptRuntimeV1 -Policy $policy -Session $fakeSession -VmName 'synthetic' -RequestId 'synthetic' -GuestOutbox 'C:\synthetic' -GuestExecutablePath $exactExecutable -ResultRoot 'C:\synthetic'
+    $deadline = $window.PromptDeadlineUtc
+    Assert-True ($window.StartedUtc -ge $beforeLaunch -and ($deadline - $window.StartedUtc).TotalSeconds -ge 120) 'Prompt runtime did not receive a fresh launch window.'
+    $pending = Invoke-SystemPromptServiceV1 -Runtime $window -Session $fakeSession
+    Assert-True (-not $pending.Complete -and $window.PromptDeadlineUtc -eq $deadline) 'A missing prompt renewed its timeout or passed the request.'
+    $window.PromptDeadlineUtc = [DateTime]::UtcNow.AddSeconds(-1)
+    Assert-Rejected -Operation { Invoke-SystemPromptServiceV1 -Runtime $window -Session $fakeSession } -ExpectedMessage 'Timed out waiting' -Scenario 'absent-prompt-deadline'
+}
+$scenarios.Add('prompt-window-is-fresh-fixed-and-fails-closed')
 
 $nativeSource = [regex]::Match($moduleText, "Add-Type -TypeDefinition @'\r?\n(?<source>[\s\S]*?)\r?\n'@")
 Assert-True $nativeSource.Success 'Token-elevation helper source could not be extracted.'

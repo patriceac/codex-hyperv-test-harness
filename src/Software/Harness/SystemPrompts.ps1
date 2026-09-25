@@ -774,6 +774,8 @@ function Get-SystemPromptEvidenceV1 {
         FirewallProfiles = @($Runtime.Policy.FirewallProfiles)
         FirewallProfileReadiness = @($Runtime.FirewallProfileReadiness)
         PromptTimeoutSeconds = [int]$Runtime.Policy.PromptTimeoutSeconds
+        StartedUtc = ([DateTime]$Runtime.StartedUtc).ToUniversalTime().ToString('o')
+        PromptDeadlineUtc = ([DateTime]$Runtime.PromptDeadlineUtc).ToUniversalTime().ToString('o')
         Acceptances = $Runtime.Acceptances.ToArray()
     }
 }

@@ -4012,19 +4012,6 @@ function Invoke-GuestRequest {
             catch { throw "assertResultEqualsJson is invalid JSON: $($_.Exception.Message)" }
         }
 
-        if ($systemPromptPolicy) {
-            $failureStage = 'PreparingSystemPromptAcceptance'
-            Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
-            $systemPromptRuntime = New-SystemPromptRuntimeV1 `
-                -Policy $systemPromptPolicy `
-                -Session $session `
-                -VmName $vmName `
-                -RequestId $requestId `
-                -GuestOutbox $guestOutbox `
-                -GuestExecutablePath $guestExecutable `
-                -ResultRoot $ResultRoot
-        }
-
         if ($requestNetworkRuntime) {
             $failureStage = 'VerifyingNetwork'
             Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
@@ -4103,6 +4090,20 @@ function Invoke-GuestRequest {
             } while ($true)
         }
         else {
+        if ($systemPromptPolicy) {
+            # Setup has completed. Start the fixed prompt window immediately
+            # before app submission, including startup UAC before its lease.
+            $failureStage = 'PreparingSystemPromptAcceptance'
+            Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
+            $systemPromptRuntime = New-SystemPromptRuntimeV1 `
+                -Policy $systemPromptPolicy `
+                -Session $session `
+                -VmName $vmName `
+                -RequestId $requestId `
+                -GuestOutbox $guestOutbox `
+                -GuestExecutablePath $guestExecutable `
+                -ResultRoot $ResultRoot
+        }
         $failureStage = 'SubmittingGuestJob'
         $guestJobPath = Join-Path $ResultRoot ($requestId + '.json')
         Write-JsonAtomic -Path $guestJobPath -Value $job
@@ -5040,7 +5041,7 @@ function Invoke-GuestRequest {
             }
         }
 
-        if (($guestRestartStarted -or $installerStarted) -and -not $success -and -not $evidenceTransferSucceeded) {
+        if (($guestRestartStarted -or $installerStarted -or $systemPromptRuntime) -and -not $success -and -not $evidenceTransferSucceeded) {
             $failureEvidence = Save-GuestRestartFailureEvidence -VmName $vmName -RequestId $requestId -GuestOutbox $guestOutbox -ResultRoot $ResultRoot -ClientSid ([string]$Config.ClientSid)
         }
 

@@ -23,7 +23,8 @@ function Assert-True {
     if (-not $Condition) { throw $Message }
 }
 
-$root = Join-Path ([IO.Path]::GetTempPath()) ('codex-queue-maintenance-' + [Guid]::NewGuid().ToString('N'))
+$workRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..\..\work'))
+$root = Join-Path $workRoot ('codex-queue-maintenance-' + [Guid]::NewGuid().ToString('N'))
 foreach ($relative in @('Requests', 'Processing', 'Results', 'State')) {
     New-Item -ItemType Directory -Force -Path (Join-Path $root $relative) | Out-Null
 }
@@ -67,6 +68,35 @@ try {
     Assert-True ($orphaned.MaintenanceActive -and $orphaned.OrphanedProcessing -and $orphaned.InvariantViolation) 'Maintenance incorrectly suppressed an orphaned-processing violation.'
     $scenarios.Add('maintenance-keeps-unrelated-alarms')
 
+    $poolPath = Join-Path $root 'State\pool-state.json'
+    $validPoolJson = Get-Content -LiteralPath $poolPath -Raw
+    & {
+        $tokens = $null; $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($QueueScript, [ref]$tokens, [ref]$errors)
+        $reader = $ast.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Read-JsonSafe' }, $true)
+        . ([scriptblock]::Create($reader.Extent.Text))
+        $script:readCalls = 0; $script:retryWaits = @(); $script:readFailureLimit = 2
+        function Get-Content { param($LiteralPath, [switch]$Raw, $Encoding)
+            $script:readCalls++
+            if ($script:readCalls -le $script:readFailureLimit) { throw [IO.IOException]::new('Synthetic sharing violation') }
+            $validPoolJson
+        }
+        function Start-Sleep { param($Milliseconds) $script:retryWaits += $Milliseconds }
+        $read = Read-JsonSafe -Path $poolPath
+        Assert-True ($read.MaxWorkers -eq 4 -and $script:readCalls -eq 3 -and ($script:retryWaits -join ',') -eq '50,100') 'A brief sharing violation was not retried.'
+        $script:readCalls = 0; $script:retryWaits = @(); $script:readFailureLimit = 5
+        $read = Read-JsonSafe -Path $poolPath
+        Assert-True ($null -eq $read -and $script:readCalls -eq 5 -and ($script:retryWaits -join ',') -eq '50,100,150,200') 'A persistent sharing violation escaped its bounded retry limit.'
+    }
+    foreach ($badJson in @('{', 'null')) {
+        Set-Content -LiteralPath $poolPath -Value $badJson -Encoding UTF8
+        $unknown = Read-QueueState -Root $root
+        Assert-True ($unknown.HealthReasons -contains 'PoolStateUnavailable' -and $null -eq $unknown.PoolMaxWorkers -and -not $unknown.OrphanedProcessing -and -not $unknown.InvariantViolation -and $null -eq $unknown.PoolWarmSpareInvariantSatisfied) 'An unavailable pool snapshot manufactured an invariant violation or known capacity.'
+    }
+    Set-Content -LiteralPath $poolPath -Value $validPoolJson -Encoding UTF8
+    Assert-True ((Read-QueueState -Root $root).OrphanedProcessing) 'Snapshot recovery hid a real orphan.'
+    $scenarios.Add('sharing-retry-and-unknown-snapshot-health')
+
     Remove-Item -LiteralPath (Join-Path $root 'Processing\orphaned-request.json'), (Join-Path $root 'State\maintenance.json')
     $workers = @(1..4 | ForEach-Object { [ordered]@{WorkerId=$_;Status='Off';OsClean=$true;FaultRecoveryAttempts=0} })
     $workers[0].Status = 'Recycling'; $workers[0].FaultRecoveryAttempts = 6
@@ -108,7 +138,7 @@ try {
     $scenarios.Add('recovered-account-history-does-not-trigger-new-alarms')
 }
 finally {
-    Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+    if ([IO.Path]::GetFullPath($root).StartsWith($workRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { Remove-Item -LiteralPath $root -Recurse -ErrorAction SilentlyContinue }
 }
 
 [pscustomobject][ordered]@{

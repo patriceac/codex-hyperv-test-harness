@@ -41,10 +41,10 @@ function Invoke-ExpectedPowerOffEvidenceTransferBounded {
     [pscustomobject]@{HostStageRoot=$stage}
 }
 try {
-    $guestRestartStarted = $true; $installerStarted = $false; $success = $false; $evidenceTransferSucceeded = $false
+    $guestRestartStarted = $true; $installerStarted = $false; $systemPromptRuntime = $null; $success = $false; $evidenceTransferSucceeded = $false
     $vmName = 'synthetic'; $requestId = 'synthetic'; $guestOutbox = 'C:\CodexGuest\Outbox\synthetic'; $Config = @{ClientSid=$sid}
     $failureKind = 'Cancelled'; $cancelled = $true; $guestResult = $null; $failureStage = 'GuestRestartContinuation'; $errorMessage = 'original cancellation'
-    $gate = $ast.Find({ param($n) $n -is [Management.Automation.Language.IfStatementAst] -and $n.Clauses[0].Item1.Extent.Text -eq '($guestRestartStarted -or $installerStarted) -and -not $success -and -not $evidenceTransferSucceeded' }, $true)
+    $gate = $ast.Find({ param($n) $n -is [Management.Automation.Language.IfStatementAst] -and $n.Clauses[0].Item1.Extent.Text -eq '($guestRestartStarted -or $installerStarted -or $systemPromptRuntime) -and -not $success -and -not $evidenceTransferSucceeded' }, $true)
     Check ($null -ne $gate) 'Failure harvest cleanup gate is missing.'
     . ([scriptblock]::Create($gate.Extent.Text))
     Check ($transferCalls -eq 1 -and $failureEvidence.Retained -and -not $failureEvidence.Partial -and $failureEvidence.CopiedFiles -eq 2) 'Failure files were not retained once.'
@@ -52,6 +52,12 @@ try {
     Check ((Get-Content -LiteralPath (Join-Path $ResultRoot 'failure-diagnostics\product-data\restart-session.resume')) -eq 'resume-state') 'Resume diagnostics were lost.'
     Check ($failureKind -eq 'Cancelled' -and $cancelled -and $null -eq $guestResult -and -not $success -and $failureStage -eq 'GuestRestartContinuation' -and $errorMessage -eq 'original cancellation') 'Diagnostic collection changed the original failure.'
     Check $publishedAcl 'Diagnostics were published without applying the client-read ACL.'
+    $ResultRoot = Join-Path $testRoot 'prompt'; New-Item -ItemType Directory -Path $ResultRoot | Out-Null
+    $guestRestartStarted = $false; $systemPromptRuntime = @{Complete=$false}
+    $failureKind = 'SystemPromptAcceptanceFailed'; $failureStage = 'AcceptingSystemPrompt'; $cancelled = $false
+    . ([scriptblock]::Create($gate.Extent.Text))
+    Check ($transferCalls -eq 2 -and $failureEvidence.Retained -and $failureEvidence.CopiedFiles -eq 2 -and -not $success -and $null -eq $guestResult -and $failureKind -eq 'SystemPromptAcceptanceFailed' -and $failureStage -eq 'AcceptingSystemPrompt') 'Prompt failure lost evidence or changed its terminal failure.'
+    $systemPromptRuntime = $null
     $ResultRoot = Join-Path $testRoot 'unavailable'; New-Item -ItemType Directory -Path $ResultRoot | Out-Null
     $guestRestartStarted = $false; $installerStarted = $true
     $script:transferError = $true; $failureKind = 'Harness'; $cancelled = $false
@@ -61,7 +67,7 @@ try {
         $evidenceTransferSucceeded = -not $success
         . ([scriptblock]::Create($gate.Extent.Text))
     }
-    Check ($transferCalls -eq 2) 'Successful or already-transferred requests collected duplicate diagnostics.'
+    Check ($transferCalls -eq 3) 'Successful or already-transferred requests collected duplicate diagnostics.'
     $text = Get-Content -Raw -LiteralPath $broker
     $cleanup = $text.IndexOf('if ($requestNetworkRuntime -and -not $requestNetworkCleanupPerformed)')
     Check ($cleanup -lt $gate.Extent.StartOffset -and $gate.Extent.StartOffset -lt $text.IndexOf('if ($Request.StopAfter -and $session)')) 'Harvest must follow network revocation and precede VM stop.'
@@ -89,4 +95,4 @@ try {
 finally {
     if ([IO.Path]::GetFullPath($testRoot).StartsWith($workRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { Remove-Item -LiteralPath $testRoot -Recurse -ErrorAction SilentlyContinue }
 }
-[pscustomobject]@{Success=$true;ScenarioCount=4;Scenarios=@('failure-files-and-original-outcome','unavailable-guest-and-no-duplicate-harvest','independent-cleanup-watchdog','request-output-containment')} | ConvertTo-Json
+[pscustomobject]@{Success=$true;ScenarioCount=5;Scenarios=@('failure-files-and-original-outcome','prompt-failure-retains-diagnostics','unavailable-guest-and-no-duplicate-harvest','independent-cleanup-watchdog','request-output-containment')} | ConvertTo-Json
