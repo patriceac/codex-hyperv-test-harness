@@ -1206,6 +1206,10 @@ function Stop-TestVm {
     if ($vm.State -eq 'Off') {
         return
     }
+    if ($vm.State -eq 'Stopping') {
+        Wait-TestVmOff -VmName $VmName -TimeoutSeconds 60
+        return
+    }
     if ($Immediate) {
         Stop-VM -Name $VmName -TurnOff -Force -ErrorAction Stop | Out-Null
         Wait-TestVmOff -VmName $VmName
@@ -1225,6 +1229,10 @@ function Stop-TestVm {
         Start-Sleep -Seconds 2
     }
     if ((Get-VM -Name $VmName).State -ne 'Off') {
+        if ((Get-VM -Name $VmName).State -eq 'Stopping') {
+            Wait-TestVmOff -VmName $VmName -TimeoutSeconds 60
+            return
+        }
         Stop-VM -Name $VmName -TurnOff -Force -ErrorAction Stop | Out-Null
         Wait-TestVmOff -VmName $VmName
     }
