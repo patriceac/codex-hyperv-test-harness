@@ -35,7 +35,7 @@ public static class CodexInstallerNative {
     [DllImport("wtsapi32.dll",SetLastError=true)] static extern bool WTSQueryUserToken(uint session,out IntPtr token);
     [DllImport("userenv.dll",SetLastError=true)] static extern bool CreateEnvironmentBlock(out IntPtr environment,IntPtr token,bool inherit);
     [DllImport("userenv.dll")] static extern bool DestroyEnvironmentBlock(IntPtr environment);
-    [DllImport("userenv.dll",CharSet=CharSet.Unicode)] static extern int CreateProfile(string sid,string user,StringBuilder path,uint length);
+    [DllImport("userenv.dll",CharSet=CharSet.Unicode)] static extern int CreateProfile(string sid,string user,[Out] StringBuilder path,uint length);
     [DllImport("kernel32.dll",SetLastError=true)] static extern IntPtr OpenProcess(uint access,bool inherit,int pid);
     [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr handle);
     [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetProcessTimes(IntPtr process,out long created,out long exited,out long kernel,out long user);
@@ -119,7 +119,7 @@ public static class CodexInstallerNative {
         try {Check(OpenProcessToken(process,0xB,out token));Check(DuplicateTokenEx(token,0xF01FF,IntPtr.Zero,2,1,out duplicate));return Start(duplicate,System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),"WindowsPowerShell\\v1.0\\powershell.exe"),"-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "+Quote(script)+" -RequestRoot "+Quote(requestRoot)+" -SecureUi","winsta0\\winlogon");}
         finally {if(duplicate!=IntPtr.Zero)CloseHandle(duplicate);if(token!=IntPtr.Zero)CloseHandle(token);CloseHandle(process);}
     }
-    public static string NewProfile(string sid,string user) {var path=new StringBuilder(32768);int hr=CreateProfile(sid,user,path,(uint)path.Capacity);if(hr<0)Marshal.ThrowExceptionForHR(hr);return path.ToString();}
+    public static string NewProfile(string sid,string user) {var path=new StringBuilder(260);int hr=CreateProfile(sid,user,path,(uint)path.Capacity);if(hr<0)Marshal.ThrowExceptionForHR(hr);return path.ToString();}
     public static int SecureForeground() {
         IntPtr desktop=OpenInputDesktop(0,false,1);if(desktop==IntPtr.Zero)throw new Win32Exception(Marshal.GetLastWin32Error());
         try {var name=new StringBuilder(128);int needed;Check(GetUserObjectInformation(desktop,2,name,256,out needed));if(!String.Equals(name.ToString(),"Winlogon",StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("Secure input desktop is not active.");}finally{CloseDesktop(desktop);}
