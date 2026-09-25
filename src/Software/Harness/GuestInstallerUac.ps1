@@ -31,7 +31,11 @@ function Assert-InstallerSecurePrompt($Gate,[switch]$WaitForReady) {
         Assert-InstallerPromptAttribution $Gate.Event $requester $consent $Gate.Root $context.Job.executable $policy.ExecutableSha256 $policy.ExecutableSha256 ([DateTime]::UtcNow)
         $foreground=[CodexInstallerNative]::SecureForeground()
         if($foreground -eq $consent.ProcessId){break}
-        if(-not $WaitForReady -or [DateTime]::UtcNow -ge $readyUntil){throw "The attributed UAC prompt is not the secure foreground (expected PID $($consent.ProcessId), observed $foreground)."}
+        if(-not $WaitForReady -or [DateTime]::UtcNow -ge $readyUntil){
+            $detail='unobservable'
+            try{$detail=[CodexInstallerNative]::Observe($foreground).ImagePath+'; class '+[CodexInstallerNative]::ForegroundClass()}catch{}
+            throw "The attributed UAC prompt is not the secure foreground (expected PID $($consent.ProcessId), observed $foreground; $detail)."
+        }
         Start-Sleep -Milliseconds 100
     }while($true)
     $condition=[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ProcessIdProperty,[int]$consent.ProcessId)
