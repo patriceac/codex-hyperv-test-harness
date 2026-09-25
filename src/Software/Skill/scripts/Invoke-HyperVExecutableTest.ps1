@@ -10,6 +10,7 @@ param(
     [string] $AssertResultEqualsJson,
     [switch] $ExpectGuestPowerOff,
     [string] $GuestRestartPlanPath,
+    [string] $InstallerUacPlanPath,
     [switch] $GuestCredentialFixture,
     [switch] $AcceptUacPrompt,
     [switch] $AcceptWindowsFirewallPrompt,
@@ -37,6 +38,7 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'HyperVBrokerLocation.ps1')
 . (Join-Path $PSScriptRoot 'GuestPowerTestContract.ps1')
+. (Join-Path $PSScriptRoot 'InstallerUacContract.ps1')
 $BrokerRoot = Resolve-HyperVBrokerRoot -BrokerRoot $BrokerRoot
 
 if (-not [string]::IsNullOrWhiteSpace($ActionsPath) -and -not [string]::IsNullOrWhiteSpace($ActionsJson)) {
@@ -75,6 +77,13 @@ $powerTestRequested = -not [string]::IsNullOrWhiteSpace($GuestRestartPlanPath) -
 if ($powerTestRequested -and ($ExpectGuestPowerOff -or $systemPromptRequested -or $ReadOnlyHostInput.Count -gt 0 -or $AllowNetworkWithHostInputs -or $NetworkProfile -notin @('None', 'IsolatedTestNet'))) { throw 'Power tests permit None or IsolatedTestNet, without host inputs, system prompts, or expected power-off.' }
 if ($GuestRestartPlanPath -and -not $AssertResultFile) { throw 'GuestRestartPlanPath requires a final AssertResultFile.' }
 $restartPlan = if ($GuestRestartPlanPath) { Get-Content -Raw -LiteralPath $GuestRestartPlanPath -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop } else { $null }
+$installerPlan = if ($InstallerUacPlanPath) { Get-Content -Raw -LiteralPath $InstallerUacPlanPath -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop } else { $null }
+if ($InstallerUacPlanPath -and ($powerTestRequested -or $ExpectGuestPowerOff -or $systemPromptRequested -or $guestSetupRequested -or $ReadOnlyHostInput.Count -gt 0 -or $NetworkProfile -ne 'None' -or $AllowNetworkWithHostInputs -or $ActionsPath -or $ActionsJson -or $AssertResultFile -or $PSBoundParameters.ContainsKey('AssertResultJsonPointer') -or $PSBoundParameters.ContainsKey('AssertResultEqualsJson'))) {
+    throw 'InstallerUacPlanPath owns account preparation, prompt handling and Before/After verification; legacy actions, setup, assertions, network and power options cannot be combined.'
+}
+if ($InstallerUacPlanPath) {
+    Assert-InstallerProperties $installerPlan @('FormatVersion','Decision','InitiatingUser','PromptTimeoutSeconds','ExpectedExitCode','Verifier','PrivilegedObservations') 'Installer UAC plan'
+}
 
 function Resolve-GuestSetupClientExecutable {
     param(
@@ -1109,7 +1118,7 @@ elseif (-not [string]::IsNullOrWhiteSpace($ActionsJson)) {
         $actions += $action
     }
 }
-elseif ($GuestRestartPlanPath) { $actions = @() }
+elseif ($GuestRestartPlanPath -or $InstallerUacPlanPath) { $actions = @() }
 elseif ($ExpectGuestPowerOff) {
     $actions = @(
         [ordered]@{
@@ -1128,7 +1137,7 @@ else {
     )
 }
 
-if ($actions.Count -eq 0 -and -not $GuestRestartPlanPath) {
+if ($actions.Count -eq 0 -and -not $GuestRestartPlanPath -and -not $InstallerUacPlanPath) {
     throw 'At least one guest action is required.'
 }
 
@@ -1495,7 +1504,7 @@ try {
     $queueDeadlineUtc = $createdUtc.AddSeconds($QueueTimeoutSeconds)
     $request = [ordered]@{
         RequestId = $requestId
-        Operation = if ($powerTestRequested) { 'RunGuestJobPowerTestV1' } elseif ($guestSetupRequest -and $systemPromptRequested) { 'RunGuestJobSetupSystemPromptsV1' } elseif ($systemPromptRequested) { 'RunGuestJobSystemPromptsV1' } elseif ($guestSetupRequest) { 'RunGuestJobSetupV1' } elseif ($networkEnabled) { 'RunGuestJobNetworkV1' } else { 'RunGuestJob' }
+        Operation = if ($InstallerUacPlanPath) { 'RunGuestInstallerV2' } elseif ($powerTestRequested) { 'RunGuestJobPowerTestV1' } elseif ($guestSetupRequest -and $systemPromptRequested) { 'RunGuestJobSetupSystemPromptsV1' } elseif ($systemPromptRequested) { 'RunGuestJobSystemPromptsV1' } elseif ($guestSetupRequest) { 'RunGuestJobSetupV1' } elseif ($networkEnabled) { 'RunGuestJobNetworkV1' } else { 'RunGuestJob' }
         CreatedUtc = $createdUtc.ToString('o')
         QueueTimeoutSeconds = $QueueTimeoutSeconds
         ExecutionTimeoutSeconds = $ExecutionTimeoutSeconds
@@ -1526,6 +1535,16 @@ try {
     if ($GuestCredentialFixture) { $request['GuestCredentialFixture'] = $true }
     if ($powerTestRequested) { $null = Resolve-GuestPowerTestPolicy -Request ([pscustomobject]$request) -PayloadManifest $payloadManifest }
     if ($systemPromptContract) { $request['SystemPrompts'] = $systemPromptContract }
+    if ($InstallerUacPlanPath) {
+        if (-not $artifact.PSIsContainer) { throw 'Installer UAC requires a directory containing the installer and separately bound verifier.' }
+        $installerPlan | Add-Member -NotePropertyName ExecutableRelativePath -NotePropertyValue $relativeExecutable
+        $installerFiles = @($payloadManifest.Files | Where-Object { ([string]$_.RelativePath).Replace('/','\') -ieq $relativeExecutable })
+        if ($installerFiles.Count -ne 1) { throw 'Installer executable must identify exactly one manifest file.' }
+        $installerPlan | Add-Member -NotePropertyName ExecutableSha256 -NotePropertyValue $installerFiles[0].Sha256
+        $request['InstallerUac'] = $installerPlan
+        $installerPlan = Resolve-InstallerUacPolicyV2 -Request ([pscustomobject]$request) -PayloadManifest $payloadManifest
+        $request['InstallerUac'] = $installerPlan
+    }
     if ($ExpectGuestPowerOff) {
         $request['ExpectGuestPowerOff'] = $true
         $request['GuestPowerOffRecoveryTimeoutSeconds'] = [int]$GuestPowerOffRecoveryTimeoutSeconds
@@ -2013,7 +2032,8 @@ try {
             $brokerResult.GuestRestart.RequestId -ceq $requestId -and @($brokerResult.GuestRestart.Boots).Count -eq $restartPlan.Boots.Count -and
             @($brokerResult.GuestRestart.Phases).Count -eq ($restartPlan.Boots.Count + 1) -and $brokerResult.GuestRestart.OriginalApplicationLaunchCount -eq 1 -and
             $brokerResult.GuestRestart.ApplicationActionReplayed -is [bool] -and -not $brokerResult.GuestRestart.ApplicationActionReplayed)
-        $harnessSucceeded = [bool]$baseHarnessSucceeded -and [bool]$expectedGuestPowerOffContractProven -and [bool]$systemPromptContractProven -and $restartContractProven
+        $installerContractProven = -not $InstallerUacPlanPath -or ($guestResult -and (Test-InstallerUacReceipt -Receipt $guestResult.InstallerUac -Policy $installerPlan -RequestId $requestId))
+        $harnessSucceeded = [bool]$baseHarnessSucceeded -and [bool]$expectedGuestPowerOffContractProven -and [bool]$systemPromptContractProven -and $restartContractProven -and $installerContractProven
         $testEvaluated = [bool]($guestResult -and $guestResult.TestEvaluated)
         $testPassed = if ($testEvaluated) { [bool]$guestResult.TestPassed } else { $null }
         if ($missingTestEvidence.Count -gt 0) {
@@ -2041,10 +2061,13 @@ try {
             HarnessSucceeded = [bool]$harnessSucceeded
             BrokerSucceeded = [bool]$brokerResult.Success
             GuestHarnessSucceeded = [bool]($guestResult -and $guestResult.Success)
+            InstallerUac = if ($InstallerUacPlanPath -and $guestResult) { $guestResult.InstallerUac } else { $null }
+            InstallerUacContractProven = [bool]$installerContractProven
             TestEvaluated = [bool]$testEvaluated
             TestPassed = if ($testEvaluated) { [bool]$testPassed } else { $null }
             FailureKind = if (-not $harnessSucceeded) {
-                if ($baseHarnessSucceeded -and $ExpectGuestPowerOff -and -not $expectedGuestPowerOffContractProven) {
+                if ($baseHarnessSucceeded -and $InstallerUacPlanPath -and -not $installerContractProven) { 'InstallerUacContract' }
+                elseif ($baseHarnessSucceeded -and $ExpectGuestPowerOff -and -not $expectedGuestPowerOffContractProven) {
                     'ExpectedGuestPowerOffContract'
                 }
                 elseif ($baseHarnessSucceeded -and $systemPromptRequested -and -not $systemPromptContractProven) {
@@ -2121,6 +2144,7 @@ try {
             elseif ($systemPromptRequested -and -not $systemPromptContractProven) {
                 'System-prompt acceptance evidence was incomplete or invalid: ' + ($systemPromptContractEvidenceFailures -join ' ')
             }
+            elseif ($InstallerUacPlanPath -and -not $installerContractProven) { 'Installer UAC receipt did not prove the requested identities, decision, verification order and cleanup.' }
             elseif ($testEvaluated -and -not $testPassed) {
                 if ($missingTestEvidence.Count -gt 0) {
                     'Required test evidence is missing or empty: ' + ($missingTestEvidence -join ', ')

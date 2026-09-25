@@ -60,7 +60,8 @@ function New-HarnessReleaseAcceptanceInvocations {
         [Parameter(Mandatory = $true)] [string] $SoftwareRoot,
         [Parameter(Mandatory = $true)] [string] $BrokerRoot,
         [string] $PowerCanarySha256 = ('0' * 64),
-        [string] $RestartPlanPath = 'guest-restart-plan.json'
+        [string] $RestartPlanPath = 'guest-restart-plan.json',
+        [string] $InstallerPlanRoot = 'installer-plans'
     )
 
     $canaryRoot = Join-Path $SoftwareRoot 'Canaries'
@@ -201,6 +202,12 @@ function New-HarnessReleaseAcceptanceInvocations {
             }
         }
     )
+    foreach($name in @('InstallerSelfElevation','InstallerStandardUser','InstallerDecline')) {
+        [pscustomobject][ordered]@{
+            Name=$name
+            Parameters=@{ArtifactPath=$canaryRoot;ExecutableRelativePath='InstallerUacCanary.exe';Arguments=$name;InstallerUacPlanPath=(Join-Path $InstallerPlanRoot ($name+'.json'));BrokerRoot=$BrokerRoot;QueueTimeoutSeconds=900;ExecutionTimeoutSeconds=600;ThrowOnFailure=$true}
+        }
+    }
 }
 
 if ($InvocationPreflightOnly) {
@@ -214,7 +221,7 @@ if ($InvocationPreflightOnly) {
         $null -eq (Get-ReleaseOptionalPropertyValue -InputObject $shapeProbe -Name 'Missing') -and
         (Get-ReleaseOptionalPropertyValue -InputObject $shapeProbe -Name 'Present') -is [bool]
     [pscustomobject][ordered]@{
-        Success = $preview.Count -eq 8 -and $maintenanceSnapshotShapeSafe -and $AvailableWorkerCount -ge 2
+        Success = $preview.Count -eq 11 -and $maintenanceSnapshotShapeSafe -and $AvailableWorkerCount -ge 2
         RequiredWorkerCount = 2
         AvailableWorkerCount = $AvailableWorkerCount
         NoMutationPerformed = $true
@@ -495,7 +502,18 @@ $boots = @(for ($boot = 1; $boot -le 2; $boot++) {
     }
 })
 Write-JsonAtomic -Path $restartPlanPath -Value @{ FormatVersion = 1; Boots = $boots }
-$invocations = @(New-HarnessReleaseAcceptanceInvocations -SoftwareRoot $softwareRoot -BrokerRoot $brokerRoot -PowerCanarySha256 $powerCanaryHash -RestartPlanPath $restartPlanPath)
+$installerPlanRoot=Join-Path $EvidenceRoot 'installer-plans'
+$verifierHash=(Get-FileHash -LiteralPath (Join-Path $softwareRoot 'Canaries\InstallerUacVerifier.exe') -Algorithm SHA256).Hash
+foreach($name in @('InstallerSelfElevation','InstallerStandardUser','InstallerDecline')) {
+    $decision=if($name -eq 'InstallerDecline'){'Decline'}else{'Accept'}
+    $plan=@{
+        FormatVersion=2;Decision=$decision;InitiatingUser=$(if($name -eq 'InstallerStandardUser'){'StandardUser'}else{'ManagedAdministrator'});PromptTimeoutSeconds=120;ExpectedExitCode=$(if($decision -eq 'Decline'){1223}else{0})
+        Verifier=@{Purpose='ReadOnlyObservation';ExecutableRelativePath='InstallerUacVerifier.exe';ExecutableSha256=$verifierHash;Arguments=@('{PHASE}','{IDENTITY_FILE}','{VERIFIER_OUTDIR}',$decision,$name);TimeoutSeconds=60;ResultFile='result.json';JsonPointer='/passed';EqualsJson=$true}
+        PrivilegedObservations=@(@{Name='Marker';Root='ProgramData';RelativePath=('CodexInstallerAcceptance\'+$name+'.json')})
+    }
+    Write-JsonAtomic -Path (Join-Path $installerPlanRoot ($name+'.json')) -Value $plan
+}
+$invocations = @(New-HarnessReleaseAcceptanceInvocations -SoftwareRoot $softwareRoot -BrokerRoot $brokerRoot -PowerCanarySha256 $powerCanaryHash -RestartPlanPath $restartPlanPath -InstallerPlanRoot $installerPlanRoot)
 $results = [ordered]@{}
 foreach ($invocation in $invocations) {
     $results[[string]$invocation.Name] = if ($invocation.Name -eq 'GuestRestart') { Invoke-RestartAcceptanceWithPeer -Definition $invocation -Token $restartNetworkToken } else { Invoke-AcceptanceTest -Definition $invocation }

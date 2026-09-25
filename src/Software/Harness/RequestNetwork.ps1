@@ -832,6 +832,10 @@ function Resolve-RequestNetworkProfile {
             throw 'RunGuestJob cannot request network access; use RunGuestJobNetworkV1.'
         }
     }
+    elseif ($operation -ceq 'RunGuestInstallerV2') {
+        if ($profile -cne 'None') { throw 'Installer UAC requires disconnected networking.' }
+        if ($hasGuestSetup -or $hasSystemPrompts) { throw 'Installer UAC cannot use legacy setup or prompt authority.' }
+    }
     elseif ($operation -eq 'RunGuestJobNetworkV1') {
         if (-not $network -or $profile -eq 'None') {
             throw 'RunGuestJobNetworkV1 requires an explicit non-None Network profile.'

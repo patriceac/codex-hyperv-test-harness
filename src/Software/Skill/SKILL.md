@@ -23,6 +23,7 @@ Do not preload every reference.
 - For interaction actions, result assertions, reserved tokens, screenshots, or locked-host proof, read [artifact invocation and actions](references/artifact-and-actions.md).
 - For any auxiliary host input or non-default networking, read [network and host inputs](references/network-and-host-inputs.md) before constructing the request.
 - For an expected startup UAC prompt or Windows Firewall access prompt, read [system-prompt acceptance](references/system-prompts.md). Prompt handling is explicit, identity-bound, and VM-only.
+- For installer self-elevation, a real standard-user session with a separate disposable administrator, or explicit UAC decline, read [installer UAC](references/installer-uac.md). This separate V2 mode disables screenshots and runs a manifest-bound diagnostic verifier before and after the installer.
 - For a bounded elevated executable that must finish before the normal application starts, read [request-scoped guest setup](references/guest-setup.md). The executable is payload-manifest bound; product commands and assertions remain in the product scenario.
 - For an application expected to shut down its disposable guest, read [expected guest power-off](references/expected-guest-power-off.md). That mode has a distinct no-replay evidence contract.
 - For application-initiated restarts, automatic/manual sign-in, or a protected disposable-account credential fixture, read [restart continuation](references/guest-restart.md).

@@ -347,6 +347,12 @@ function Route-LiveEvidenceRequests {
                 Remove-Item -LiteralPath $claimedPath -Force -ErrorAction SilentlyContinue
                 return
             }
+            $processingRequest = Read-LiveEvidenceJsonSafe -Path $processingFile
+            if ($processingRequest -and $processingRequest.Operation -ceq 'RunGuestInstallerV2') {
+                Complete-LiveEvidenceCommandFailure -BrokerRoot $BrokerRoot -Command $command -Status 'Rejected' -FailureKind 'CredentialWorkflowCaptureDisabled' -Message 'Installer UAC requests disable all live capture, including credential and preparation phases.' -LifecycleStage $lifecycleStage
+                Remove-Item -LiteralPath $claimedPath -Force -ErrorAction SilentlyContinue
+                return
+            }
 
             if ($disposition -ne 'Supported') {
                 Complete-LiveEvidenceCommandFailure -BrokerRoot $BrokerRoot -Command $command -Status 'GuestDesktopNotReady' -FailureKind 'GuestDesktopNotReady' -Message "Live capture is not available at lifecycle stage '$lifecycleStage'; the interactive application session is not confirmed ready." -LifecycleStage $lifecycleStage -ApplicationProcessId $applicationProcessId

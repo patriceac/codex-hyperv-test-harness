@@ -275,6 +275,7 @@ if (-not (Test-Path -LiteralPath $guestSetupModulePath -PathType Leaf)) {
 }
 . $guestSetupModulePath
 . (Join-Path $PSScriptRoot 'GuestRestart.ps1')
+. (Join-Path $PSScriptRoot 'InstallerUac.ps1')
 $liveEvidenceModulePath = Join-Path $PSScriptRoot 'LiveEvidence.ps1'
 if (-not (Test-Path -LiteralPath $liveEvidenceModulePath -PathType Leaf)) {
     throw "Live-evidence module not found: $liveEvidenceModulePath"
@@ -778,6 +779,11 @@ function Get-InterruptedExpectedGuestPowerOffRecoveryClassification {
         Reason = $null
     }
     if (-not $Request) { return [pscustomobject]$classification }
+    if ($Request.PSObject.Properties['Operation'] -and $Request.Operation -eq 'RunGuestInstallerV2') {
+        $classification.Disposition = 'Invalid'
+        $classification.Reason = 'Interrupted installer UAC requests are terminal and must never be replayed.'
+        return [pscustomobject]$classification
+    }
     if ($Request.PSObject.Properties['Operation'] -and $Request.Operation -eq 'RunGuestJobPowerTestV1') {
         $classification.Disposition = 'Invalid'
         $classification.Reason = 'Interrupted power-test phases are terminal and must never be replayed.'
@@ -3518,6 +3524,7 @@ function Invoke-GuestRequest {
     $guestPowerFixture = $null
     $guestRestartEvidence = $null
     $guestRestartStarted = $false
+    $installerPolicy = $null
     $failureEvidence = $null
     $guestCredentialFile = $null
     $expectGuestPowerOff = $false
@@ -3663,6 +3670,7 @@ function Invoke-GuestRequest {
         $systemPromptPolicy = Resolve-SystemPromptPolicyV1 -Request $Request -PayloadManifest $payloadManifest
         $guestSetupPolicy = Resolve-GuestSetupPolicyV1 -Request $Request -PayloadManifest $payloadManifest
         $guestPowerPolicy = Resolve-GuestPowerTestPolicy -Request $Request -PayloadManifest $payloadManifest
+        $installerPolicy = Resolve-InstallerUacPolicyV2 -Request $Request -PayloadManifest $payloadManifest
         $hostInputNames = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
         $hostInputDefinitions = @($Request.HostInputs)
         if ($hostInputDefinitions.Count -gt 8) { throw 'A request may expose at most eight read-only host inputs.' }
@@ -4057,6 +4065,19 @@ function Invoke-GuestRequest {
                 if ($requestNetworkRuntime) { $null = Assert-RequestNetworkHostPolicyCurrent -Runtime $requestNetworkRuntime -BrokerRoot $BrokerRoot }
             } -NetworkRecheck $guestRestartNetworkRecheck
             $jobSubmissionAttempts = 1
+        }
+        elseif ($installerPolicy) {
+            $failureStage = 'InstallerUac'
+            Write-RequestState -ResultRoot $RequestStateRoot -RequestId $requestId -Status 'Running' -Message 'Running the attributed installer UAC workflow; no request replay or credential screenshots are permitted.' -CreatedUtc $createdUtc -ClaimedUtc $ClaimedUtc -ExecutionDeadlineUtc $executionDeadlineUtc -WorkerId $workerId
+            $installerRoot = Start-InstallerUacV2 -Session $session -Policy $installerPolicy -Job $job -RequestId $requestId -PayloadRoot $guestPayloadRoot -Outbox $guestOutbox -ResultRoot $ResultRoot -ExecutionDeadlineUtc $executionDeadlineUtc
+            $jobSubmissionAttempts = 1
+            Remove-PSSession -Session $session -ErrorAction SilentlyContinue; $session = $null
+            do {
+                Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
+                $installerStatus = Invoke-InstallerGuestStatus -VmName $vmName -RequestId $requestId -GuestRoot $installerRoot -ExecutionDeadlineUtc $executionDeadlineUtc
+                if ($installerStatus -and $installerStatus.Complete) { break }
+                Start-Sleep -Seconds 2
+            } while ($true)
         }
         else {
         $failureStage = 'SubmittingGuestJob'

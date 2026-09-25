@@ -145,7 +145,7 @@ try {
     $requestExpectProperty = $request.PSObject.Properties['ExpectGuestPowerOff']
     $requestExpectsGuestPowerOff = $requestExpectProperty -and $requestExpectProperty.Value -is [bool] -and [bool]$requestExpectProperty.Value
     $captureRetryAllowed = Test-WorkerCaptureRetryAllowed -AttemptResult $attemptResult -RetryCount $retryCount -CancellationRequested (Test-Path -LiteralPath (Join-Path (Join-Path $BrokerRoot 'Cancellations') ($RequestId + '.json')) -PathType Leaf) -ExpectGuestPowerOff $requestExpectsGuestPowerOff
-    if ($captureRetryAllowed -and $request.Operation -ne 'RunGuestJobPowerTestV1') {
+    if ($captureRetryAllowed -and $request.Operation -notin @('RunGuestJobPowerTestV1','RunGuestInstallerV2')) {
         Set-WorkerCaptureRetry -Request $request -AttemptResult $attemptResult -AttemptRoot $attemptRoot
         Write-RequestState -ResultRoot $resultRoot -RequestId $RequestId -Status 'RetryPendingRecycle' -Message 'A transient capture failure will be replayed once on a clean pool worker.' -CreatedUtc ([DateTime]::Parse([string]$request.CreatedUtc).ToUniversalTime()) -ClaimedUtc ([DateTime]::Parse($ClaimedUtc).ToUniversalTime())
         $retryRequested = $true

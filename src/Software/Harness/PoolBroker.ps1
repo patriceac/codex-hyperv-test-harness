@@ -425,6 +425,9 @@ function Get-PoolInterruptedExpectedGuestPowerOffState {
     )
 
     if (-not $Request) { return $null }
+    if ($Request.PSObject.Properties['Operation'] -and $Request.Operation -eq 'RunGuestInstallerV2') {
+        return [pscustomobject]@{ Disposition = 'InvalidState'; Reason = 'Interrupted installer UAC requests are terminal and must never be replayed.'; RequestState = $RequestState }
+    }
     if ($Request.PSObject.Properties['Operation'] -and $Request.Operation -eq 'RunGuestJobPowerTestV1') {
         return [pscustomobject]@{ Disposition = 'InvalidState'; Reason = 'Interrupted power-test phases are terminal and must never be replayed.'; RequestState = $RequestState }
     }
