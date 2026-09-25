@@ -316,11 +316,11 @@ try {
 } catch {$result.Error=$_.Exception.Message}
 finally {
     if(-not $restarting){
+        $clean=$true
         if($trace){& "$env:SystemRoot\System32\logman.exe" stop $trace -ets 2>$null | Out-Null}
-        if($ui){try{if(-not $ui.Exited){[CodexInstallerNative]::StopExact($ui.Identity)}}catch{$result.Success=$false};$ui.Dispose()}
+        if($ui){try{if(-not $ui.Exited){[CodexInstallerNative]::StopExact($ui.Identity)}}catch{$clean=$false};$ui.Dispose()}
         if(Test-Path -LiteralPath $secretPath){Remove-Item -LiteralPath $secretPath}
         $evidence.CleanupStartedUtc=[DateTime]::UtcNow.ToString('o')
-        $clean=$true
         for($i=$tracked.Count-1;$i -ge 0;$i--){try{[CodexInstallerNative]::StopExact($tracked[$i])}catch{$clean=$false}}
         if($application){$application.Dispose()}
         if($verifierLease){$verifierLease.Dispose()};if($imageLease){$imageLease.Dispose()}
