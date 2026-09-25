@@ -19,19 +19,17 @@ function Write-InstallerJson($Value, [string]$Path) {
 function Get-InstallerDesktopContext {
     $value=[pscustomobject]@{Process=[CodexInstallerNative]::Observe($PID);WindowStation=[CodexInstallerNative]::WindowStationName();ThreadDesktop=[CodexInstallerNative]::ThreadDesktopName();InputDesktop=[CodexInstallerNative]::InputDesktopName()}
     if($value.Process.SessionId -ne [int][CodexInstallerNative]::WTSGetActiveConsoleSessionId() -or $value.WindowStation -ine 'WinSta0' -or $value.ThreadDesktop -ine 'Winlogon'){throw 'Installer desktop helper is not on the console secure desktop.'}
-    $value | Add-Member -NotePropertyName ForegroundTiming -NotePropertyValue $(if($value.InputDesktop -ieq 'Default'){[CodexInstallerNative]::ForegroundTiming()}else{$null})
     $value
 }
 if($WaitForDesktop){
-    $ready=[ordered]@{Success=$false;Initial=$null;LastObserved=$null;Ready=$null;Error=$null}
+    $ready=[ordered]@{Success=$false;Initial=$null;Ready=$null;Error=$null}
     try {
         $ready.Initial=Get-InstallerDesktopContext
-        $limit=[DateTime]::UtcNow.AddSeconds(300)
+        $limit=[DateTime]::UtcNow.AddSeconds(120)
         do {
             $desktop=Get-InstallerDesktopContext
-            $ready.LastObserved=$desktop
-            if($desktop.InputDesktop -ieq 'Default' -and [CodexInstallerNative]::ConsoleSessionFlags() -eq 1 -and $desktop.ForegroundTiming.IdleMilliseconds -ge $desktop.ForegroundTiming.LockTimeoutMilliseconds){$ready.Ready=$desktop;$ready.Success=$true;break}
-            if([DateTime]::UtcNow -ge $limit -or [DateTime]::UtcNow -ge [DateTimeOffset]::Parse($context.DeadlineUtc).UtcDateTime){throw 'The user input desktop or foreground lock did not become ready before installer launch.'}
+            if($desktop.InputDesktop -ieq 'Default' -and [CodexInstallerNative]::ConsoleSessionFlags() -eq 1){$ready.Ready=$desktop;$ready.Success=$true;break}
+            if([DateTime]::UtcNow -ge $limit -or [DateTime]::UtcNow -ge [DateTimeOffset]::Parse($context.DeadlineUtc).UtcDateTime){throw 'The user input desktop did not become ready before installer launch.'}
             Start-Sleep -Milliseconds 250
         }while($true)
     }catch{$ready.Error=$_.Exception.Message}
@@ -92,8 +90,8 @@ if($SecureUi) {
             $observed=[CodexInstallerNative]::ConsentWindows($consent.ProcessId)
             if([CodexInstallerNative]::InputDesktopName() -ieq 'Default'){
                 $pending=Resolve-InstallerConsentActivationWindow $observed.Windows $consent.ProcessId
-                $receipt['PromptActivation']=[ordered]@{Window=$pending;Attempted=$true;ForegroundRequested=$false}
-                $receipt.PromptActivation.ForegroundRequested=[CodexInstallerNative]::ActivateConsentWindow($pending.Handle,$consent.ProcessId,$consent.CreationFileTime,$consent.SessionId,$pending.Class)
+                $receipt['PromptActivation']=[ordered]@{Window=$pending;Attempted=$true;ActivationMessageDelivered=$false}
+                $receipt.PromptActivation.ActivationMessageDelivered=[CodexInstallerNative]::ActivateConsentWindow($pending.Handle,$consent.ProcessId,$consent.CreationFileTime,$consent.SessionId,$pending.Class)
             }
         }
         $window=Assert-InstallerSecurePrompt $gate -WaitForReady
@@ -315,7 +313,7 @@ try {
     $verifierLease=[CodexInstallerPathObservation]::OpenBoundFile((Join-Path $context.PayloadRoot $policy.Verifier.ExecutableRelativePath),$policy.Verifier.ExecutableSha256,2147483648)
     # A first logon can expose Explorer and an unlocked WTS session before leaving Winlogon.
     $ui=[CodexInstallerNative]::StartOnSecureDesktop($PSCommandPath,$RequestRoot,$true)
-    $readyLimit=[DateTime]::UtcNow.AddSeconds(310)
+    $readyLimit=[DateTime]::UtcNow.AddSeconds(130)
     while(-not $ui.Exited){Assert-InstallerDeadline;if([DateTime]::UtcNow -gt $readyLimit){throw 'Input-desktop readiness handler timed out.'};Start-Sleep -Milliseconds 100}
     $evidence['DesktopReady']=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $RequestRoot 'desktop-ready.json') | ConvertFrom-Json
     $ui.Dispose();$ui=$null
