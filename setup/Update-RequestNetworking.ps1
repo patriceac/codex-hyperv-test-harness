@@ -133,6 +133,7 @@ function Get-RequestNetworkingSourceIdentity {
         'HostBroker.ps1',
         'PayloadCache.ps1',
         'PoolBroker.ps1',
+        'PoolRequestGroups.ps1',
         'PoolLifecycle.ps1',
         'Install-PoolHostBroker.ps1',
         'Audit-HyperVTestPool.ps1',
@@ -144,6 +145,7 @@ function Get-RequestNetworkingSourceIdentity {
     }
     $hashes['Skill\SKILL.md'] = Get-RequestNetworkingFileHash -Path (Join-Path $checkoutSkillRoot 'SKILL.md')
     $hashes['Skill\scripts\Invoke-HyperVExecutableTest.ps1'] = Get-RequestNetworkingFileHash -Path (Join-Path $checkoutSkillRoot 'scripts\Invoke-HyperVExecutableTest.ps1')
+    $hashes['Skill\scripts\RequestGroupContract.ps1'] = Get-RequestNetworkingFileHash -Path (Join-Path $checkoutSkillRoot 'scripts\RequestGroupContract.ps1')
     $hashes['Canaries\NetworkBoundaryCanary.cs'] = Get-RequestNetworkingFileHash -Path (Join-Path $checkoutCanariesRoot 'NetworkBoundaryCanary.cs')
     $hashes['Canaries\NetworkBoundaryCanary.exe'] = Get-RequestNetworkingFileHash -Path (Join-Path $checkoutCanariesRoot 'NetworkBoundaryCanary.exe')
     $hashes['Recovery\Test-CodexHyperVRecovery.ps1'] = Get-RequestNetworkingFileHash -Path (Join-Path $checkoutRecoveryRoot 'Test-CodexHyperVRecovery.ps1')

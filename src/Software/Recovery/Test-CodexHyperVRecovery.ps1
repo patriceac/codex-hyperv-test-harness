@@ -62,6 +62,8 @@ try {
         'Software\Harness\InstallerUacNative.ps1',
         'Software\Harness\InstallerUacObservations.ps1',
         'Software\Skill\scripts\InstallerUacContract.ps1',
+        'Software\Skill\scripts\RequestGroupContract.ps1',
+        'Software\Harness\PoolRequestGroups.ps1',
         'Software\Skill\references\installer-uac.md',
         'Software\Canaries\InstallerUacCanary.cs',
         'Software\Canaries\InstallerUacCanary.exe',

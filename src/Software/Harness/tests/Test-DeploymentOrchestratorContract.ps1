@@ -8,6 +8,7 @@ $repositoryRoot = Split-Path -Parent (Split-Path -Parent $softwareRoot)
 $setupRoot = Join-Path $repositoryRoot 'setup'
 $deployPath = Join-Path $setupRoot 'Deploy-HarnessRelease.ps1'
 $acceptancePath = Join-Path $setupRoot 'Invoke-HarnessReleaseAcceptance.ps1'
+$groupAcceptancePath = Join-Path $setupRoot 'Invoke-HarnessGroupAcceptance.ps1'
 $installPath = Join-Path $setupRoot 'Install.ps1'
 $runnerPath = Join-Path $softwareRoot 'Skill\scripts\Invoke-HyperVExecutableTest.ps1'
 $poolBrokerPath = Join-Path $harnessRoot 'PoolBroker.ps1'
@@ -18,7 +19,7 @@ $skillPath = Join-Path $repositoryRoot '.agents\skills\setup-hyperv-harness\SKIL
 $agentsPath = Join-Path $repositoryRoot 'AGENTS.md'
 $scenarios = New-Object Collections.Generic.List[string]
 
-foreach ($path in @($deployPath, $acceptancePath, $installPath, $runnerPath, $poolBrokerPath, $recoveryWrapperPath, $publicAuditPath, $deploymentDocPath, $skillPath, $agentsPath)) {
+foreach ($path in @($deployPath, $acceptancePath, $groupAcceptancePath, $installPath, $runnerPath, $poolBrokerPath, $recoveryWrapperPath, $publicAuditPath, $deploymentDocPath, $skillPath, $agentsPath)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Release contract input is missing: $path" }
 }
 
@@ -47,15 +48,21 @@ if ([string]$recoveryInvocation.BaselineExportMode -ne 'ReuseCurrent' -or
 }
 $scenarios.Add('exact-apply-invocations-defer-duplicate-work-without-expanding-scope')
 
-$acceptancePreview = & $acceptancePath -InstallRoot $probeRoot -InvocationPreflightOnly
+$acceptancePreview = & $acceptancePath -InstallRoot $probeRoot -InvocationPreflightOnly -AvailableWorkerCount 2
 if (-not [bool]$acceptancePreview.Success -or
     -not [bool]$acceptancePreview.NoMutationPerformed -or
     -not [bool]$acceptancePreview.MaintenanceSnapshotShapeSafe -or
     (Test-Path -LiteralPath $probeRoot)) {
     throw 'Acceptance invocation preflight was not successful and mutation-free.'
 }
-if ((@($acceptancePreview.TestNames) -join ',') -ne 'InstallerSelfElevation,InstallerStandardUser,InstallerDecline,LegacyLaunch,Utf8ActionName,KeyboardInput,ExpectedGuestPowerOff,SystemPrompts,GuestRestart,InstalledGuestPowerOff,GuestRestartFailure') {
-    throw 'Release acceptance does not contain the exact eleven required paths in order.'
+if ((@($acceptancePreview.TestNames) -join ',') -ne 'InstallerSelfElevation,InstallerStandardUser,InstallerDecline,LegacyLaunch,Utf8ActionName,KeyboardInput,ExpectedGuestPowerOff,SystemPrompts,GuestRestart,InstalledGuestPowerOff,GuestRestartFailure,GroupedReservations') {
+    throw 'Release acceptance does not contain the exact twelve required paths in order.'
+}
+$groupAcceptanceDescriptor = $acceptancePreview.GroupedReservations
+if ([string]$groupAcceptanceDescriptor.Script -cne 'Invoke-HarnessGroupAcceptance.ps1' -or
+    (@($groupAcceptanceDescriptor.GroupSizes) -join ',') -cne '2,1' -or
+    -not [bool]$groupAcceptanceDescriptor.RequiresCompleteAdmission) {
+    throw 'Grouped-reservation acceptance is not bound to the installed helper, full-capacity and near-capacity groups, and complete admission.'
 }
 $utf8Invocation = @($acceptancePreview.Invocations | Where-Object Name -eq 'Utf8ActionName')[0].Parameters
 if ([string]$utf8Invocation.ActionsPath -notlike '*release-utf8-actions.json' -or
@@ -112,7 +119,7 @@ $failedRestartInvocation = @($acceptancePreview.Invocations | Where-Object Name 
 if ($failedRestartInvocation.ContainsKey('ThrowOnFailure') -or -not $failedRestartInvocation.GuestRestartPlanPath -or
     $failedRestartInvocation.Arguments -cne 'fail-restart "{OUTDIR}"' -or
     $installedShutdownInvocation.GuestSetupArguments[2] -cne '{PAYLOAD}\PowerTestCanary.exe') { throw 'Failure-diagnostic or setup-token acceptance lost its exact reproduction.' }
-$scenarios.Add('eleven-path-isolated-acceptance-is-exactly-bound')
+$scenarios.Add('twelve-path-isolated-acceptance-includes-complete-group-reservations')
 if ($acceptancePreview.RestartNetworkPeer.Profile -ne 'IsolatedTestNet' -or -not $acceptancePreview.RestartNetworkPeer.SameCohort -or
     -not $acceptancePreview.RestartNetworkPeer.DistinctWorkerRequired -or ($acceptancePreview.RestartNetworkPeer.BootChallenges -join ',') -cne 'auto,manual') { throw 'Restart acceptance requires a distinct same-cohort peer after both boots.' }
 & {
@@ -123,11 +130,23 @@ if ($acceptancePreview.RestartNetworkPeer.Profile -ne 'IsolatedTestNet' -or -not
         param($ScriptBlock, $ArgumentList)
         $actions = @($ArgumentList[1].ActionsJson | ConvertFrom-Json)
         if ($actions.Count -ne 1 -or $actions[0].type -cne 'wait_result_file' -or $actions[0].path -cne '{OUTDIR}\peer.json' -or $actions[0].timeoutMs -ne 900000) { throw 'The headless peer must wait for its result without requiring a window.' }
+        $peerParameters = $ArgumentList[1]
+        if ([string]$peerParameters.GroupId -cnotmatch '^[0-9a-f]{32}$' -or [int]$peerParameters.GroupSize -ne 2 -or
+            [string]$peerParameters.GroupId -cne [string]$Definition.Parameters.GroupId -or [int]$Definition.Parameters.GroupSize -ne 2) {
+            throw 'The restart peer and main request must share one valid two-member group reservation.'
+        }
+        $script:peerGroupId = [string]$peerParameters.GroupId
         [pscustomobject]@{ State = 'Completed' }
     }
     function Wait-Job { }
     function Remove-Job { }
-    function Invoke-AcceptanceTest { [pscustomobject]@{ PoolWorkerId = 1; ResultPath = 'C:\synthetic\restart'; Network = @{ GuestAddress = '10.254.0.101' }; GuestRestart = @{ NetworkChecks = @(@{ Succeeded = $true; Evidence = @{ Before = $true; After = $true; Restored = @() } }, @{ Succeeded = $true; Evidence = @{ Before = $true; After = $true; Restored = @() } }) } } }
+    function Invoke-AcceptanceTest {
+        if ([string]$Definition.Parameters.GroupId -cnotmatch '^[0-9a-f]{32}$' -or
+            [string]$Definition.Parameters.GroupId -cne [string]$script:peerGroupId -or [int]$Definition.Parameters.GroupSize -ne 2) {
+            throw 'The main restart runner was not assigned the peer group ID and size.'
+        }
+        [pscustomobject]@{ PoolWorkerId = 1; ResultPath = 'C:\synthetic\restart'; Network = @{ GuestAddress = '10.254.0.101' }; GuestRestart = @{ NetworkChecks = @(@{ Succeeded = $true; Evidence = @{ Before = $true; After = $true; Restored = @() } }, @{ Succeeded = $true; Evidence = @{ Before = $true; After = $true; Restored = @() } }) } }
+    }
     function Receive-Job { @{ Success = $true; PayloadChildDeleted = $true; VmFinalState = 'Off'; PoolWorkerId = $peerWorker; Network = @{ GuestAddress = '10.254.0.102' }; ResultPath = 'C:\synthetic\peer'; RequestId = 'peer' } | ConvertTo-Json -Depth 8 }
     function Read-JsonIfPresent {
         param($Path)
@@ -232,8 +251,8 @@ $deploy = Get-Content -LiteralPath $deployPath -Raw
 if ($deploy -notmatch 'verify the disposable account cannot expire') {
     throw 'The immutable release plan omits guest account expiry protection.'
 }
-if ($deploy -notmatch [regex]::Escape("Run legacy launch, accented-name UI Automation, bounded keyboard, expected-guest-power-off, verified system-prompt, automatic/manual restart with cross-guest traffic after both boots, installed-app shutdown, restart-failure diagnostics, installer self-elevation, standard-user credentials, and explicit UAC decline acceptance in isolated workers.")) {
-    throw 'The immutable release plan does not describe all eleven isolated acceptance paths.'
+if ($deploy -notmatch [regex]::Escape("Run legacy launch, accented-name UI Automation, bounded keyboard, expected-guest-power-off, verified system-prompt, automatic/manual restart with cross-guest traffic after both boots, installed-app shutdown, restart-failure diagnostics, installer self-elevation, standard-user credentials, explicit UAC decline, and grouped reservation acceptance in isolated workers.")) {
+    throw 'The immutable release plan does not describe all twelve isolated acceptance paths.'
 }
 $phaseNames = @('CandidateQualification','LiveReadiness','SourcePromotion','GuestBaselinePromotion','IsolatedAcceptance','RecoveryRefresh','Finalization')
 $lastIndex = -1

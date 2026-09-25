@@ -97,8 +97,19 @@ function Get-QueuedRequest {
     }
 }
 
+function Assert-RejectedAny {
+    param(
+        [Parameter(Mandatory = $true)] [scriptblock] $Operation,
+        [Parameter(Mandatory = $true)] [string] $Scenario
+    )
+    $rejected = $false
+    try { & $Operation }
+    catch { $rejected = $true }
+    if (-not $rejected) { throw "$Scenario was accepted unexpectedly." }
+}
+
 $root = Join-Path ([IO.Path]::GetTempPath()) ('codex-runner-contract-' + [Guid]::NewGuid().ToString('N'))
-foreach ($relative in @('Requests', 'Processing', 'Results', 'PayloadManifests', 'PayloadCache', 'Cancellations', 'Cancelled')) {
+foreach ($relative in @('Requests', 'Processing', 'Results', 'PayloadManifests', 'PayloadCache', 'Cancellations', 'Cancelled', 'Staging')) {
     New-Item -ItemType Directory -Force -Path (Join-Path $root $relative) | Out-Null
 }
 $artifact = Join-Path $root 'never-run.exe'
@@ -295,6 +306,43 @@ try {
     }
     $scenarios.Add('network-cohort-bounded')
 
+    $groupId = '0123456789abcdef0123456789abcdef'
+    Assert-RejectedAny -Scenario 'group size requires group id' -Operation {
+        & $RunnerPath -ArtifactPath $artifact -BrokerRoot $root -GroupSize 2
+    }
+    $scenarios.Add('group-size-requires-group-id')
+
+    Assert-RejectedAny -Scenario 'group id requires nonzero group size' -Operation {
+        & $RunnerPath -ArtifactPath $artifact -BrokerRoot $root -GroupId $groupId
+    }
+    $scenarios.Add('group-id-requires-group-size')
+
+    Assert-RejectedAny -Scenario 'group id requires lowercase guid n form' -Operation {
+        & $RunnerPath -ArtifactPath $artifact -BrokerRoot $root -GroupId '0123456789abcdef0123456789abcdeF' -GroupSize 2
+    }
+    $scenarios.Add('group-id-requires-lowercase-guid-n')
+
+    Assert-RejectedAny -Scenario 'group size is bounded' -Operation {
+        & $RunnerPath -ArtifactPath $artifact -BrokerRoot $root -GroupId $groupId -GroupSize 65
+    }
+    $scenarios.Add('group-size-is-bounded')
+
+    $malformedQueuedId = 'group-cancel-unreadable'
+    $malformedQueuedPath = Join-Path (Join-Path $root 'Requests') ($malformedQueuedId + '.json')
+    [IO.File]::WriteAllText($malformedQueuedPath, '{ not valid JSON')
+    $cancelRunnerPath = Join-Path (Split-Path -Parent $RunnerPath) 'Cancel-HyperVExecutableTest.ps1'
+    $cancelOutput = & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $cancelRunnerPath -RequestId $malformedQueuedId -BrokerRoot $root
+    $cancelOutcomeText = [string]::Join([Environment]::NewLine, [string[]]@($cancelOutput))
+    $cancelOutcome = $cancelOutcomeText | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0 -or [string]$cancelOutcome.Status -cne 'CancellationRequested' -or
+        -not (Test-Path -LiteralPath (Join-Path (Join-Path $root 'Cancellations') ($malformedQueuedId + '.json')) -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $malformedQueuedPath -PathType Leaf)) {
+        throw 'Cancellation must preserve unreadable queued metadata for broker processing and write a cancellation marker.'
+    }
+    Remove-Item -LiteralPath $malformedQueuedPath
+    Remove-Item -LiteralPath (Join-Path (Join-Path $root 'Cancellations') ($malformedQueuedId + '.json'))
+    $scenarios.Add('unreadable-queued-metadata-cancellation-fails-closed')
+
     Assert-Rejected -Scenario 'networked host input without acknowledgement' -ExpectedMessage 'AllowNetworkWithHostInputs is required' -Operation {
         & $RunnerPath -ArtifactPath $artifact -BrokerRoot $root -NetworkProfile InternetOnly -ReadOnlyHostInput @{ Name = 'media'; Path = $hostInput }
     }
@@ -375,7 +423,20 @@ try {
     if ($null -ne $defaultRequest.Network.Cohort -or [bool]$defaultRequest.Network.AllowHostInputs -or $defaultRequest.Network.PSObject.Properties.Name -contains 'SwitchName') {
         throw 'The default network contract must serialize null Cohort and AllowHostInputs=false without a switch selector.'
     }
+    if ($defaultRequest.PSObject.Properties.Name -contains 'Group' -or [string]$defaultRequest.Operation -eq 'RunGuestJobGroupV1') {
+        throw 'A legacy single request unexpectedly serialized group metadata or the group wrapper operation.'
+    }
     $scenarios.Add('network-default-serialized-none')
+
+    $groupInvocation = $baseInvocation.Clone()
+    $groupInvocation.GroupId = $groupId
+    $groupInvocation.GroupSize = 2
+    $groupRequest = Get-QueuedRequest -Scenario 'valid request group contract' -InvocationParameters $groupInvocation
+    Assert-Equal -Scenario 'group wrapper operation' -Actual ([string]$groupRequest.Operation) -Expected 'RunGuestJobGroupV1'
+    Assert-Equal -Scenario 'group metadata id' -Actual ([string]$groupRequest.Group.Id) -Expected $groupId
+    Assert-Equal -Scenario 'group metadata size' -Actual ([int]$groupRequest.Group.Size) -Expected 2
+    Assert-Equal -Scenario 'group metadata preserves original operation' -Actual ([string]$groupRequest.Group.Operation) -Expected 'RunGuestJob'
+    $scenarios.Add('valid-group-request-preserves-member-operation')
 
     $promptInvocation = $baseInvocation.Clone()
     $promptInvocation.AcceptUacPrompt = $true

@@ -23,6 +23,8 @@ An explicitly requested named physical-host test routes to computer use. The har
 
 The elastic pool starts at zero. Leasing a worker causes the broker to prepare one additional spare when capacity remains. A ready spare is retained while any worker is leased, and released workers recycle asynchronously. Each ready worker independently shuts down ten minutes after its last release, producing the intended `0→1→2→3→4→3→2→1→0` shape under load and idle decay.
 
+Tests requiring several simultaneous VMs declare a request group. The first member owns the group's FIFO position; no member is admitted until every declared member and enough clean workers are available. One protected journal write binds the entire group to its workers before launch. Occupied capacity queues the group; a size exceeding the configured pool is rejected. Waiting demand retains ready workers, and later requests cannot consume the capacity ahead of the group. Cancellation or failure cancels unfinished peers; interrupted groups cannot replay members separately. See the [runner group contract](../src/Software/Skill/references/request-groups.md).
+
 Payload files remain at the caller's `ArtifactPath`. The broker uses cheap metadata to identify likely changes and hashes only candidates, synchronizes additions/changes/deletions into an immutable VHDX cache, then attaches a new differencing child to the leased worker. Cleanup detaches and deletes that child. Ordinary build outputs and project locations are untouched.
 
 Large external fixture trees may be exposed for one request through the broker's read-only host-input transport instead of becoming payload copies. The mapping is scoped to the request and removed during cleanup.

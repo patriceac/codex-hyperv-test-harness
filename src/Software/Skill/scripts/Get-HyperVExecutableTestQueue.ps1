@@ -72,6 +72,8 @@ function Get-RequestDetails {
     $queueDeadlineUtc = $createdUtc.AddSeconds($queueTimeoutSeconds)
     [pscustomobject][ordered]@{
         RequestId = $requestId
+        GroupId = if ($request -and $request.PSObject.Properties['Group']) { [string]$request.Group.Id } else { $null }
+        GroupSize = if ($request -and $request.PSObject.Properties['Group']) { $request.Group.Size } else { $null }
         OwnershipStatus = $Status
         Status = $effectiveStatus
         Message = $effectiveMessage

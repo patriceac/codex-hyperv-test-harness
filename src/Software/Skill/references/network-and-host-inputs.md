@@ -32,6 +32,8 @@ General networking is opt-in with `-NetworkProfile`. Omit it or use `None` for t
 
 `IsolatedTestNet` requires `-NetworkCohort <NON_SECRET_LABEL>`. Only concurrent requests in the same explicitly named cohort may share its private VM-only switch. The broker exempts only the disposable request adapter from the guest firewall for cohort protocols. The switch has no host, LAN, or Internet route.
 
+When peers need to run together, submit them as one [request group](request-groups.md) so partial peer sets cannot occupy the pool while waiting for capacity.
+
 ### InternetOnly
 
 `InternetOnly` accepts no cohort or switch override; the broker selects pinned internal infrastructure. It stays disabled until all of the following are pinned and live-tested: the host's sole WinNAT with no static mappings; the internal gateway's `Promiscuous` private-VLAN pair and each guest's matching `Isolated` pair; exact weighted stateful extended ACLs that deny unsolicited and non-TCP/UDP traffic by default; peer layer-2 isolation; expected gateway Ethernet/ARP exchange; and denial of IPv6, host IP, LAN, and inbound access.

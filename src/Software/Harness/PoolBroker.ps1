@@ -1,3 +1,5 @@
+. (Join-Path $PSScriptRoot 'PoolRequestGroups.ps1')
+
 function Get-PoolQueuedFiles {
     @(Get-ChildItem -LiteralPath $requestPath -Filter '*.json' -File -ErrorAction SilentlyContinue |
         Where-Object { [IO.Path]::GetFileNameWithoutExtension($_.Name) -match '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$' } |
@@ -238,12 +240,17 @@ function Write-PoolQueuePositions {
         $resultRoot = Join-Path $resultsPath $requestId
         New-Item -ItemType Directory -Force -Path $resultRoot | Out-Null
         $createdUtc = $file.CreationTimeUtc
+        $request = $null
         try {
             $request = Get-Content -Raw -LiteralPath $file.FullName -Encoding UTF8 | ConvertFrom-Json
             $createdUtc = [DateTime]::Parse([string]$request.CreatedUtc).ToUniversalTime()
         }
         catch { }
-        Write-RequestState -ResultRoot $resultRoot -RequestId $requestId -Status 'Queued' -Message 'Waiting for an available Hyper-V pool worker.' -QueuePosition ($index + 1) -QueueDepth $queueDepth -CreatedUtc $createdUtc
+        $queueMessage = 'Waiting for an available Hyper-V pool worker.'
+        if ($request -and $request.Operation -eq 'RunGuestJobGroupV1') {
+            $queueMessage = "Waiting for all $($request.Group.Size) group members and clean workers; no partial reservation."
+        }
+        Write-RequestState -ResultRoot $resultRoot -RequestId $requestId -Status 'Queued' -Message $queueMessage -QueuePosition ($index + 1) -QueueDepth $queueDepth -CreatedUtc $createdUtc
     }
 }
 
@@ -328,7 +335,10 @@ function Start-PoolRequest {
         }
         $exactExpectedPowerOffAtFailure = $request -and (Test-ExactExpectedGuestPowerOffRequest -Request $request)
         $launchInterruption = $null
-        if ($exactExpectedPowerOffAtFailure) {
+        if ($request -and $request.Operation -eq 'RunGuestJobGroupV1') {
+            $launchInterruption = [pscustomobject]@{ FailureKind = 'RequestGroupInterrupted'; Message = 'A grouped request launch failed; individual replay is prohibited.' }
+        }
+        elseif ($exactExpectedPowerOffAtFailure) {
             if ($requestStateReadFailure) {
                 $launchInterruption = [pscustomobject]@{
                     FailureKind = 'InterruptedRequestStateUnreadable'
@@ -425,6 +435,9 @@ function Get-PoolInterruptedExpectedGuestPowerOffState {
     )
 
     if (-not $Request) { return $null }
+    if ($Request.PSObject.Properties['Operation'] -and $Request.Operation -eq 'RunGuestJobGroupV1') {
+        return [pscustomobject]@{ Disposition = 'InvalidState'; FailureKind = 'RequestGroupInterrupted'; Reason = 'Interrupted groups must be resubmitted together with a new ID; individual replay is prohibited.'; RequestState = $RequestState }
+    }
     if ($Request.PSObject.Properties['Operation'] -and $Request.Operation -eq 'RunGuestInstallerV2') {
         return [pscustomobject]@{ Disposition = 'InvalidState'; Reason = 'Interrupted installer UAC requests are terminal and must never be replayed.'; RequestState = $RequestState }
     }
@@ -727,8 +740,8 @@ function Complete-PoolWorkerRun {
         $powerOffInterruption = if (-not $interruptionTerminal) { Get-PoolInterruptedExpectedGuestPowerOffState -Request $interruptedRequest -RequestState $interruptedRequestState } else { $null }
         if ($powerOffInterruption -and $powerOffInterruption.Disposition -eq 'InvalidState') {
             $interruptionTerminal = [pscustomobject]@{
-                FailureKind = 'ExpectedGuestPowerOffStateInvalid'
-                Message = "The interrupted exact expected-power-off request state was invalid: $([string]$powerOffInterruption.Reason) The request was failed terminally because safe replay could not be established."
+                FailureKind = if ($interruptedRequest.Operation -eq 'RunGuestJobGroupV1') { 'RequestGroupInterrupted' } else { 'ExpectedGuestPowerOffStateInvalid' }
+                Message = "The interrupted request cannot be replayed: $([string]$powerOffInterruption.Reason)"
             }
         }
         $protectedPowerOffState = if ($powerOffInterruption -and $powerOffInterruption.Disposition -eq 'ProtectedNoReplay') { $powerOffInterruption.RequestState } else { $null }
@@ -880,8 +893,8 @@ function Reconcile-PoolRecoveryRequests {
                 $powerOffInterruption = if (-not $recoveryTerminal) { Get-PoolInterruptedExpectedGuestPowerOffState -Request $recoveryRequest -RequestState $recoveryRequestState } else { $null }
                 if ($powerOffInterruption -and $powerOffInterruption.Disposition -eq 'InvalidState') {
                     $recoveryTerminal = [pscustomobject]@{
-                        FailureKind = 'ExpectedGuestPowerOffStateInvalid'
-                        Message = "The recycled exact expected-power-off request state was invalid: $([string]$powerOffInterruption.Reason) Replay was refused because safe pre-delivery could not be established."
+                        FailureKind = if ($recoveryRequest.Operation -eq 'RunGuestJobGroupV1') { 'RequestGroupInterrupted' } else { 'ExpectedGuestPowerOffStateInvalid' }
+                        Message = "The recycled request cannot be replayed: $([string]$powerOffInterruption.Reason)"
                     }
                 }
                 $protectedPowerOffState = if ($powerOffInterruption -and $powerOffInterruption.Disposition -eq 'ProtectedNoReplay') { $powerOffInterruption.RequestState } else { $null }
@@ -1059,9 +1072,17 @@ function Ensure-PoolWarmSpareInvariant {
 
 function Assign-PoolRequests {
     while ($true) {
-        $state = @(Get-PoolWorkerStates -BrokerRoot $BrokerRoot -Config $Config | Where-Object { $_.Status -eq 'Ready' -and [bool]$_.OsClean } | Sort-Object LastReadyUtc, @{ Expression = { [int]$_.WorkerId } }) | Select-Object -First 1
+        $readyStates = @(Get-PoolWorkerStates -BrokerRoot $BrokerRoot -Config $Config | Where-Object { $_.Status -eq 'Ready' -and [bool]$_.OsClean } | Sort-Object LastReadyUtc, @{ Expression = { [int]$_.WorkerId } })
+        $state = $readyStates | Select-Object -First 1
         $requestFile = Get-PoolQueuedFiles | Select-Object -First 1
         if (-not $state -or -not $requestFile) { break }
+        $request = $null
+        try { $request = Read-BrokerJsonWithRetry -Path $requestFile.FullName } catch { }
+        if ($request -and ($request.Operation -eq 'RunGuestJobGroupV1' -or $request.PSObject.Properties['Group'])) {
+            if (-not (Start-PoolRequestGroup -RequestFile $requestFile -ReadyStates $readyStates)) { break }
+            Ensure-PoolWarmSpareInvariant
+            continue
+        }
         if (Start-PoolRequest -State $state -RequestFile $requestFile) {
             Ensure-PoolWarmSpareInvariant
         }
@@ -1072,6 +1093,7 @@ function Assign-PoolRequests {
 }
 
 function Queue-ExpiredPoolWorkersForStop {
+    if (@(Get-PoolQueuedFiles).Count -gt 0) { return }
     $now = [DateTime]::UtcNow
     $states = Get-PoolWorkerStates -BrokerRoot $BrokerRoot -Config $Config
     $summary = Get-PoolWarmSpareSummary -States $states
@@ -1198,8 +1220,8 @@ function Recover-PoolBrokerState {
         $powerOffInterruption = if (-not $startupTerminal) { Get-PoolInterruptedExpectedGuestPowerOffState -Request $orphanedRequest -RequestState $orphanedRequestState } else { $null }
         if ($powerOffInterruption -and $powerOffInterruption.Disposition -eq 'InvalidState') {
             $startupTerminal = [pscustomobject]@{
-                FailureKind = 'ExpectedGuestPowerOffStateInvalid'
-                Message = "The orphaned exact expected-power-off request state was invalid: $([string]$powerOffInterruption.Reason) It was failed terminally because safe startup replay could not be established."
+                FailureKind = if ($orphanedRequest.Operation -eq 'RunGuestJobGroupV1') { 'RequestGroupInterrupted' } else { 'ExpectedGuestPowerOffStateInvalid' }
+                Message = "The orphaned request cannot be replayed: $([string]$powerOffInterruption.Reason)"
             }
         }
         $protectedPowerOffState = if ($powerOffInterruption -and $powerOffInterruption.Disposition -eq 'ProtectedNoReplay') { $powerOffInterruption.RequestState } else { $null }
@@ -1285,6 +1307,7 @@ function Invoke-PoolBrokerLoop {
             $nextRequestNetworkCleanupUtc = [DateTime]::UtcNow.AddSeconds(2)
         }
         Reconcile-PoolRecoveryRequests
+        Update-PoolRequestGroups
         Complete-PoolQueuedTerminalRequests
         Write-PoolQueuePositions -Config $config
         try {

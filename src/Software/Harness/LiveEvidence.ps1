@@ -348,7 +348,8 @@ function Route-LiveEvidenceRequests {
                 return
             }
             $processingRequest = Read-LiveEvidenceJsonSafe -Path $processingFile
-            if ($processingRequest -and $processingRequest.Operation -ceq 'RunGuestInstallerV2') {
+            if ($processingRequest -and ($processingRequest.Operation -ceq 'RunGuestInstallerV2' -or
+                ($processingRequest.Operation -ceq 'RunGuestJobGroupV1' -and $processingRequest.Group.Operation -ceq 'RunGuestInstallerV2'))) {
                 Complete-LiveEvidenceCommandFailure -BrokerRoot $BrokerRoot -Command $command -Status 'Rejected' -FailureKind 'CredentialWorkflowCaptureDisabled' -Message 'Installer UAC requests disable all live capture, including credential and preparation phases.' -LifecycleStage $lifecycleStage
                 Remove-Item -LiteralPath $claimedPath -Force -ErrorAction SilentlyContinue
                 return

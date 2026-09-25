@@ -85,6 +85,16 @@ if (Test-Path -LiteralPath $brokerResultPath -PathType Leaf) {
 }
 
 if (Test-Path -LiteralPath $requestFile -PathType Leaf) {
+    $queuedRequest = $null
+    try { $queuedRequest = Get-Content -LiteralPath $requestFile -Raw -Encoding UTF8 | ConvertFrom-Json } catch { }
+    if (-not $queuedRequest -or $queuedRequest.Operation -eq 'RunGuestJobGroupV1' -or $queuedRequest.PSObject.Properties['Group']) {
+        Write-JsonAtomic -Path $cancellationFile -Value ([ordered]@{
+            RequestId = $RequestId; Reason = $Reason; RequestedUtc = [DateTime]::UtcNow.ToString('o')
+            RequestedBy = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+        })
+        Write-Outcome -Status 'CancellationRequested' -Message 'The broker will process cancellation and cancel any group peers.'
+        exit 0
+    }
     $cancelledFile = Join-Path $cancelledRoot ($RequestId + '-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ') + '.json')
     try {
         Move-Item -LiteralPath $requestFile -Destination $cancelledFile -ErrorAction Stop

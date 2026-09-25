@@ -12,6 +12,7 @@ $global:CodexBrokerStateOverridePath = Join-Path $BrokerRoot ('State\WorkerProgr
 
 . (Join-Path $PSScriptRoot 'PoolCommon.ps1')
 . (Join-Path $PSScriptRoot 'HostBroker.ps1') -BrokerRoot $BrokerRoot -LibraryOnly
+. (Join-Path $PSScriptRoot 'PoolRequestGroups.ps1')
 
 $config = Get-Content -Raw -LiteralPath (Join-Path $BrokerRoot 'Private\config.json') -Encoding UTF8 | ConvertFrom-Json
 $worker = Get-PoolWorkerDefinition -Config $config -WorkerId $WorkerId
@@ -130,7 +131,8 @@ try {
             (Test-Path -LiteralPath $terminalResultPath -PathType Leaf)) {
             throw 'The pool worker no longer owns this request; delivery was aborted before application launch.'
         }
-        Invoke-GuestRequest -Request $request -ResultRoot $attemptRoot -RequestStateRoot $resultRoot -Config $workerConfig -ClaimedUtc ([DateTime]::Parse($ClaimedUtc).ToUniversalTime())
+        $executionRequest = Resolve-PoolGroupMemberRequest -Request $request -WorkerId $WorkerId
+        Invoke-GuestRequest -Request $executionRequest -ResultRoot $attemptRoot -RequestStateRoot $resultRoot -Config $workerConfig -ClaimedUtc ([DateTime]::Parse($ClaimedUtc).ToUniversalTime())
     }
     catch {
         $attemptError = $_
@@ -145,7 +147,7 @@ try {
     $requestExpectProperty = $request.PSObject.Properties['ExpectGuestPowerOff']
     $requestExpectsGuestPowerOff = $requestExpectProperty -and $requestExpectProperty.Value -is [bool] -and [bool]$requestExpectProperty.Value
     $captureRetryAllowed = Test-WorkerCaptureRetryAllowed -AttemptResult $attemptResult -RetryCount $retryCount -CancellationRequested (Test-Path -LiteralPath (Join-Path (Join-Path $BrokerRoot 'Cancellations') ($RequestId + '.json')) -PathType Leaf) -ExpectGuestPowerOff $requestExpectsGuestPowerOff
-    if ($captureRetryAllowed -and $request.Operation -notin @('RunGuestJobPowerTestV1','RunGuestInstallerV2')) {
+    if ($captureRetryAllowed -and $request.Operation -notin @('RunGuestJobPowerTestV1','RunGuestInstallerV2','RunGuestJobGroupV1')) {
         Set-WorkerCaptureRetry -Request $request -AttemptResult $attemptResult -AttemptRoot $attemptRoot
         Write-RequestState -ResultRoot $resultRoot -RequestId $RequestId -Status 'RetryPendingRecycle' -Message 'A transient capture failure will be replayed once on a clean pool worker.' -CreatedUtc ([DateTime]::Parse([string]$request.CreatedUtc).ToUniversalTime()) -ClaimedUtc ([DateTime]::Parse($ClaimedUtc).ToUniversalTime())
         $retryRequested = $true

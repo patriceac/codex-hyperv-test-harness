@@ -27,6 +27,8 @@ param(
     [string[]] $GuestSetupArguments = @(),
     [ValidateRange(5, 600)] [int] $GuestSetupTimeoutSeconds = 120,
     [switch] $RequireHostLocked,
+    [ValidatePattern('^[a-f0-9]{32}$')] [string] $GroupId,
+    [ValidateRange(1, 64)] [int] $GroupSize,
     [ValidateRange(5, 86400)] [int] $QueueTimeoutSeconds = 1800,
     [Alias('TimeoutSeconds')] [ValidateRange(10, 7200)] [int] $ExecutionTimeoutSeconds = 900,
     [ValidateRange(30, 600)] [int] $GuestPowerOffRecoveryTimeoutSeconds = 180,
@@ -39,6 +41,10 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'HyperVBrokerLocation.ps1')
 . (Join-Path $PSScriptRoot 'GuestPowerTestContract.ps1')
 . (Join-Path $PSScriptRoot 'InstallerUacContract.ps1')
+. (Join-Path $PSScriptRoot 'RequestGroupContract.ps1')
+if ($PSBoundParameters.ContainsKey('GroupId') -ne $PSBoundParameters.ContainsKey('GroupSize')) {
+    throw 'GroupId and GroupSize must be supplied together. Submit every member concurrently with the same unique group ID and size.'
+}
 $BrokerRoot = Resolve-HyperVBrokerRoot -BrokerRoot $BrokerRoot
 
 if (-not [string]::IsNullOrWhiteSpace($ActionsPath) -and -not [string]::IsNullOrWhiteSpace($ActionsJson)) {
@@ -720,7 +726,7 @@ function Request-Cancellation {
         return 'AlreadyCompleted'
     }
 
-    if (Test-Path -LiteralPath $requestFile -PathType Leaf) {
+    if (-not $GroupId -and (Test-Path -LiteralPath $requestFile -PathType Leaf)) {
         $cancelledFile = Join-Path $cancelledRoot ($requestId + '-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ') + '.json')
         try {
             Move-Item -LiteralPath $requestFile -Destination $cancelledFile -Force -ErrorAction Stop
@@ -1550,6 +1556,11 @@ try {
         $request['GuestPowerOffRecoveryTimeoutSeconds'] = [int]$GuestPowerOffRecoveryTimeoutSeconds
     }
 
+    if ($GroupId) {
+        $request['Group'] = [pscustomobject]@{ Id = $GroupId; Size = $GroupSize; Operation = $request.Operation }
+        $request.Operation = 'RunGuestJobGroupV1'
+        $null = Get-RequestGroupDefinition -Request ([pscustomobject]$request)
+    }
     $temporaryRequest = Join-Path $requestsRoot ($requestId + '.json.tmp')
     $request | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $temporaryRequest -Encoding UTF8
     Move-Item -LiteralPath $temporaryRequest -Destination $requestFile

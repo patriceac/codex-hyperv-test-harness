@@ -221,13 +221,14 @@ if ($InvocationPreflightOnly) {
         $null -eq (Get-ReleaseOptionalPropertyValue -InputObject $shapeProbe -Name 'Missing') -and
         (Get-ReleaseOptionalPropertyValue -InputObject $shapeProbe -Name 'Present') -is [bool]
     [pscustomobject][ordered]@{
-        Success = $preview.Count -eq 11 -and $maintenanceSnapshotShapeSafe -and $AvailableWorkerCount -ge 2
+        Success = $preview.Count -eq 11 -and $maintenanceSnapshotShapeSafe -and $AvailableWorkerCount -ge 2 -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'Invoke-HarnessGroupAcceptance.ps1'))
         RequiredWorkerCount = 2
         AvailableWorkerCount = $AvailableWorkerCount
         NoMutationPerformed = $true
         MaintenanceSnapshotShapeSafe = [bool]$maintenanceSnapshotShapeSafe
-        TestNames = @($preview.Name)
+        TestNames = @($preview.Name) + 'GroupedReservations'
         Invocations = $preview
+        GroupedReservations = [pscustomobject]@{ Script = 'Invoke-HarnessGroupAcceptance.ps1'; GroupSizes = @($AvailableWorkerCount, [Math]::Max(1, $AvailableWorkerCount - 1)); RequiresCompleteAdmission = $true }
         RestartNetworkPeer = [pscustomobject]@{ Profile = 'IsolatedTestNet'; SameCohort = $true; DistinctWorkerRequired = $true; BootChallenges = @('auto','manual') }
     }
     return
@@ -442,6 +443,9 @@ function Invoke-AcceptanceTest {
 function Invoke-RestartAcceptanceWithPeer {
     param($Definition, [string] $Token)
     $peerLog = Join-Path $EvidenceRoot 'restart-peer-runner.log'
+    $groupId = [Guid]::NewGuid().ToString('N')
+    $Definition.Parameters.GroupId = $groupId
+    $Definition.Parameters.GroupSize = 2
     $parameters = @{
         ArtifactPath = Join-Path $softwareRoot 'Canaries\PowerTestCanary.exe'
         Arguments = 'network-peer "{OUTDIR}" ' + $Token
@@ -449,6 +453,7 @@ function Invoke-RestartAcceptanceWithPeer {
         AssertResultFile = '{OUTDIR}\peer.json'; AssertResultJsonPointer = '/passed'; AssertResultEqualsJson = 'true'
         NetworkProfile = 'IsolatedTestNet'; NetworkCohort = $Definition.Parameters.NetworkCohort
         BrokerRoot = $brokerRoot; QueueTimeoutSeconds = 900; ExecutionTimeoutSeconds = 1000
+        GroupId = $groupId; GroupSize = 2
     }
     $peerJob = Start-Job -ScriptBlock {
         param($Runner, $Parameters, $Log)
@@ -603,6 +608,8 @@ foreach ($fileName in @('system-prompt-uac-before.png', 'system-prompt-uac-after
     }
 }
 
+$groupAcceptance = & (Join-Path $PSScriptRoot 'Invoke-HarnessGroupAcceptance.ps1') -InstallRoot $InstallRoot -EvidenceRoot (Join-Path $EvidenceRoot 'grouped-reservations')
+if (-not $groupAcceptance.Success) { throw 'Grouped reservation acceptance failed.' }
 $postAudit = Invoke-PoolAuditUnderMaintenance -Name 'post-acceptance-audit'
 $postAuditPath = [string]$postAudit.AuditPath
 [pscustomobject][ordered]@{
@@ -623,5 +630,5 @@ $postAuditPath = [string]$postAudit.AuditPath
             Success = [bool]$summary.Success -or $_.Name -eq 'GuestRestartFailure'
             NetworkPeer = Get-ReleaseOptionalPropertyValue -InputObject $summary -Name 'NetworkPeer'
         }
-    })
+    }) + @([pscustomobject]@{ Name = 'GroupedReservations'; Success = [bool]$groupAcceptance.Success; ResultPath = [string]$groupAcceptance.ResultPath })
 }

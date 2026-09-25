@@ -198,6 +198,17 @@ try {
         Route-LiveEvidenceRequests -BrokerRoot $brokerRoot -Config $config
     }
 
+    Write-JsonAtomic -Path (Join-Path (Join-Path $brokerRoot 'Processing') ($requestId + '.json')) -Value ([ordered]@{
+        RequestId = $requestId
+        Operation = 'RunGuestJobGroupV1'
+        Group = [ordered]@{ Id = '0123456789abcdef0123456789abcdef'; Size = 2; Operation = 'RunGuestInstallerV2' }
+    })
+    Submit-LiveCommand -CaptureId 'capture-group-installer' -TargetRequestId $requestId
+    $groupInstallerCapture = Read-LiveEvidenceJsonSafe -Path (Join-Path $brokerRoot 'LiveEvidence\Responses\capture-group-installer.json')
+    Assert-True ([string]$groupInstallerCapture.Status -eq 'Rejected' -and [string]$groupInstallerCapture.FailureKind -eq 'CredentialWorkflowCaptureDisabled') 'A grouped installer request bypassed the credential-workflow live-capture prohibition.'
+    Write-JsonAtomic -Path (Join-Path (Join-Path $brokerRoot 'Processing') ($requestId + '.json')) -Value ([ordered]@{ RequestId = $requestId; Operation = 'RunGuestJob' })
+    $scenarios.Add('grouped-installer-capture-remains-prohibited')
+
     Write-JsonAtomic -Path (Join-Path $brokerRoot 'LiveEvidence\Requests\capture-invalid.json') -Value ([ordered]@{
         FormatVersion = 99
         CaptureId = 'capture-invalid'
