@@ -196,8 +196,8 @@ function Observe-GroupReservationState {
     $signature = '{0}|{1}|{2}:{3}:{4}|{5}:{6}:{7}' -f `
         $(if ($pool) { [int]$pool.QueueDepth } else { -1 }),
         $(if ($pool) { [int]$pool.ActiveCount } else { -1 }),
-        $(if ($journalA) { [string]$journalA.Status } else { '-' }), $(@($journalA.Members).Count), $(@($journalA.Assignments).Count),
-        $(if ($journalB) { [string]$journalB.Status } else { '-' }), $(@($journalB.Members).Count), $(@($journalB.Assignments).Count)
+        $(if ($journalA) { [string]$journalA.Status } else { '-' }), $(if ($journalA) { @($journalA.Members).Count } else { 0 }), $(if ($journalA) { @($journalA.Assignments).Count } else { 0 }),
+        $(if ($journalB) { [string]$journalB.Status } else { '-' }), $(if ($journalB) { @($journalB.Members).Count } else { 0 }), $(if ($journalB) { @($journalB.Assignments).Count } else { 0 })
     if ($signature -ne $script:lastSignature) {
         $script:lastSignature = $signature
         Add-GroupAcceptanceSnapshot -PoolState $pool -JournalA $journalA -JournalB $journalB
@@ -378,6 +378,7 @@ catch {
         $entry.Process.Refresh()
         if (-not $entry.Process.HasExited) { Stop-Process -Id $entry.Process.Id -Force -ErrorAction SilentlyContinue }
     }
+    Cancel-OwnedGroupRequests
     $failure = [pscustomobject][ordered]@{
         Success = $false
         StartedUtc = $startedUtc.ToString('o')

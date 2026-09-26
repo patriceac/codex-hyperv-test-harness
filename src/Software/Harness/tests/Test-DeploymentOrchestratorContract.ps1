@@ -64,6 +64,22 @@ if ([string]$groupAcceptanceDescriptor.Script -cne 'Invoke-HarnessGroupAcceptanc
     -not [bool]$groupAcceptanceDescriptor.RequiresCompleteAdmission) {
     throw 'Grouped-reservation acceptance is not bound to the installed helper, full-capacity and near-capacity groups, and complete admission.'
 }
+& {
+    Set-StrictMode -Version Latest
+    $definition = [Management.Automation.Language.Parser]::ParseFile($groupAcceptancePath, [ref]$null, [ref]$null).Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Observe-GroupReservationState' }, $true)
+    . ([scriptblock]::Create($definition.Extent.Text))
+    $poolStatePath = 'synthetic'; $groupAId = 'A'; $groupBId = 'B'; $capacity = 4; $groupBFirstClaimUtc = $null
+    function Read-GroupAcceptanceJson { param($Path) $null }
+    function Get-GroupJournal { param($GroupId) if ($GroupId -ceq $groupAId) { $journalFixture } }
+    function Add-GroupAcceptanceSnapshot { param($PoolState, $JournalA, $JournalB) }
+    foreach ($journalFixture in @($null, [pscustomobject]@{ Status = 'Queued'; Members = @('first-member'); Assignments = @() })) {
+        $script:lastSignature = $null
+        $observed = Observe-GroupReservationState
+        $expected = if ($journalFixture) { '-1|-1|Queued:1:0|-:0:0' } else { '-1|-1|-:0:0|-:0:0' }
+        if ($observed.GroupB -or $script:lastSignature -cne $expected) { throw 'Group observation must tolerate journals that are not created yet, without inventing members or assignments.' }
+    }
+}
+$scenarios.Add('group-observation-handles-missing-journals-during-submission')
 $utf8Invocation = @($acceptancePreview.Invocations | Where-Object Name -eq 'Utf8ActionName')[0].Parameters
 if ([string]$utf8Invocation.ActionsPath -notlike '*release-utf8-actions.json' -or
     [string]$utf8Invocation.AssertResultFile -ne '{OUTDIR}\utf8-action-result.json' -or
