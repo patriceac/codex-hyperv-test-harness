@@ -76,6 +76,13 @@ function Get-GuestRestartObservation {
     param($VmName, $RequestId, $PhaseId, $Outbox, $ExecutionDeadlineUtc)
     $initial = $script:deliveries.Count -eq 0
     $final = $script:deliveries.Count -eq 2
+    if ($initial) {
+        $script:initialObservationCount++
+        if ($script:initialObservationCount -le $script:initialUnavailableCount) {
+            if ($script:initialSignedOut) { return [pscustomobject]@{ PowerTest = [pscustomobject]@{ SignedIn = $false } } }
+            return $null
+        }
+    }
     [pscustomobject]@{
         CurrentGuestUtc = if ($initial) { '2026-01-01T00:01:00Z' } elseif ($final) { '2026-01-01T00:03:20Z' } else { '2026-01-01T00:03:10Z' }
         CurrentGuestBootTimeUtc = if ($initial) { '2026-01-01T00:00:00Z' } else { '2026-01-01T00:03:00Z' }
@@ -90,8 +97,18 @@ $job = [pscustomobject]@{ id = 'test'; executable = 'X:\lab.exe'; arguments = ''
 $credential = New-Object Management.Automation.PSCredential('CodexTest', (ConvertTo-SecureString 'fixture-only-not-a-real-password' -AsPlainText -Force))
 $parameters = @{ Job = $job; Policy = [pscustomobject]@{ Plan = $plan }; VmName = 'synthetic'; RequestId = 'test'; PayloadRoot = 'X:\'; Outbox = 'C:\CodexGuest\Outbox\test'; ResultRoot = 'C:\synthetic'; CredentialFile = ''; ExecutionDeadlineUtc = [DateTime]::UtcNow.AddMinutes(1); Credential = $credential }
 $script:deliveries = New-Object Collections.Generic.List[string]; $script:cancel = $false
+$script:initialObservationCount = 0; $script:initialUnavailableCount = 0; $script:initialSignedOut = $false
 $proof = Invoke-GuestRestartPlan @parameters
 Check 'one-original-one-continuation-same-output' ($proof.ContractProven -and $deliveries.Count -eq 2 -and $proof.OriginalApplicationLaunchCount -eq 1 -and -not $proof.ApplicationActionReplayed)
+$script:deliveries.Clear(); $script:initialObservationCount = 0; $script:initialUnavailableCount = 2
+$proof = Invoke-GuestRestartPlan @parameters
+Check 'initial-observation-retry-does-not-replay' ($proof.ContractProven -and $script:initialObservationCount -eq 3 -and $deliveries.Count -eq 2 -and $proof.OriginalApplicationLaunchCount -eq 1 -and -not $proof.ApplicationActionReplayed)
+foreach ($signedOut in @($false, $true)) {
+    $script:deliveries.Clear(); $script:initialObservationCount = 0; $script:initialUnavailableCount = 3; $script:initialSignedOut = $signedOut
+    Reject ('initial-observation-unavailable-' + $signedOut) { Invoke-GuestRestartPlan @parameters }
+    Check ('initial-retries-bounded-without-submission-' + $signedOut) ($script:initialObservationCount -eq 3 -and $deliveries.Count -eq 0)
+}
+$script:initialUnavailableCount = 0; $script:initialSignedOut = $false
 $script:deliveries.Clear(); $script:fastFinal = $true; $script:terminalFault = $null
 $proof = Invoke-GuestRestartPlan @parameters
 Check 'fast-final-result-survives-lease-removal' ($proof.ContractProven -and $deliveries.Count -eq 2 -and $proof.Phases[1].LaunchEvidence -eq 'CompletedGuestResult')

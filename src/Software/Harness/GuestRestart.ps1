@@ -142,7 +142,11 @@ function Invoke-GuestRestartPlan {
     param($Job, $Policy, [string] $VmName, [string] $RequestId, [string] $PayloadRoot, [string] $Outbox, [string] $ResultRoot, [string] $CredentialFile, [DateTime] $ExecutionDeadlineUtc, [Management.Automation.PSCredential] $Credential, [scriptblock] $NetworkCheck, [scriptblock] $NetworkRecheck)
     $history = [ordered]@{ FormatVersion = 1; RequestId = $RequestId; ContractProven = $false; OriginalApplicationLaunchCount = 0; Boots = @(); Phases = @(); NetworkChecks = @(); ManualSignInCount = 0; ApplicationActionReplayed = $false }
     $journal = Join-Path $ResultRoot 'broker-guest-restart.json'
-    $observation = Get-GuestRestartObservation $VmName $RequestId $RequestId $Outbox $ExecutionDeadlineUtc
+    for ($initialAttempt = 0; $initialAttempt -lt 3; $initialAttempt++) {
+        $observation = Get-GuestRestartObservation $VmName $RequestId $RequestId $Outbox $ExecutionDeadlineUtc
+        if ($observation -and $observation.PowerTest.SignedIn) { break }
+        if ($initialAttempt -lt 2) { Start-Sleep -Milliseconds 250 }
+    }
     if (-not $observation -or -not $observation.PowerTest.SignedIn) { throw 'Restart test initial boot/session observation failed.' }
     $bootTime = [DateTimeOffset]::Parse($observation.CurrentGuestBootTimeUtc).UtcDateTime
     for ($phase = 0; $phase -le $Policy.Plan.Boots.Count; $phase++) {
