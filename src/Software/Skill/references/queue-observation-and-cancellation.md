@@ -18,6 +18,8 @@ Inspect queue and active requests without changing them:
 
 Each entry reports `OwnershipStatus` plus current request status/message, worker/application PID, and guest-action fields when available. With an old broker or temporarily unavailable state file, the runner reports only assignment and waits for confirmed lifecycle state.
 
+After a terminal `HarnessCleanup` failure, normal idle garbage collection may publish `Results\<RequestId>\cleanup-recovery.json` when it removes the orphan payload lease. This separate, immutable receipt binds the original `broker-result.json` by SHA-256 and verifies the exact payload child is absent and detached, its lease and active request are absent, and all configured workers are off. Its `DisposablePayloadCleanup` scope does not change the original harness or application verdict, attest other cleanup boundaries, or replay the application. A ready recycled worker alone is not proof that the payload lease has been removed.
+
 ## Fresh live evidence
 
 Capture a fresh screenshot and optional small guest files for an active request:

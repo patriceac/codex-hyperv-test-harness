@@ -1069,6 +1069,39 @@ function Get-ProtectedPayloadIds {
     Write-Output -NoEnumerate $protected
 }
 
+function Publish-RecoveredPayloadCleanup {
+    param([Parameter(Mandatory = $true)] [string] $RequestId, [Parameter(Mandatory = $true)] [string[]] $VmName)
+
+    $safeId = Assert-PayloadRequestId -RequestId $RequestId
+    $resultRoot = Join-Path $resultsPath $safeId
+    $originalPath = Join-Path $resultRoot 'broker-result.json'
+    $recoveryPath = Join-Path $resultRoot 'cleanup-recovery.json'
+    if ((Test-Path -LiteralPath $recoveryPath) -or -not (Test-Path -LiteralPath $originalPath -PathType Leaf)) { return }
+    $originalHash = (Get-FileHash -LiteralPath $originalPath -Algorithm SHA256 -ErrorAction Stop).Hash
+    $original = Read-BrokerJsonWithRetry -Path $originalPath
+    if ($original.RequestId -cne $safeId -or $original.FailureKind -cne 'HarnessCleanup' -or
+        $original.PayloadChildDeleted -isnot [bool] -or $original.PayloadChildDeleted -or $original.VmName -notin $VmName) { return }
+    $childPath = Join-Path $payloadChildrenPath ($safeId + '.vhdx')
+    if (-not [string]::Equals([IO.Path]::GetFullPath([string]$original.PayloadChildVhdx), [IO.Path]::GetFullPath($childPath), [StringComparison]::OrdinalIgnoreCase)) { return }
+    foreach ($path in @($childPath, (Get-PayloadLeaseFile -RequestId $safeId), (Join-Path $requestPath ($safeId + '.json')), (Join-Path $processingPath ($safeId + '.json')))) {
+        if (Test-Path -LiteralPath $path -ErrorAction Stop) { return }
+    }
+    foreach ($name in $VmName) {
+        if ((Get-VM -Name $name -ErrorAction Stop).State -ne 'Off') { return }
+        foreach ($drive in @(Get-VMHardDiskDrive -VMName $name -ErrorAction Stop)) {
+            if ($drive.Path -and [string]::Equals([IO.Path]::GetFullPath([string]$drive.Path), [IO.Path]::GetFullPath($childPath), [StringComparison]::OrdinalIgnoreCase)) { return }
+        }
+    }
+    if ((Get-FileHash -LiteralPath $originalPath -Algorithm SHA256 -ErrorAction Stop).Hash -cne $originalHash) { throw 'The original cleanup failure receipt changed during recovery verification.' }
+    Write-TerminalJsonAtomic -Path $recoveryPath -Value ([ordered]@{
+        FormatVersion = 1; RequestId = $safeId; RecordedUtc = [DateTime]::UtcNow.ToString('o')
+        Scope = 'DisposablePayloadCleanup'; RecoveryMethod = 'BrokerPayloadGarbageCollection'
+        PayloadCleanupRecovered = $true; VmName = [string]$original.VmName; VmFinalState = 'Off'
+        PayloadChildVhdx = $childPath; PayloadChildDeleted = $true; PayloadChildDetached = $true; PayloadLeaseDeleted = $true
+        OriginalResult = [ordered]@{ Path = $originalPath; Sha256 = $originalHash; HarnessSucceeded = $original.HarnessSucceeded; TestPassed = $original.TestPassed }
+    }) | Out-Null
+}
+
 function Invoke-PayloadCacheGarbageCollection {
     param(
         [Parameter(Mandatory = $true)] $Config,
@@ -1103,6 +1136,7 @@ function Invoke-PayloadCacheGarbageCollection {
             if (-not $requestActive -and -not $childExists -and -not $processAlive) {
                 Remove-Item -LiteralPath $leaseFile.FullName -Force -ErrorAction SilentlyContinue
                 $orphanedFilesRemoved++
+                Publish-RecoveredPayloadCleanup -RequestId $requestId -VmName $VmName
             }
         }
         catch { }
