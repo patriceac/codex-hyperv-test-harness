@@ -66,14 +66,17 @@ if ([string]$groupAcceptanceDescriptor.Script -cne 'Invoke-HarnessGroupAcceptanc
 }
 & {
     Set-StrictMode -Version Latest
-    $definition = [Management.Automation.Language.Parser]::ParseFile($groupAcceptancePath, [ref]$null, [ref]$null).Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Observe-GroupReservationState' }, $true)
+    $groupAst = [Management.Automation.Language.Parser]::ParseFile($groupAcceptancePath, [ref]$null, [ref]$null)
+    $definition = $groupAst.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Observe-GroupReservationState' }, $true)
+    $signatureInitialization = @($groupAst.EndBlock.Statements | Where-Object { $_ -is [Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -ceq '$script:lastSignature' })
+    if ($signatureInitialization.Count -ne 1) { throw 'Grouped acceptance must initialize its script-scoped observation signature before polling.' }
     . ([scriptblock]::Create($definition.Extent.Text))
     $poolStatePath = 'synthetic'; $groupAId = 'A'; $groupBId = 'B'; $capacity = 4; $groupBFirstClaimUtc = $null
     function Read-GroupAcceptanceJson { param($Path) $null }
     function Get-GroupJournal { param($GroupId) if ($GroupId -ceq $groupAId) { $journalFixture } }
     function Add-GroupAcceptanceSnapshot { param($PoolState, $JournalA, $JournalB) }
     foreach ($journalFixture in @($null, [pscustomobject]@{ Status = 'Queued'; Members = @('first-member'); Assignments = @() })) {
-        $script:lastSignature = $null
+        . ([scriptblock]::Create($signatureInitialization[0].Extent.Text))
         $observed = Observe-GroupReservationState
         $expected = if ($journalFixture) { '-1|-1|Queued:1:0|-:0:0' } else { '-1|-1|-:0:0|-:0:0' }
         if ($observed.GroupB -or $script:lastSignature -cne $expected) { throw 'Group observation must tolerate journals that are not created yet, without inventing members or assignments.' }

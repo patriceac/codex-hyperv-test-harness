@@ -42,6 +42,7 @@ $startedUtc = [DateTime]::UtcNow
 $groupAId = [Guid]::NewGuid().ToString('N').ToLowerInvariant()
 $groupBId = [Guid]::NewGuid().ToString('N').ToLowerInvariant()
 $capacity = 0
+$script:lastSignature = $null
 $groupBFirstClaimUtc = $null
 $groupACompletedBeforeBClaim = $null
 $sawWaitingGroupBWithoutPartialAssignment = $false
