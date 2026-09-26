@@ -128,9 +128,9 @@ function Test-InstallerUacReceipt {
             $record=$Receipt.$phase
             if($record.Phase -cne $phase -or $record.Process.UserSid -cne $sid -or $record.Process.Elevated -isnot [bool] -or $record.Process.Elevated -or
                 $record.Process.IntegrityRid -ne 8192 -or $record.Passed -isnot [bool] -or
-                [DateTimeOffset]::Parse($record.CompletedUtc) -ge [DateTimeOffset]::Parse($Receipt.CleanupStartedUtc)){return $false}
+                ([DateTimeOffset]$record.CompletedUtc) -ge ([DateTimeOffset]$Receipt.CleanupStartedUtc)){return $false}
         }
-        if([DateTimeOffset]::Parse($Receipt.Before.CompletedUtc) -ge [DateTimeOffset]::Parse($Receipt.After.CompletedUtc)){return $false}
+        if(([DateTimeOffset]$Receipt.Before.CompletedUtc) -ge ([DateTimeOffset]$Receipt.After.CompletedUtc)){return $false}
         $prompt=$Receipt.Prompt
         if($prompt.Event.RequestorProcessId -ne $prompt.Requester.ProcessId -or $prompt.Event.EmitterProcessId -ne $prompt.Consent.ProcessId -or
             $prompt.Root.UserSid -cne $sid -or $prompt.Root.Elevated -or $prompt.Root.IntegrityRid -ne 8192 -or

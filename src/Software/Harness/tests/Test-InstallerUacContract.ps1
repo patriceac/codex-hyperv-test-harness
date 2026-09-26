@@ -74,4 +74,56 @@ $checks++
     Invoke-Expression $membership.Extent.Text
 }
 $checks++
+function New-Receipt {
+    $process=@{UserSid='S-1-5-21-1-2-3-1001';Elevated=$false;IntegrityRid=8192;SessionId=1;ProcessId=10;ImagePath='D:\Payload\setup.exe'}
+    @{
+        FormatVersion=2;InitialSessionFlags=1;RequestId='receipt-test';Decision='Accept';InitiatingUser='ManagedAdministrator'
+        ExecutableSha256=('A'*64);VerifierSha256=('B'*64);ContractProven=$true;CleanupSucceeded=$true
+        Identity=@{Initiator=@{Sid=$process.UserSid};ElevationAccount=@{Sid=$process.UserSid}}
+        DesktopReady=@{Success=$true;Ready=@{InputDesktop='Default';Process=$process}}
+        Input=@{Success=$true;Decision='Accept';CredentialEntered=$false;DesktopContext=@{Process=$process}}
+        Before=@{Phase='Before';Process=$process;Passed=$true;CompletedUtc='2026-09-25T16:11:16.3269683Z'}
+        After=@{Phase='After';Process=$process;Passed=$true;CompletedUtc='2026-09-25T16:12:34.5350262Z'}
+        CleanupStartedUtc='2026-09-25T16:12:34.5528094Z'
+        Prompt=@{Event=@{RequestorProcessId=11;EmitterProcessId=12};Requester=@{ProcessId=11};Consent=@{ProcessId=12};Root=$process}
+        ElevatedProcess=@(@{UserSid=$process.UserSid;Elevated=$true;IntegrityRid=12288;SessionId=1;ProcessId=13;ImagePath=$process.ImagePath})
+    }
+}
+$savedCulture=[Threading.Thread]::CurrentThread.CurrentCulture
+try {
+    foreach($culture in @('fr-FR','en-US')) {
+        [Threading.Thread]::CurrentThread.CurrentCulture=[Globalization.CultureInfo]::GetCultureInfo($culture)
+        foreach($representation in @('String','UtcDateTime','LocalDateTime','DateTimeOffset','Json')) {
+            $receipt=New-Receipt
+            if($representation -eq 'Json') { $receipt=$receipt | ConvertTo-Json -Depth 12 | ConvertFrom-Json }
+            elseif($representation -ne 'String') {
+                foreach($field in @(@($receipt.Before,'CompletedUtc'),@($receipt.After,'CompletedUtc'),@($receipt,'CleanupStartedUtc'))) {
+                    $timestamp=[DateTimeOffset]$field[0][$field[1]]
+                    $field[0][$field[1]]=switch($representation) {
+                        UtcDateTime { $timestamp.UtcDateTime }
+                        LocalDateTime { $timestamp.LocalDateTime }
+                        DateTimeOffset { $timestamp.ToOffset([TimeSpan]::FromHours(2)) }
+                    }
+                }
+            }
+            if(-not (Test-InstallerUacReceipt $receipt $template.InstallerUac 'receipt-test')) { throw "Valid $representation timestamps rejected under $culture." }
+            $checks++
+        }
+        foreach($change in @(
+            {param($r) $r.Before.CompletedUtc=$r.After.CompletedUtc},
+            {param($r) $r.Before.CompletedUtc='2026-09-25T16:12:34.5400000Z'},
+            {param($r) $r.After.CompletedUtc=$r.CleanupStartedUtc},
+            {param($r) $r.After.CompletedUtc='2026-09-25T16:12:34.5528095Z'},
+            {param($r) $r.Before.CompletedUtc='invalid'},
+            {param($r) $r.After.CompletedUtc=$null},
+            {param($r) $r.CleanupStartedUtc=''},
+            {param($r) $r.ExecutableSha256=('C'*64)}
+        )) {
+            $receipt=New-Receipt
+            & $change $receipt
+            if(Test-InstallerUacReceipt $receipt $template.InstallerUac 'receipt-test') { throw "Invalid receipt accepted under $culture." }
+            $checks++
+        }
+    }
+} finally { [Threading.Thread]::CurrentThread.CurrentCulture=$savedCulture }
 @{Success=$true;ScenarioCount=$checks} | ConvertTo-Json
