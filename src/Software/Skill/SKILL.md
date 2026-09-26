@@ -28,7 +28,7 @@ Do not preload every reference.
 - For an application expected to shut down its disposable guest, read [expected guest power-off](references/expected-guest-power-off.md). That mode has a distinct no-replay evidence contract.
 - For application-initiated restarts, automatic/manual sign-in, or a protected disposable-account credential fixture, read [restart continuation](references/guest-restart.md).
 - For shared queue use, a long request, live evidence, cancellation, or deadline behavior, read [queue, observation, and cancellation](references/queue-observation-and-cancellation.md).
-- For a test needing several VMs at the same time, use [request groups](references/request-groups.md). Submit all members concurrently with one unique `GroupId` and the same `GroupSize` so the broker admits the complete group together.
+- For tests needing several VMs simultaneously, read [request groups](references/request-groups.md) before submission.
 - For payload-cache behavior, pool internals, lifecycle recovery, or performance diagnosis, read [broker, pool, and cache internals](references/broker-pool-and-cache.md).
 - Before claiming any test result, read [verification and reporting](references/verification-and-reporting.md) and apply the sections relevant to the request.
 
@@ -55,7 +55,7 @@ Basic package example:
   -ActionsPath 'D:\build\vm-actions.json'
 ```
 
-`ArtifactPath` is the stable payload-cache identity. The broker fingerprints the tree, reuses stored SHA-256 values for unchanged files, creates an immutable cached generation when needed, and gives each request its own disposable child. PowerShell Direct carries control JSON and evidence, not application payload trees.
+`ArtifactPath` identifies the cached payload. The broker hashes changes, reuses unchanged files, and gives each request a disposable child. PowerShell Direct carries control JSON and evidence, not payload trees.
 
 The broker owns isolation, queueing, worker selection, payload transport, optional networking, evidence collection, process-tree cleanup, VM power-off, and child deletion. Do not bypass those boundaries.
 
