@@ -12,6 +12,7 @@
 *.dll
 *.msi
 *.pdb
+src/Software/Canaries/NativeAppCanary.reference.png
 src/Software/Harness/seed-build/
 
 # Credentials and generated broker state

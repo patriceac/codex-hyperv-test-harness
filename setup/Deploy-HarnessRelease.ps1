@@ -147,7 +147,12 @@ function Get-GuestReleaseInventory {
             'Harness\seed\guest\GuestAgent.ps1',
             'Harness\seed\guest\GuestAgentSupervisor.ps1',
             'Harness\seed\guest\GuestLiveEvidence.ps1',
-            'Harness\seed\guest\GuestPowerTest.ps1'
+            'Harness\seed\guest\GuestPowerTest.ps1',
+            'Harness\seed\guest\GuestNativeActions.ps1',
+            'Harness\seed\guest\GuestNativeDevices.ps1',
+            'Harness\seed\guest\NativeAppSupport.cs',
+            'Harness\seed\guest\NativeAudio.cs',
+            'Skill\scripts\NativeAppContract.ps1'
         )) {
             $candidatePath = Join-Path $CandidateSoftwareRoot $relativePath
             $installedPath = Join-Path $InstalledSoftwareRoot $relativePath
@@ -343,7 +348,7 @@ function New-ReleasePlan {
     $operations.Add('Stage and publish source through Install.ps1 without creating recovery or running duplicate smoke acceptance.')
     if ($guestUpdateRequired) { $operations.Add('Replace the guest harness, verify the disposable account cannot expire in the canonical baseline, and rebuild the disposable pool exactly once.') }
     else { $operations.Add('Refresh the disposable pool exactly once from the unchanged canonical baseline.') }
-    $operations.Add('Run legacy launch, accented-name UI Automation, bounded keyboard, expected-guest-power-off, verified system-prompt, automatic/manual restart with cross-guest traffic after both boots, installed-app shutdown, restart-failure diagnostics, installer self-elevation, standard-user credentials, explicit UAC decline, and grouped reservation acceptance in isolated workers.')
+    $operations.Add('Run the twelve established isolated acceptance paths plus native visual/deterministic protocol, readiness timeout, controller qualification, and audio qualification. Record unsupported guest device capabilities explicitly; never report them as application passes.')
     if ($recoveryBaselineExportMode -eq 'ReuseCurrent') {
         $operations.Add('Reuse the receipt-backed unchanged baseline export with NTFS hard links, hash only the recovery delta, and rotate local recovery exactly once after acceptance.')
     }
@@ -372,7 +377,7 @@ function New-ReleasePlan {
         Operations = $operations.ToArray()
         PrePromotionQualification = 'Exact source parse, build, deterministic tests, invocation contracts, and public-payload audit. No live shadow pool is claimed.'
         LiveShadowPoolAvailable = $false
-        Acceptance = @('InstallerSelfElevation','InstallerStandardUser','InstallerDecline','LegacyLaunch','Utf8ActionName','KeyboardInput','ExpectedGuestPowerOff','SystemPrompts','GuestRestart','InstalledGuestPowerOff','GuestRestartFailure','GroupedReservations')
+        Acceptance = @('InstallerSelfElevation','InstallerStandardUser','InstallerDecline','LegacyLaunch','Utf8ActionName','KeyboardInput','ExpectedGuestPowerOff','SystemPrompts','GuestRestart','InstalledGuestPowerOff','GuestRestartFailure','NativeVisualProtocol','NativeReadinessTimeout','NativeController','NativeAudio','GroupedReservations')
         RecoveryRefreshCount = 1
         AutomaticRollback = $false
         FailurePolicy = 'Stop at the failed checkpoint, preserve valid completed phases, and resume or supersede with a reviewed fix-forward candidate.'
@@ -823,7 +828,7 @@ try {
             -InstallRoot $InstallRoot `
             -EvidenceRoot (Join-Path $deploymentRoot 'Acceptance') `
             -ClientSid $TargetUserSid
-        if (-not [bool]$acceptance.Success -or @($acceptance.Tests).Count -ne 12) { throw 'Release acceptance did not pass all twelve isolated checks.' }
+        if (-not [bool]$acceptance.Success -or @($acceptance.Tests).Count -ne 16) { throw 'Release acceptance did not pass all sixteen isolated checks.' }
         $acceptance
     } | Out-Null
 
@@ -861,7 +866,7 @@ try {
     $terminalResult = [ordered]@{
         Success = $true; Status = 'Ready'; DeploymentId = [string]$plan.DeploymentId; PlanSha256 = [string]$plan.PlanSha256
         CandidateCommit = [string]$plan.CandidateCommit; StatePath = $statePath; RecoveryRefreshCount = 1
-        AcceptanceTests = @('InstallerSelfElevation','InstallerStandardUser','InstallerDecline','LegacyLaunch','Utf8ActionName','KeyboardInput','ExpectedGuestPowerOff','SystemPrompts','GuestRestart','InstalledGuestPowerOff','GuestRestartFailure','GroupedReservations')
+        AcceptanceTests = @('InstallerSelfElevation','InstallerStandardUser','InstallerDecline','LegacyLaunch','Utf8ActionName','KeyboardInput','ExpectedGuestPowerOff','SystemPrompts','GuestRestart','InstalledGuestPowerOff','GuestRestartFailure','NativeVisualProtocol','NativeReadinessTimeout','NativeController','NativeAudio','GroupedReservations')
         AutomaticRollbackAttempted = $false; ReadyToPush = $true; CompletedUtc = [DateTime]::UtcNow.ToString('o')
     }
     Write-JsonAtomic -Path $resultPath -Value $terminalResult

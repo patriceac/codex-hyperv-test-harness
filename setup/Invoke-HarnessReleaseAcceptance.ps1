@@ -208,6 +208,14 @@ function New-HarnessReleaseAcceptanceInvocations {
             }
         }
     )
+    foreach ($native in @(
+        @{ Name='NativeVisualProtocol'; Actions='native-visual-actions.json'; Extra=' --protocol "{OUTDIR}\app-protocol"' },
+        @{ Name='NativeReadinessTimeout'; Actions='native-readiness-timeout-actions.json'; Extra='' },
+        @{ Name='NativeController'; Actions='native-controller-actions.json'; Extra='' },
+        @{ Name='NativeAudio'; Actions='native-audio-actions.json'; Extra=' --audio' }
+    )) {
+        [pscustomobject]@{ Name=$native.Name; Parameters=@{ ArtifactPath=$canaryRoot; ExecutableRelativePath='NativeAppCanary.exe'; Arguments=('--out "{OUTDIR}"'+$native.Extra); ActionsPath=(Join-Path $canaryRoot $native.Actions); BrokerRoot=$BrokerRoot; QueueTimeoutSeconds=900; ExecutionTimeoutSeconds=180 } }
+    }
 }
 
 if ($InvocationPreflightOnly) {
@@ -221,7 +229,7 @@ if ($InvocationPreflightOnly) {
         $null -eq (Get-ReleaseOptionalPropertyValue -InputObject $shapeProbe -Name 'Missing') -and
         (Get-ReleaseOptionalPropertyValue -InputObject $shapeProbe -Name 'Present') -is [bool]
     [pscustomobject][ordered]@{
-        Success = $preview.Count -eq 11 -and $maintenanceSnapshotShapeSafe -and $AvailableWorkerCount -ge 2 -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'Invoke-HarnessGroupAcceptance.ps1'))
+        Success = $preview.Count -eq 15 -and $maintenanceSnapshotShapeSafe -and $AvailableWorkerCount -ge 2 -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'Invoke-HarnessGroupAcceptance.ps1'))
         RequiredWorkerCount = 2
         AvailableWorkerCount = $AvailableWorkerCount
         NoMutationPerformed = $true
@@ -433,6 +441,18 @@ function Invoke-AcceptanceTest {
             $marker.passed -ne $false -or $history.OriginalApplicationLaunchCount -ne 1 -or @($history.Phases).Count -ne 1 -or $history.ContractProven -or
             (Get-Content -Raw -LiteralPath (Join-Path $diagnostics 'product-data\restart-session.resume')) -cne 'failure-diagnostic-canary') { throw 'Restart failure acceptance lost diagnostics, failure identity, or no-replay guarantees.' }
     }
+    elseif ($Definition.Name -eq 'NativeReadinessTimeout') {
+        $guest=Read-JsonIfPresent -Path (Join-Path $summary.ResultPath 'result.json')
+        if ($summary.Success -or -not $summary.HarnessSucceeded -or $summary.FailureKind -ne 'ContentReadinessTimeout' -or
+            @($guest.Actions | Where-Object Type -eq 'click_client').Count -ne 0 -or
+            -not (Test-Path -LiteralPath (Join-Path $summary.ResultPath 'timeout-diagnostic.png'))) { throw 'Content readiness timeout did not stop input and retain diagnostic evidence.' }
+    }
+    elseif ($Definition.Name -in @('NativeController','NativeAudio') -and $summary.FailureKind -eq 'CapabilityUnavailable') {
+        $guest=Read-JsonIfPresent -Path (Join-Path $summary.ResultPath 'result.json')
+        $unavailable=@($guest.Actions | Where-Object { $_.Details.FailureKind -eq 'CapabilityUnavailable' })
+        if ($unavailable.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$unavailable[0].Details.Error)) { throw 'Device capability result is missing its concrete guest failure reason.' }
+        $summary | Add-Member -NotePropertyName CapabilityStatus -NotePropertyValue 'Unavailable'
+    }
     elseif (-not [bool]$summary.Success) { throw "$($Definition.Name) failed: $($summary.Error)" }
     if (-not [bool]$summary.PayloadChildDeleted -or [string]$summary.VmFinalState -ne 'Off') {
         throw "$($Definition.Name) did not satisfy the isolated harness contract: $($summary.Error)"
@@ -608,6 +628,8 @@ foreach ($fileName in @('system-prompt-uac-before.png', 'system-prompt-uac-after
     }
 }
 
+$nativeAcceptance = & (Join-Path $PSScriptRoot 'Test-NativeAppAcceptanceEvidence.ps1') -Results $results
+Write-JsonAtomic -Path (Join-Path $EvidenceRoot 'native-capabilities.json') -Value $nativeAcceptance
 $groupAcceptance = & (Join-Path $PSScriptRoot 'Invoke-HarnessGroupAcceptance.ps1') -InstallRoot $InstallRoot -EvidenceRoot (Join-Path $EvidenceRoot 'grouped-reservations')
 if (-not $groupAcceptance.Success) { throw 'Grouped reservation acceptance failed.' }
 $postAudit = Invoke-PoolAuditUnderMaintenance -Name 'post-acceptance-audit'
@@ -617,6 +639,7 @@ $postAuditPath = [string]$postAudit.AuditPath
     StartedUtc = $startedUtc.ToString('o')
     CompletedUtc = [DateTime]::UtcNow.ToString('o')
     EvidenceRoot = $EvidenceRoot
+    NativeCapabilities = $nativeAcceptance.Capabilities
     PreAuditPath = $preAuditPath
     PreAuditMaintenanceEvidencePath = [string]$preAudit.MaintenanceEvidencePath
     PostAuditPath = $postAuditPath
@@ -627,7 +650,8 @@ $postAuditPath = [string]$postAudit.AuditPath
             Name = [string]$_.Name
             RequestId = [string]$summary.RequestId
             ResultPath = [string]$summary.ResultPath
-            Success = [bool]$summary.Success -or $_.Name -eq 'GuestRestartFailure'
+            Success = [bool]$summary.Success -or $_.Name -in @('GuestRestartFailure','NativeReadinessTimeout') -or ($_.Name -in @('NativeController','NativeAudio') -and $summary.FailureKind -eq 'CapabilityUnavailable')
+            CapabilityStatus = Get-ReleaseOptionalPropertyValue -InputObject $summary -Name 'CapabilityStatus'
             NetworkPeer = Get-ReleaseOptionalPropertyValue -InputObject $summary -Name 'NetworkPeer'
         }
     }) + @([pscustomobject]@{ Name = 'GroupedReservations'; Success = [bool]$groupAcceptance.Success; ResultPath = [string]$groupAcceptance.ResultPath })

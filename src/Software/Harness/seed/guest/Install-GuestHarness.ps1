@@ -12,6 +12,9 @@ Copy-Item -LiteralPath (Join-Path $seedRoot 'GuestAgent.ps1') -Destination $agen
 Copy-Item -LiteralPath (Join-Path $seedRoot 'GuestAgentSupervisor.ps1') -Destination $agentRoot -Force
 Copy-Item -LiteralPath (Join-Path $seedRoot 'GuestLiveEvidence.ps1') -Destination $agentRoot -Force
 Copy-Item -LiteralPath (Join-Path $seedRoot 'GuestPowerTest.ps1') -Destination $agentRoot -Force
+foreach ($nativeFile in @('NativeAppContract.ps1','GuestNativeActions.ps1','GuestNativeDevices.ps1','NativeAppSupport.cs','NativeAudio.cs')) {
+    Copy-Item -LiteralPath (Join-Path $seedRoot $nativeFile) -Destination $agentRoot -Force
+}
 Copy-Item -LiteralPath (Join-Path $seedRoot 'InputProbe.exe') -Destination $agentRoot -Force
 
 foreach ($directoryName in @('Inbox', 'Processing', 'Completed', 'Outbox')) {

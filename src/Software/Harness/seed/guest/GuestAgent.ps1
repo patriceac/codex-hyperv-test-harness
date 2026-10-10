@@ -74,6 +74,17 @@ public static class CodexGuestInput
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool CloseDesktop(IntPtr desktop);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+
+    public static void ClickLeftPhysical(int x, int y)
+    {
+        IntPtr previous = SetThreadDpiAwarenessContext(new IntPtr(-4));
+        if (previous == IntPtr.Zero) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        try { ClickLeft(x, y); }
+        finally { SetThreadDpiAwarenessContext(previous); }
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT
     {
@@ -1572,6 +1583,7 @@ if (-not (Test-Path -LiteralPath $guestLiveEvidenceModule -PathType Leaf)) {
     throw "Guest live evidence module is missing: $guestLiveEvidenceModule"
 }
 . $guestLiveEvidenceModule
+. (Join-Path $agentRoot 'GuestNativeActions.ps1')
 
 function Mount-GuestHostInputs {
     param([object[]] $Definitions)
@@ -1688,6 +1700,7 @@ function Invoke-GuestJob {
     $guestBootTimeUtc = (Get-GuestBootTimeUtc).ToString('o')
     $process = $null
     $windowHandle = [IntPtr]::Zero
+    $script:NativeAppProtocolReady=$false
     $success = $false
     $errorMessage = $null
     $failureKind = $null
@@ -1720,6 +1733,18 @@ function Invoke-GuestJob {
         if ($Job.PSObject.Properties.Name -contains 'hostInputs' -and @($Job.hostInputs).Count -gt 0) {
             Write-AgentState -Status 'PreparingHostInputs' -JobId $jobId
             $mountedHostInputs = @(Mount-GuestHostInputs -Definitions @($Job.hostInputs))
+        }
+        Assert-NativeAppActions -Actions @($Job.actions) -ExpandedPaths
+        foreach ($nativeAction in @($Job.actions)) {
+            if ($nativeAction.type -cin $script:NativeAppActionTypes -and $nativeAction.referencePath) {
+                $reference=[IO.Path]::GetFullPath([string]$nativeAction.referencePath)
+                $allowed=$false
+                foreach ($root in @($Job.nativeReferenceRoots)) {
+                    $canonical=[IO.Path]::GetFullPath([string]$root).TrimEnd('\')
+                    if ($reference.StartsWith($canonical+'\',[StringComparison]::OrdinalIgnoreCase) -or [string]::Equals($reference,$canonical,[StringComparison]::OrdinalIgnoreCase)) { $allowed=$true }
+                }
+                if (-not $allowed) { throw 'Native reference path must stay inside the request payload or read-only host input.' }
+            }
         }
         $executable = [Environment]::ExpandEnvironmentVariables([string]$Job.executable)
         if (-not (Test-Path -LiteralPath $executable)) {
@@ -1966,7 +1991,25 @@ function Invoke-GuestJob {
                         $actionDetails = Capture-Screen -Path (Join-Path $jobOutputPath $fileName) -TimeoutMilliseconds $screenshotTimeout -Attempts $screenshotAttempts
                     }
                     default {
-                        throw "Unsupported action type: $actionType"
+                        if ($actionType -cnotin $script:NativeAppActionTypes) { throw "Unsupported action type: $actionType" }
+                        if ($actionType -in @('wait_content','click_client','assert_image','capture_burst','controller')) {
+                            if ($windowHandle -eq [IntPtr]::Zero) { $windowHandle=Wait-MainWindow -Process $process }
+                            Focus-Window -WindowHandle $windowHandle
+                        }
+                        $actionDetails=Invoke-NativeAppAction -Action $action -Window $windowHandle -OutputRoot $jobOutputPath -JobId $jobId
+                        if ($actionDetails.Evaluated) {
+                            $testEvaluated=$true; $actionTestPassed=[bool]$actionDetails.Passed
+                            if ($null -eq $testPassed) { $testPassed=$true }
+                            if (-not $actionTestPassed) {
+                                $testPassed=$false; $testFailureKind=[string]$actionDetails.FailureKind
+                                $testFailureMessage="Native application action '$actionType' failed; see its measured evidence."
+                                $stopActions=$true
+                            }
+                        }
+                        elseif ($actionDetails.FailureKind) {
+                            $failureKind=[string]$actionDetails.FailureKind
+                            throw "Native application action '$actionType': $($actionDetails.Error)"
+                        }
                     }
                 }
 
@@ -2106,6 +2149,8 @@ function Invoke-GuestJob {
     }
     finally {
         Clear-GuestLiveEvidenceContext
+        try { Reset-NativeController }
+        catch { $success=$false; $failureKind='ControllerCleanup'; $errorMessage="Virtual controller cleanup failed: $($_.Exception.Message)" }
         if ($process -and -not $expectGuestPowerOff) {
             Write-AgentState -Status 'CleaningUpJob' -JobId $jobId
             $processCleanup = Stop-GuestProcessTree -RootProcessId ([int]$process.Id)

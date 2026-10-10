@@ -1,0 +1,4 @@
+[
+  {"type":"wait_result_file","path":"{OUTDIR}\\ready.json","timeoutMs":10000},
+  {"type":"capture_audio","name":"audio","durationMs":1000,"maxBytes":4194304}
+]

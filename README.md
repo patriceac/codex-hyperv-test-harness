@@ -22,6 +22,8 @@ The repository contains the broker, guest agent, elastic pool of up to four VMs,
 
 ## Choose the faithful test boundary
 
+Native renderers can use [content readiness, client/viewport coordinates, image assertions, capture bursts, controller/audio qualification and an opt-in deterministic application protocol](src/Software/Skill/references/native-app-testing.md). These require application-specific conditions and report unavailable guest devices explicitly. The release gate adds four native acceptance paths to the established twelve.
+
 Use a browser first for a pure web application when browser automation can faithfully exercise the requested behavior. Use this Hyper-V harness for native shells, tray behavior, installers, WebView2, Windows integration, or proof of a VM network boundary. Electron remains a native-shell test even when its content is web-based.
 
 For an explicitly requested named physical-host test, give precedence to computer use. The harness is reserved for isolated VM tests.
@@ -104,7 +106,7 @@ Windows activation and licensing are intentionally outside this project. The gue
 
 ## Deploy an ordinary software release
 
-For an existing installation, use the resumable [harness release controller](docs/deployment.md) instead of manually chaining source refresh, guest-baseline replacement, acceptance, and recovery commands. It binds a clean commit and installed configuration into an immutable PlanOnly result and applies through one elevated state machine. Its twelve isolated acceptance paths cover installer self-elevation, standard-user administrator credentials, explicit UAC decline, legacy launch, an accented UI Automation `Name` click without an `AutomationId`, screenshot-backed `WIN+LEFT` keyboard input, expected guest power-off with no replay, executable-bound UAC plus Windows Firewall prompt handling, automatic then manual sign-in across restarts with traffic to a separate guest after both boots, installed-app shutdown, diagnostic retention after a deliberate restart-phase failure, and competing VM groups admitted together.
+For an existing installation, use the resumable [harness release controller](docs/deployment.md) instead of manually chaining source refresh, guest-baseline replacement, acceptance, and recovery commands. It binds a clean commit and installed configuration into an immutable PlanOnly result and applies through one elevated state machine. Its sixteen isolated acceptance paths cover installer self-elevation, standard-user administrator credentials, explicit UAC decline, legacy launch, an accented UI Automation `Name` click without an `AutomationId`, screenshot-backed `WIN+LEFT` keyboard input, expected guest power-off with no replay, executable-bound UAC plus Windows Firewall prompt handling, automatic then manual sign-in across restarts with traffic to a separate guest after both boots, installed-app shutdown, diagnostic retention after a deliberate restart-phase failure, and competing VM groups admitted together.
 
 Source qualification also proves that a BOM-less PowerShell 7 request containing accented text is read correctly by Windows PowerShell 5.1. The controller refreshes and verifies local recovery once at the end; when the canonical checkpoint is unchanged, it reuses the receipt-backed baseline export with NTFS hard links and writes only the software delta. Image servicing, networking changes, first installation, and `ForceRebuild` remain separate reviewed workflows.
 

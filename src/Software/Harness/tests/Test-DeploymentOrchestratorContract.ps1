@@ -55,8 +55,8 @@ if (-not [bool]$acceptancePreview.Success -or
     (Test-Path -LiteralPath $probeRoot)) {
     throw 'Acceptance invocation preflight was not successful and mutation-free.'
 }
-if ((@($acceptancePreview.TestNames) -join ',') -ne 'InstallerSelfElevation,InstallerStandardUser,InstallerDecline,LegacyLaunch,Utf8ActionName,KeyboardInput,ExpectedGuestPowerOff,SystemPrompts,GuestRestart,InstalledGuestPowerOff,GuestRestartFailure,GroupedReservations') {
-    throw 'Release acceptance does not contain the exact twelve required paths in order.'
+if ((@($acceptancePreview.TestNames) -join ',') -ne 'InstallerSelfElevation,InstallerStandardUser,InstallerDecline,LegacyLaunch,Utf8ActionName,KeyboardInput,ExpectedGuestPowerOff,SystemPrompts,GuestRestart,InstalledGuestPowerOff,GuestRestartFailure,NativeVisualProtocol,NativeReadinessTimeout,NativeController,NativeAudio,GroupedReservations') {
+    throw 'Release acceptance does not contain the exact sixteen required paths in order.'
 }
 $groupAcceptanceDescriptor = $acceptancePreview.GroupedReservations
 if ([string]$groupAcceptanceDescriptor.Script -cne 'Invoke-HarnessGroupAcceptance.ps1' -or
@@ -138,7 +138,7 @@ $failedRestartInvocation = @($acceptancePreview.Invocations | Where-Object Name 
 if ($failedRestartInvocation.ContainsKey('ThrowOnFailure') -or -not $failedRestartInvocation.GuestRestartPlanPath -or
     $failedRestartInvocation.Arguments -cne 'fail-restart "{OUTDIR}"' -or
     $installedShutdownInvocation.GuestSetupArguments[2] -cne '{PAYLOAD}\PowerTestCanary.exe') { throw 'Failure-diagnostic or setup-token acceptance lost its exact reproduction.' }
-$scenarios.Add('twelve-path-isolated-acceptance-includes-complete-group-reservations')
+$scenarios.Add('sixteen-path-isolated-acceptance-includes-native-capabilities-and-groups')
 if ($acceptancePreview.RestartNetworkPeer.Profile -ne 'IsolatedTestNet' -or -not $acceptancePreview.RestartNetworkPeer.SameCohort -or
     -not $acceptancePreview.RestartNetworkPeer.DistinctWorkerRequired -or ($acceptancePreview.RestartNetworkPeer.BootChallenges -join ',') -cne 'auto,manual') { throw 'Restart acceptance requires a distinct same-cohort peer after both boots.' }
 & {
@@ -201,8 +201,8 @@ $priorReceipt = @{ FormatVersion = 1; GuestSourceInventory = @($priorGuestFiles 
 }) }
 $priorReceipt | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $inventoryRoot 'prior.json') -Encoding UTF8
 $inventory = @(Get-GuestReleaseInventory -CandidateSoftwareRoot $softwareRoot -InstalledSoftwareRoot $softwareRoot -ProvenancePath (Join-Path $inventoryRoot 'prior.json'))
-if (@($inventory | Where-Object Changed).Count -ne 1 -or @($inventory | Where-Object Changed)[0].RelativePath -ne 'Harness/seed/guest/GuestPowerTest.ps1' -or
-    @($inventory | Where-Object Changed)[0].InstalledSha256) { throw 'A new guest component was incorrectly treated as deployed from source alone.' }
+if (@($inventory | Where-Object Changed).Count -ne 6 -or @($inventory | Where-Object Changed | Where-Object InstalledSha256).Count -ne 0 -or
+    @($inventory | Where-Object { $_.RelativePath -eq 'Skill/scripts/NativeAppContract.ps1' -and $_.Changed }).Count -ne 1) { throw 'New guest components were incorrectly treated as deployed from source alone.' }
 $scenarios.Add('new-guest-component-requires-baseline-promotion')
 
 if ($acceptanceSource -notmatch "Invoke-PoolAuditUnderMaintenance -Name 'pre-acceptance-audit'" -or
@@ -270,8 +270,8 @@ $deploy = Get-Content -LiteralPath $deployPath -Raw
 if ($deploy -notmatch 'verify the disposable account cannot expire') {
     throw 'The immutable release plan omits guest account expiry protection.'
 }
-if ($deploy -notmatch [regex]::Escape("Run legacy launch, accented-name UI Automation, bounded keyboard, expected-guest-power-off, verified system-prompt, automatic/manual restart with cross-guest traffic after both boots, installed-app shutdown, restart-failure diagnostics, installer self-elevation, standard-user credentials, explicit UAC decline, and grouped reservation acceptance in isolated workers.")) {
-    throw 'The immutable release plan does not describe all twelve isolated acceptance paths.'
+if ($deploy -notmatch 'native visual/deterministic protocol, readiness timeout, controller qualification, and audio qualification' -or $deploy -notmatch 'Record unsupported guest device capabilities explicitly') {
+    throw 'The immutable release plan omits the native acceptance scope or explicit device capability qualification.'
 }
 $phaseNames = @('CandidateQualification','LiveReadiness','SourcePromotion','GuestBaselinePromotion','IsolatedAcceptance','RecoveryRefresh','Finalization')
 $lastIndex = -1

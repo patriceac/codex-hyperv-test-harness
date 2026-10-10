@@ -22,6 +22,8 @@ Use `-RequireHostLocked` only when the test specifically needs proof that the ph
 
 An actions file is a JSON array. Supported shapes are:
 
+For content readiness, measured client/viewport input, visual assertions, capture bursts, guest controllers/audio and the opt-in application protocol, use the additional bounded actions in [native application testing](native-app-testing.md). `wait_window` only finds a window; it does not prove application content is ready. `click_relative` retains its existing outer-window coordinates.
+
 ```json
 [
   { "type": "wait_window", "timeoutMs": 30000 },

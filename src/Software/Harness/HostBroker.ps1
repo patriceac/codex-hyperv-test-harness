@@ -4,6 +4,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$nativeContractPath=Join-Path $PSScriptRoot 'NativeAppContract.ps1'
+if (-not (Test-Path -LiteralPath $nativeContractPath)) { $nativeContractPath=Join-Path $PSScriptRoot '..\Skill\scripts\NativeAppContract.ps1' }
+. $nativeContractPath
 
 function Get-ValidatedKeyChord {
     param(
@@ -3595,6 +3598,7 @@ function Invoke-GuestRequest {
             Recover-OrphanedRequestNetworkResources -BrokerRoot $BrokerRoot
         }
         $failureStage = 'ValidatingRequest'
+        Assert-NativeAppActions -Actions @($Request.Job.actions)
         Assert-RequestActive -RequestId $requestId -ExecutionDeadlineUtc $executionDeadlineUtc
         $expectPropertyLookup = $Request.PSObject.Properties['ExpectGuestPowerOff']
         $expectProperty = @($Request.PSObject.Properties | Where-Object { $_.Name -ceq 'ExpectGuestPowerOff' }) | Select-Object -First 1
@@ -3933,6 +3937,7 @@ function Invoke-GuestRequest {
         }
 
         $guestExecutable = [string]$job.executable
+        Assert-NativeAppActions -Actions @($job.actions)
         $payloadToken = '{PAYLOAD}\'
         if ($guestExecutable.StartsWith($payloadToken, [StringComparison]::OrdinalIgnoreCase)) {
             if (-not $guestPayloadRoot) {
@@ -3955,6 +3960,8 @@ function Invoke-GuestRequest {
             throw 'Executable must be the built-in probe or reside in the request payload directory.'
         }
         $job.executable = $guestExecutable
+        $nativeReferenceRoots=@($guestPayloadRoot) + @($hostInputGuestRoots.Values)
+        $job | Add-Member -NotePropertyName nativeReferenceRoots -NotePropertyValue @($nativeReferenceRoots | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -Force
 
         if ($hostInputGuestJobMappings.Count -gt 0) {
             $job | Add-Member -NotePropertyName hostInputs -NotePropertyValue $hostInputGuestJobMappings -Force
@@ -3972,7 +3979,10 @@ function Invoke-GuestRequest {
                 if ($property.Value -isnot [string]) {
                     continue
                 }
-                $tokensAllowedHere = if ($property.Name -eq 'type' -or ($actionType -eq 'screenshot' -and $property.Name -eq 'name') -or ($actionType -eq 'send_keys' -and $property.Name -eq 'keys')) {
+                $tokensAllowedHere = if ($actionType -cin $script:NativeAppActionTypes) {
+                    if ($property.Name -ceq 'referencePath') { @('PAYLOAD') + $hostInputTokenNames } else { @() }
+                }
+                elseif ($property.Name -eq 'type' -or ($actionType -eq 'screenshot' -and $property.Name -eq 'name') -or ($actionType -eq 'send_keys' -and $property.Name -eq 'keys')) {
                     @()
                 }
                 elseif ($actionType -eq 'wait_result_file' -and $property.Name -eq 'path') {

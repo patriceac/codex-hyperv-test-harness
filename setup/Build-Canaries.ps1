@@ -28,6 +28,7 @@ $targets = @(
     @{ Source = 'HostInputCanary.cs'; Output = 'HostInputCanary.exe' },
     @{ Source = 'NetworkBoundaryCanary.cs'; Output = 'NetworkBoundaryCanary.exe' },
     @{ Source = 'LiveEvidenceCanary.cs'; Output = 'LiveEvidenceCanary.exe' },
+    @{ Source = 'NativeAppCanary.cs'; Output = 'NativeAppCanary.exe' },
     @{ Source = 'ShutdownProbe.cs'; Output = 'ShutdownProbe.exe' },
     @{ Source = 'PowerTestCanary.cs'; Output = 'PowerTestCanary.exe' },
     @{ Source = 'InstallerUacCanary.cs'; Output = 'InstallerUacCanary.exe' },
@@ -67,7 +68,7 @@ try {
         $output = Join-Path $CanaryRoot $target.Output
         if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Canary source is missing: $source" }
         $compilerArguments = @('/nologo', '/target:winexe', '/optimize+', "/out:$output", '/reference:System.dll', '/reference:System.Drawing.dll', '/reference:System.Windows.Forms.dll')
-        if ($target.Source -in @('PowerTestCanary.cs','InstallerUacCanary.cs','InstallerUacVerifier.cs')) { $compilerArguments += @('/reference:System.Security.dll', '/reference:System.Web.Extensions.dll') }
+        if ($target.Source -in @('PowerTestCanary.cs','InstallerUacCanary.cs','InstallerUacVerifier.cs','NativeAppCanary.cs')) { $compilerArguments += @('/reference:System.Security.dll', '/reference:System.Web.Extensions.dll') }
         if ($target.ContainsKey('Manifest')) {
             $manifest = Join-Path $CanaryRoot $target.Manifest
             if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) { throw "Canary manifest is missing: $manifest" }
@@ -76,6 +77,17 @@ try {
         $compilerArguments += $source
         & $compiler @compilerArguments
         if ($LASTEXITCODE -ne 0) { throw "Canary compilation failed for $($target.Source) with exit code $LASTEXITCODE." }
+        if ($target.Source -eq 'NativeAppCanary.cs') {
+            Add-Type -AssemblyName System.Drawing
+            $reference=[Drawing.Bitmap]::new(320,200)
+            try {
+                $graphics=[Drawing.Graphics]::FromImage($reference)
+                try { $graphics.Clear([Drawing.Color]::MidnightBlue);$graphics.FillRectangle([Drawing.Brushes]::Lime,0,0,32,32);$graphics.FillRectangle([Drawing.Brushes]::Magenta,160,100,32,32) }
+                finally { $graphics.Dispose() }
+                $reference.Save((Join-Path $CanaryRoot 'NativeAppCanary.reference.png'),[Drawing.Imaging.ImageFormat]::Png)
+            }
+            finally { $reference.Dispose() }
+        }
         $file = Get-Item -LiteralPath $output
         [pscustomobject][ordered]@{
             Source = $source

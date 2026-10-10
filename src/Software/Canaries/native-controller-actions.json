@@ -1,0 +1,7 @@
+[
+  {"type":"wait_result_file","path":"{OUTDIR}\\ready.json","timeoutMs":10000},
+  {"type":"controller","operation":"connect"},
+  {"type":"controller","operation":"state","buttons":["A"],"leftX":0.5,"leftTrigger":0.25,"holdMs":500},
+  {"type":"wait_result_file","path":"{OUTDIR}\\controller-a.json","timeoutMs":3000},
+  {"type":"controller","operation":"disconnect"}
+]

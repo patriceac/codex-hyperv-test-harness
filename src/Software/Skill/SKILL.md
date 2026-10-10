@@ -20,7 +20,7 @@ Trusted compilers, linkers, package managers, linters, and non-application test 
 
 Do not preload every reference.
 
-- For interaction actions, result assertions, reserved tokens, screenshots, or locked-host proof, read [artifact invocation and actions](references/artifact-and-actions.md).
+- For actions and assertions, read [actions](references/artifact-and-actions.md); for readiness, viewport, visual, controller, audio or deterministic checks, read [native testing](references/native-app-testing.md).
 - For any auxiliary host input or non-default networking, read [network and host inputs](references/network-and-host-inputs.md) before constructing the request.
 - For an expected startup UAC prompt or Windows Firewall access prompt, read [system-prompt acceptance](references/system-prompts.md). Prompt handling is explicit, identity-bound, and VM-only.
 - For installer self-elevation, a real standard-user session with a separate disposable administrator, or explicit UAC decline, read [installer UAC](references/installer-uac.md). This separate V2 mode disables screenshots and runs a manifest-bound diagnostic verifier before and after the installer.

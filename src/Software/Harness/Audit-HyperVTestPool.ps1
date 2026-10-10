@@ -383,6 +383,7 @@ try {
     $installedFiles += @('GuestRestart.ps1', 'GuestPowerTestContract.ps1')
     $installedFiles += @('InstallerUac.ps1','InstallerUacContract.ps1','GuestInstallerUac.ps1','InstallerUacGate.ps1','InstallerUacNative.ps1','InstallerUacObservations.ps1')
     $installedFiles += @('PoolRequestGroups.ps1','RequestGroupContract.ps1')
+    $installedFiles += 'NativeAppContract.ps1'
     $privateRoot = Join-Path $BrokerRoot 'Private'
     $aclTargets = New-Object Collections.Generic.List[object]
     $aclTargets.Add([pscustomobject]@{ Path = $BrokerRoot; ClientMode = 'ReadExecute'; ClientInherits = $false })

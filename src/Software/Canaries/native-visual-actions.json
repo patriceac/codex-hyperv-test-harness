@@ -1,0 +1,14 @@
+[
+  {"type":"wait_window","timeoutMs":15000},
+  {"type":"wait_content","name":"ready","timeoutMs":10000,"stableMs":100,"viewport":{"width":320,"height":200,"scaling":"integer_fit"},"pixels":[{"x":10,"y":10,"color":"#00FF00"}]},
+  {"type":"assert_image","name":"reference","viewport":{"width":320,"height":200,"scaling":"integer_fit"},"referencePath":"{PAYLOAD}\\NativeAppCanary.reference.png","channelTolerance":0,"maxMismatchFraction":0},
+  {"type":"capture_burst","name":"effect","durationMs":800,"fps":30,"maxFrames":24,"maxBytes":16777216,"viewport":{"width":320,"height":200,"scaling":"integer_fit"},"trigger":{"type":"click_client","x":10,"y":10,"viewport":{"width":320,"height":200,"scaling":"integer_fit"}}},
+  {"type":"click_client","x":50,"y":50},
+  {"type":"app_command","name":"protocol-ready","operation":"ready","timeoutMs":5000},
+  {"type":"app_command","name":"seed","operation":"seed","seed":123,"timeoutMs":5000},
+  {"type":"app_command","name":"advance","operation":"advance","ticks":10,"timeoutMs":5000,"jsonPointer":"/state/ticks","equalsJson":"10"},
+  {"type":"app_command","name":"checkpoint","operation":"checkpoint","timeoutMs":5000,"jsonPointer":"/state/clicks","equalsJson":"2"},
+  {"type":"app_command","name":"seed-again","operation":"seed","seed":123,"timeoutMs":5000},
+  {"type":"app_command","name":"advance-again","operation":"advance","ticks":10,"timeoutMs":5000},
+  {"type":"screenshot","name":"native-final.png"}
+]

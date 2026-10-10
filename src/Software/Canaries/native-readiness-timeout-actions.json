@@ -1,0 +1,6 @@
+[
+  {"type":"wait_window","timeoutMs":15000},
+  {"type":"wait_content","name":"timeout","timeoutMs":300,"viewport":{"width":320,"height":200,"scaling":"integer_fit"},"pixels":[{"x":10,"y":10,"color":"#00FFFF"}]},
+  {"type":"click_client","x":10,"y":10},
+  {"type":"screenshot","name":"timeout-diagnostic.png"}
+]

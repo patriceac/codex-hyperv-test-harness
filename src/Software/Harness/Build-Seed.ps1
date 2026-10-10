@@ -113,6 +113,10 @@ Copy-Item -LiteralPath (Join-Path $guestSource 'GuestAgent.ps1') -Destination (J
 Copy-Item -LiteralPath (Join-Path $guestSource 'GuestAgentSupervisor.ps1') -Destination (Join-Path $buildRoot 'guest') -Force
 Copy-Item -LiteralPath (Join-Path $guestSource 'GuestLiveEvidence.ps1') -Destination (Join-Path $buildRoot 'guest') -Force
 Copy-Item -LiteralPath (Join-Path $guestSource 'GuestPowerTest.ps1') -Destination (Join-Path $buildRoot 'guest') -Force
+foreach ($nativeFile in @('GuestNativeActions.ps1','GuestNativeDevices.ps1','NativeAppSupport.cs','NativeAudio.cs')) {
+    Copy-Item -LiteralPath (Join-Path $guestSource $nativeFile) -Destination (Join-Path $buildRoot 'guest') -Force
+}
+Copy-Item -LiteralPath (Join-Path $scriptRoot '..\Skill\scripts\NativeAppContract.ps1') -Destination (Join-Path $buildRoot 'guest') -Force
 Copy-Item -LiteralPath (Join-Path $guestSource 'Install-GuestHarness.ps1') -Destination (Join-Path $buildRoot 'guest') -Force
 $inputProbe = & (Join-Path $scriptRoot 'Build-GuestTools.ps1') -GuestSourceRoot $guestSource
 Copy-Item -LiteralPath ([string]$inputProbe.Output) -Destination (Join-Path $buildRoot 'guest\InputProbe.exe') -Force

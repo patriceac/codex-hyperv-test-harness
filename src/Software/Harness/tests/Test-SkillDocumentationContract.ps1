@@ -27,6 +27,7 @@ foreach ($retiredPath in @('scripts\Invoke-HostExecutableTest.ps1', 'scripts\Hos
 
 $requiredReferences = [ordered]@{
     'artifact-and-actions.md' = @('wait_result_file', 'AssertResultJsonPointer', 'send_keys')
+    'native-app-testing.md' = @('wait_content','click_client','assert_image','capture_burst','CapabilityUnavailable','app_command','capture_audio')
     'network-and-host-inputs.md' = @('InternetOnly', 'AllowNetworkWithHostInputs', 'SelectedTransport')
     'system-prompts.md' = @('RunGuestJobSetupSystemPromptsV1', 'Query User', 'no exact-application inbound block')
     'guest-setup.md' = @('GuestSetupExecutableSha256', 'RunGuestJobSetupV1', 'RunGuestJobSetupSystemPromptsV1', 'broker-guest-setup.json')

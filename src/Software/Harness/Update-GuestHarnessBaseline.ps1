@@ -34,6 +34,12 @@ $taskWasStopped = $false
 $maintenanceCreated = $false
 $maintenancePath = Join-Path $BrokerRoot 'State\maintenance.json'
 $snapshotBackupName = $null
+$nativeGuestSources=@(
+    foreach ($name in @('GuestNativeActions.ps1','GuestNativeDevices.ps1','NativeAppSupport.cs','NativeAudio.cs')) {
+        [pscustomobject]@{ Name=$name; Path=(Join-Path $SourceRoot ('seed\guest\'+$name)) }
+    }
+    [pscustomobject]@{ Name='NativeAppContract.ps1'; Path=(Join-Path $SourceRoot '..\Skill\scripts\NativeAppContract.ps1') }
+)
 
 function Get-GuestHarnessSourceInventory {
     $inventory = New-Object Collections.Generic.List[object]
@@ -46,7 +52,7 @@ function Get-GuestHarnessSourceInventory {
         [pscustomobject]@{ Name = 'LiveEvidence'; Path = Join-Path $SourceRoot 'LiveEvidence.ps1' },
         [pscustomobject]@{ Name = 'InstallPoolHostBroker'; Path = Join-Path $SourceRoot 'Install-PoolHostBroker.ps1' },
         [pscustomobject]@{ Name = 'InitializeHyperVTestPool'; Path = Join-Path $SourceRoot 'Initialize-HyperVTestPool.ps1' }
-    )) {
+    ) + $nativeGuestSources) {
         if (-not (Test-Path -LiteralPath $entry.Path -PathType Leaf)) { throw "Required guest-harness update source is missing: $($entry.Path)" }
         $item = Get-Item -LiteralPath $entry.Path -Force
         $inventory.Add([pscustomobject][ordered]@{
@@ -163,7 +169,7 @@ try {
     if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
         throw 'Guest baseline refresh must run from an elevated administrator process.'
     }
-    foreach ($guestSourceFile in @($GuestAgentSource, $GuestSupervisorSource, $GuestLiveEvidenceSource, $GuestPowerTestSource)) {
+    foreach ($guestSourceFile in (@($GuestAgentSource, $GuestSupervisorSource, $GuestLiveEvidenceSource, $GuestPowerTestSource) + @($nativeGuestSources | Where-Object Name -like '*.ps1' | ForEach-Object Path))) {
         if (-not (Test-Path -LiteralPath $guestSourceFile -PathType Leaf)) {
             throw "Updated guest harness file not found: $guestSourceFile"
         }
@@ -256,6 +262,11 @@ try {
         Copy-Item -LiteralPath $GuestSupervisorSource -Destination 'C:\CodexGuest' -ToSession $session -Force
         Copy-Item -LiteralPath $GuestLiveEvidenceSource -Destination 'C:\CodexGuest' -ToSession $session -Force
         Copy-Item -LiteralPath $GuestPowerTestSource -Destination 'C:\CodexGuest' -ToSession $session -Force
+        foreach ($nativeFile in $nativeGuestSources) {
+            Copy-Item -LiteralPath $nativeFile.Path -Destination 'C:\CodexGuest' -ToSession $session -Force
+            $remoteHash=Invoke-Command -Session $session -ScriptBlock { param($Name) (Get-FileHash -LiteralPath (Join-Path 'C:\CodexGuest' $Name) -Algorithm SHA256).Hash } -ArgumentList $nativeFile.Name
+            if ($remoteHash -ne (Get-FileHash -LiteralPath $nativeFile.Path -Algorithm SHA256).Hash) { throw "Updated native guest component hash does not match: $($nativeFile.Name)" }
+        }
         Invoke-Command -Session $session -ScriptBlock {
             Get-LocalUser -SID ([Security.Principal.WindowsIdentity]::GetCurrent().User) |
                 Set-LocalUser -PasswordNeverExpires $true -AccountNeverExpires

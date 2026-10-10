@@ -42,6 +42,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'GuestPowerTestContract.ps1')
 . (Join-Path $PSScriptRoot 'InstallerUacContract.ps1')
 . (Join-Path $PSScriptRoot 'RequestGroupContract.ps1')
+. (Join-Path $PSScriptRoot 'NativeAppContract.ps1')
 if ($PSBoundParameters.ContainsKey('GroupId') -ne $PSBoundParameters.ContainsKey('GroupSize')) {
     throw 'GroupId and GroupSize must be supplied together. Submit every member concurrently with the same unique group ID and size.'
 }
@@ -1149,6 +1150,7 @@ if ($actions.Count -eq 0 -and -not $GuestRestartPlanPath -and -not $InstallerUac
 
 $expectedHarnessEvidence = @()
 $expectedTestEvidence = @()
+Assert-NativeAppActions -Actions $actions
 for ($actionIndex = 0; $actionIndex -lt $actions.Count; $actionIndex++) {
     $action = $actions[$actionIndex]
     $actionType = [string]$action.type
@@ -1242,7 +1244,7 @@ for ($actionIndex = 0; $actionIndex -lt $actions.Count; $actionIndex++) {
             $expectedHarnessEvidence += $fileName
         }
         default {
-            throw "Unsupported action type at position $($actionIndex + 1): $actionType"
+            if ($actionType -cnotin $script:NativeAppActionTypes) { throw "Unsupported action type at position $($actionIndex + 1): $actionType" }
         }
     }
 }
@@ -1279,7 +1281,10 @@ for ($actionIndex = 0; $actionIndex -lt $actions.Count; $actionIndex++) {
     }
 
     foreach ($field in $stringFields) {
-        $tokensAllowedHere = if ($field.Name -eq 'type' -or ($actionType -eq 'screenshot' -and $field.Name -eq 'name') -or ($actionType -eq 'send_keys' -and $field.Name -eq 'keys')) {
+        $tokensAllowedHere = if ($actionType -cin $script:NativeAppActionTypes) {
+            if ($field.Name -ceq 'referencePath') { @('PAYLOAD') + $hostInputTokenNames } else { @() }
+        }
+        elseif ($field.Name -eq 'type' -or ($actionType -eq 'screenshot' -and $field.Name -eq 'name') -or ($actionType -eq 'send_keys' -and $field.Name -eq 'keys')) {
             @()
         }
         elseif ($actionType -eq 'wait_result_file' -and $field.Name -eq 'path') {
