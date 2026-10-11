@@ -29,6 +29,8 @@ Baseline promotion sets and verifies non-expiring account/password policy only f
 
 The disposable guest account uses Windows Console Host so hidden harness processes cannot open Windows Terminal over the application under test. Baseline promotion verifies that guest setting; the host's terminal preference is unchanged.
 
+Baseline change detection includes the guest installation and baseline-update policy scripts as well as runtime files. Guest setup disables AutoPlay for all drives so mounting a payload cannot display a notification over the application; baseline promotion verifies the policy before sealing.
+
 The current architecture does not provide a separately named live shadow broker and worker pool. The plan therefore calls its pre-promotion step `PrePromotionQualification` and explicitly reports `LiveShadowPoolAvailable = false`. That step proves parsing, builds, deterministic tests, exact invocation contracts, and the public payload; live behavior is accepted immediately after promotion in disposable workers. Do not describe this as a live shadow deployment.
 
 ## Apply once

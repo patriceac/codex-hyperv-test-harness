@@ -201,9 +201,25 @@ $priorReceipt = @{ FormatVersion = 1; GuestSourceInventory = @($priorGuestFiles 
 }) }
 $priorReceipt | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $inventoryRoot 'prior.json') -Encoding UTF8
 $inventory = @(Get-GuestReleaseInventory -CandidateSoftwareRoot $softwareRoot -InstalledSoftwareRoot $softwareRoot -ProvenancePath (Join-Path $inventoryRoot 'prior.json'))
-if (@($inventory | Where-Object Changed).Count -ne 6 -or @($inventory | Where-Object Changed | Where-Object InstalledSha256).Count -ne 0 -or
+if (@($inventory | Where-Object Changed).Count -ne 8 -or @($inventory | Where-Object Changed | Where-Object InstalledSha256).Count -ne 0 -or
     @($inventory | Where-Object { $_.RelativePath -eq 'Skill/scripts/NativeAppContract.ps1' -and $_.Changed }).Count -ne 1) { throw 'New guest components were incorrectly treated as deployed from source alone.' }
 $scenarios.Add('new-guest-component-requires-baseline-promotion')
+
+$policyPaths = @('Harness/seed/guest/Install-GuestHarness.ps1', 'Harness/Update-GuestHarnessBaseline.ps1')
+foreach ($changedPolicy in @('unchanged') + $policyPaths) {
+    $policyReceipt = @{ FormatVersion = 1; GuestSourceInventory = @($inventory | ForEach-Object {
+        @{ RelativePath = $_.RelativePath; Sha256 = $(if ($_.RelativePath -eq $changedPolicy) { '0' * 64 } else { $_.CandidateSha256 }) }
+    }) }
+    $policyReceipt | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $inventoryRoot 'policy.json') -Encoding UTF8
+    $changed = @(Get-GuestReleaseInventory -CandidateSoftwareRoot $softwareRoot -InstalledSoftwareRoot $softwareRoot -ProvenancePath (Join-Path $inventoryRoot 'policy.json') | Where-Object Changed)
+    if ($changedPolicy -eq 'unchanged') {
+        if ($changed.Count -ne 0) { throw 'Unchanged attested guest policy requires an unnecessary baseline update.' }
+    }
+    elseif ($changed.Count -ne 1 -or $changed[0].RelativePath -cne $changedPolicy) {
+        throw "Guest policy change would be published without baseline promotion: $changedPolicy"
+    }
+}
+$scenarios.Add('guest-policy-only-change-requires-baseline-promotion')
 
 if ($acceptanceSource -notmatch "Invoke-PoolAuditUnderMaintenance -Name 'pre-acceptance-audit'" -or
     $acceptanceSource -notmatch "Invoke-PoolAuditUnderMaintenance -Name 'post-acceptance-audit'" -or

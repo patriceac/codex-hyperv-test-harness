@@ -144,6 +144,8 @@ function Get-GuestReleaseInventory {
 
     @(
         foreach ($relativePath in @(
+            'Harness\seed\guest\Install-GuestHarness.ps1',
+            'Harness\Update-GuestHarnessBaseline.ps1',
             'Harness\seed\guest\GuestAgent.ps1',
             'Harness\seed\guest\GuestAgentSupervisor.ps1',
             'Harness\seed\guest\GuestLiveEvidence.ps1',
