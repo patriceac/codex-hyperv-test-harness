@@ -147,4 +147,18 @@ foreach ($change in @(@{backend='XInput'},@{backend='Windows.UI.Input.Preview.In
     Reject { Assert-NativeControllerReception $invalid }
 }
 $scenarios.Add('controller-reception-requires-consumer-api-button-and-analog-state')
+
+# Exercise discovery with synthetic inventories; never create host input devices.
+. (Join-Path $harnessRoot 'seed\guest\GuestNativeDevices.ps1')
+$script:controllerPoll=0
+function Get-NativeGamepadIds { $script:controllerPoll++; 'existing'; if ($script:controllerPoll -gt 1) { 'injected' } }
+$detected=Wait-NativeControllerDevice -ExistingIds @('existing') -TimeoutMilliseconds 500
+Assert-True ($detected.DeviceEnumerated -and $detected.InitialCount -eq 1 -and $detected.FinalCount -eq 2 -and $detected.AddedCount -eq 1) 'Newly enumerated controller was not detected.'
+function Get-NativeGamepadIds { 'existing' }
+$unchanged=Wait-NativeControllerDevice -ExistingIds @('existing') -TimeoutMilliseconds 60
+Assert-True (-not $unchanged.DeviceEnumerated -and $unchanged.AddedCount -eq 0 -and $unchanged.ElapsedMs -ge 60) 'A pre-existing device falsely qualified injection.'
+function Get-NativeGamepadIds { }
+$absent=Wait-NativeControllerDevice -ExistingIds @() -TimeoutMilliseconds 60
+Assert-True (-not $absent.DeviceEnumerated -and $absent.FinalCount -eq 0) 'An empty device inventory falsely qualified injection.'
+$scenarios.Add('controller-availability-requires-new-device-with-bounded-discovery')
 [pscustomobject]@{Success=$true;ScenarioCount=$scenarios.Count;Scenarios=$scenarios.ToArray();EvidenceRoot=$testRoot} | ConvertTo-Json -Depth 8

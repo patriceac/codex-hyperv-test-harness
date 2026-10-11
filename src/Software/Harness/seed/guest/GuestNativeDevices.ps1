@@ -1,3 +1,21 @@
+function Get-NativeGamepadIds {
+    foreach ($pad in [Windows.Gaming.Input.Gamepad]::Gamepads) {
+        [Windows.Gaming.Input.RawGameController]::FromGameController($pad).NonRoamableId
+    }
+}
+
+function Wait-NativeControllerDevice {
+    param([string[]]$ExistingIds, [int]$TimeoutMilliseconds=5000)
+    $watch=[Diagnostics.Stopwatch]::StartNew()
+    do {
+        $current=@(Get-NativeGamepadIds)
+        $added=@($current | Where-Object { $_ -and $_ -notin $ExistingIds })
+        if ($added.Count -gt 0 -or $watch.ElapsedMilliseconds -ge $TimeoutMilliseconds) { break }
+        Start-Sleep -Milliseconds 50
+    } while ($true)
+    [pscustomobject]@{ DeviceEnumerated=($added.Count -gt 0); InitialCount=@($ExistingIds).Count; FinalCount=$current.Count; AddedCount=$added.Count; ElapsedMs=$watch.Elapsed.TotalMilliseconds }
+}
+
 function Reset-NativeController {
     if ($null -ne $script:NativeController) {
         try {
@@ -16,6 +34,8 @@ function Invoke-NativeController {
         $null=[Windows.UI.Input.Preview.Injection.InputInjector,Windows.UI.Input.Preview.Injection,ContentType=WindowsRuntime]
         $null=[Windows.UI.Input.Preview.Injection.InjectedInputGamepadInfo,Windows.UI.Input.Preview.Injection,ContentType=WindowsRuntime]
         $null=[Windows.Gaming.Input.GamepadButtons,Windows.Gaming.Input,ContentType=WindowsRuntime]
+        $null=[Windows.Gaming.Input.Gamepad,Windows.Gaming.Input,ContentType=WindowsRuntime]
+        $null=[Windows.Gaming.Input.RawGameController,Windows.Gaming.Input,ContentType=WindowsRuntime]
         if ($Action.operation -eq 'disconnect') {
             $stage='Disconnect'
             Reset-NativeController
@@ -26,11 +46,23 @@ function Invoke-NativeController {
             $stage='RequestState'
             if ($null -ne $script:NativeController) { throw 'A request-owned virtual gamepad is already connected.' }
             $stage='Create'
+            $existingIds=@(Get-NativeGamepadIds)
             $injector=[Windows.UI.Input.Preview.Injection.InputInjector]::TryCreate()
             if ($null -eq $injector) { throw 'InputInjector.TryCreate returned null; this guest process lacks the inputInjectionBrokered capability.' }
             $stage='Initialize'
             $injector.InitializeGamepadInjection()
             $script:NativeController=$injector
+            $stage='EnumerateDevice'
+            $enumeration=Wait-NativeControllerDevice -ExistingIds $existingIds
+            $evidence['DeviceEnumeration']=$enumeration
+            if (-not $enumeration.DeviceEnumerated) {
+                Reset-NativeController
+                $evidence['Connected']=$false
+                $evidence['FailureKind']='CapabilityUnavailable'; $evidence['Available']=$false; $evidence['ProofLevel']='Unavailable'; $evidence['Stage']=$stage
+                $evidence['Error']='Windows accepted gamepad initialization but exposed no new Windows.Gaming.Input device within 5000 ms.'
+                $evidence['Requirement']='A guest input stack that enumerates the injected virtual gamepad is required; API initialization alone does not establish device availability.'
+                return $evidence
+            }
             $evidence['Available']=$true
             $evidence['Connected']=$true
             if ($Action.operation -eq 'probe') { Reset-NativeController; $evidence['Connected']=$false }
