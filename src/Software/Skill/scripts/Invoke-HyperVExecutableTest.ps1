@@ -1230,11 +1230,11 @@ for ($actionIndex = 0; $actionIndex -lt $actions.Count; $actionIndex++) {
             if ([IO.Path]::GetFileName($fileName) -ne $fileName -or $fileName.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0) {
                 throw "Action $($actionIndex + 1) screenshot name must be a valid leaf filename."
             }
-            $captureTimeout = if ($action.timeoutMs) { [int]$action.timeoutMs } else { 30000 }
+            $captureTimeout = if (Get-NativeProperty $action 'timeoutMs') { [int]$action.timeoutMs } else { 30000 }
             if ($captureTimeout -lt 3000 -or $captureTimeout -gt 30000) {
                 throw "Action $($actionIndex + 1) screenshot timeoutMs must be between 3000 and 30000."
             }
-            $captureAttempts = if ($action.attempts) { [int]$action.attempts } else { 5 }
+            $captureAttempts = if (Get-NativeProperty $action 'attempts') { [int]$action.attempts } else { 5 }
             if ($captureAttempts -lt 1 -or $captureAttempts -gt 5) {
                 throw "Action $($actionIndex + 1) screenshot attempts must be between 1 and 5."
             }

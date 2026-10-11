@@ -32,7 +32,8 @@ $scenarios.Add('bounded-shared-schema-and-collection-validation')
     Set-StrictMode -Version Latest
     $canaryRoot=Join-Path (Split-Path -Parent $harnessRoot) 'Canaries'
     foreach ($file in @('native-visual-actions.json','native-readiness-timeout-actions.json','native-controller-actions.json','native-audio-actions.json')) {
-        Assert-NativeAppActions @(Get-Content -LiteralPath (Join-Path $canaryRoot $file) -Raw | ConvertFrom-Json)
+        $canaryActions = foreach ($item in (Get-Content -LiteralPath (Join-Path $canaryRoot $file) -Raw | ConvertFrom-Json)) { $item }
+        Assert-NativeAppActions $canaryActions
     }
     foreach ($json in @(
         '{"type":"wait_content","name":"ready","timeoutMs":100,"pixels":[{"x":0,"y":0,"color":"#000000"}]}',

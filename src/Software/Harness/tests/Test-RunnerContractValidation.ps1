@@ -58,13 +58,15 @@ function Import-RunnerFunction {
 function Get-QueuedRequest {
     param(
         [Parameter(Mandatory = $true)] [hashtable] $InvocationParameters,
-        [Parameter(Mandatory = $true)] [string] $Scenario
+        [Parameter(Mandatory = $true)] [string] $Scenario,
+        [switch] $UnderStrictMode
     )
 
     $runnerJob = Start-Job -ScriptBlock {
-        param($ScriptPath, $Parameters)
+        param($ScriptPath, $Parameters, $StrictModeEnabled)
+        if ($StrictModeEnabled) { Set-StrictMode -Version Latest }
         & $ScriptPath @Parameters
-    } -ArgumentList $RunnerPath, $InvocationParameters
+    } -ArgumentList $RunnerPath, $InvocationParameters, ([bool]$UnderStrictMode)
     $queuedFile = $null
     try {
         $deadline = [DateTime]::UtcNow.AddSeconds(30)
@@ -495,6 +497,19 @@ try {
     Assert-Equal -Scenario 'keyboard action chord' -Actual ([string]$keyboardRequest.Job.actions[0].keys) -Expected 'WIN+LEFT'
     Assert-Equal -Scenario 'keyboard action hold' -Actual ([int]$keyboardRequest.Job.actions[0].holdMs) -Expected 75
     $scenarios.Add('key-chord-valid-shape-serialized')
+
+    $canaryRoot = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'Canaries'
+    foreach ($file in @('native-visual-actions.json','native-readiness-timeout-actions.json','native-controller-actions.json','native-audio-actions.json')) {
+        $nativeInvocation = $baseInvocation.Clone()
+        $nativeInvocation.Remove('ActionsJson')
+        $nativeInvocation.ActionsPath = Join-Path $canaryRoot $file
+        $nativeRequest = Get-QueuedRequest -Scenario $file -InvocationParameters $nativeInvocation -UnderStrictMode
+        $expectedActions = foreach ($nativeAction in (Get-Content -LiteralPath $nativeInvocation.ActionsPath -Raw | ConvertFrom-Json)) { $nativeAction }
+        $expectedActions = @($expectedActions) | ConvertTo-Json -Depth 10 -Compress
+        $actualActions = @($nativeRequest.Job.actions) | ConvertTo-Json -Depth 10 -Compress
+        Assert-Equal -Scenario "$file strict-mode submission" -Actual $actualActions -Expected $expectedActions
+    }
+    $scenarios.Add('native-canaries-reach-queue-under-caller-strict-mode')
 
     $isolatedInvocation = $baseInvocation.Clone()
     $isolatedInvocation.NetworkProfile = 'IsolatedTestNet'
