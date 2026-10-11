@@ -5055,16 +5055,6 @@ function Invoke-GuestRequest {
             $failureEvidence = Save-GuestRestartFailureEvidence -VmName $vmName -RequestId $requestId -GuestOutbox $guestOutbox -ResultRoot $ResultRoot -ClientSid ([string]$Config.ClientSid)
         }
 
-        if ($Request.StopAfter -and $session) {
-            try {
-                Invoke-Command -Session $session -ErrorAction Stop -ScriptBlock {
-                    shutdown.exe /s /t 0
-                }
-            }
-            catch {
-                # The PowerShell Direct transport normally drops as shutdown begins.
-            }
-        }
         if ($session) {
             Remove-PSSession -Session $session -ErrorAction SilentlyContinue
         }
@@ -5086,7 +5076,7 @@ function Invoke-GuestRequest {
                 $evidenceWarnings.Add("Could not publish StoppingVm request state: $($_.Exception.Message)")
             }
             try {
-                Stop-TestVm -VmName $vmName -Immediate:(-not $success)
+                Stop-TestVm -VmName $vmName -Immediate
             }
             catch {
                 $cleanupFailureObserved = $true
