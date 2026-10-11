@@ -449,7 +449,7 @@ function Invoke-AcceptanceTest {
     }
     elseif ($Definition.Name -in @('NativeController','NativeAudio') -and $summary.FailureKind -eq 'CapabilityUnavailable') {
         $guest=Read-JsonIfPresent -Path (Join-Path $summary.ResultPath 'result.json')
-        $unavailable=@($guest.Actions | Where-Object { $_.Details.FailureKind -eq 'CapabilityUnavailable' })
+        $unavailable=@($guest.Actions | Where-Object { $_.PSObject.Properties['Details'] -and $_.Details -and $_.Details.PSObject.Properties['FailureKind'] -and $_.Details.FailureKind -eq 'CapabilityUnavailable' })
         if ($unavailable.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$unavailable[0].Details.Error)) { throw 'Device capability result is missing its concrete guest failure reason.' }
         $summary | Add-Member -NotePropertyName CapabilityStatus -NotePropertyValue 'Unavailable'
     }

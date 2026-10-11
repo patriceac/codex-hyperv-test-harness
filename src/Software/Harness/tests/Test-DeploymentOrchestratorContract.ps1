@@ -378,6 +378,18 @@ if ($skill.IndexOf('Deploy-HarnessRelease.ps1', [StringComparison]::Ordinal) -lt
 }
 $scenarios.Add('documentation-and-skill-make-the-controller-the-durable-default')
 
+& {
+    Set-StrictMode -Version Latest
+    $guest = '{"Actions":[{}, {"Details":null}, {"Details":{"Found":true}}, {"Details":{"FailureKind":"CapabilityUnavailable","Error":"No enumerated guest device"}}]}' | ConvertFrom-Json
+    foreach ($selector in @(@{Path=$acceptancePath;Variable='$unavailable'}, @{Path=(Join-Path $setupRoot 'Test-NativeAppAcceptanceEvidence.ps1');Variable='$failure'})) {
+        $selectorAst=[Management.Automation.Language.Parser]::ParseFile($selector.Path,[ref]$null,[ref]$null)
+        $selection=$selectorAst.Find({param($node) $node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -ceq $selector.Variable},$true)
+        $selected=@(& ([scriptblock]::Create($selection.Right.Extent.Text)))
+        if ($selected.Count -ne 1 -or $selected[0].Details.Error -cne 'No enumerated guest device') { throw 'Unavailable capability selection lost its concrete reason or rejected ordinary action details under StrictMode.' }
+    }
+}
+$scenarios.Add('capability-unavailability-skips-optional-action-fields-under-strict-mode')
+
 [pscustomobject][ordered]@{
     Success = $true
     ScenarioCount = $scenarios.Count

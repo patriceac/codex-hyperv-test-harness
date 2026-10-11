@@ -43,7 +43,7 @@ foreach ($name in @('NativeController','NativeAudio')) {
     $summary=$Results[$name]
     if ($summary.FailureKind -eq 'CapabilityUnavailable') {
         $guest=Read-Evidence $summary.ResultPath 'result.json'
-        $failure=@($guest.Actions | Where-Object { $_.Details -and $_.Details.FailureKind -eq 'CapabilityUnavailable' })[0]
+        $failure=@($guest.Actions | Where-Object { $_.PSObject.Properties['Details'] -and $_.Details -and $_.Details.PSObject.Properties['FailureKind'] -and $_.Details.FailureKind -eq 'CapabilityUnavailable' })[0]
         $capabilities[$name]=@{Status='Unavailable';Reason=$failure.Details.Error;RequestId=$summary.RequestId}
     }
     elseif ($name -eq 'NativeController') {
