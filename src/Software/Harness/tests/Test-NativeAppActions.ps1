@@ -50,6 +50,22 @@ $scenarios.Add('bounded-shared-schema-and-collection-validation')
 }
 $scenarios.Add('optional-native-properties-under-caller-strict-mode')
 
+# Windows SDK mmdeviceapi.h and Audioclient.h COM identities; inspect metadata only, without activating host audio.
+# https://github.com/microsoft/win32metadata/tree/main/generation/WinSDK/RecompiledIdlHeaders/um
+$audioComIds=@{
+    MMDeviceEnumerator='BCDE0395-E52F-467C-8E3D-C4579291692E'
+    IDevices='A95664D2-9614-4F35-A746-DE8DB63617E6'
+    IDeviceCollection='0BD7A1BE-7A1A-44DB-8397-CC5392387B5E'
+    IDevice='D666063F-1587-4E43-81F1-B948E807363F'
+    IAudioClient='1CB9AD4C-DBFA-4C32-B178-C2F568A703B2'
+    ICapture='C8ADBD64-E71E-48A0-A4DE-185C395CD317'
+}
+foreach ($entry in $audioComIds.GetEnumerator()) {
+    $audioType=[Codex.NativeApp.Audio].Assembly.GetType(('Codex.NativeApp.'+$entry.Key),$true)
+    Assert-True ($audioType.GUID -eq [Guid]$entry.Value) ('Audio COM identity differs from the Windows SDK: '+$entry.Key)
+}
+$scenarios.Add('audio-com-identities-match-windows-sdk-contract')
+
 $g=[Codex.NativeApp.Visual]::Layout(1300,820,320,200,'integer_fit')
 $p=[Codex.NativeApp.Visual]::MapPoint($g,0,0)
 Assert-True ($g.ViewportX -eq 10 -and $g.ViewportY -eq 10 -and $p.X -eq 12 -and $p.Y -eq 12) 'Integer fit did not center the viewport and select the logical pixel center.'

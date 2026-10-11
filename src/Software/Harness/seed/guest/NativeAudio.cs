@@ -29,7 +29,7 @@ namespace Codex.NativeApp
         [PreserveSig] int RegisterEndpointNotificationCallback(IntPtr callback);
         [PreserveSig] int UnregisterEndpointNotificationCallback(IntPtr callback);
     }
-    [ComImport,Guid("0BD7A1BE-7A1A-44DB-8397-C0A5D6BE1DD4"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    [ComImport,Guid("0BD7A1BE-7A1A-44DB-8397-CC5392387B5E"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     interface IDeviceCollection { [PreserveSig] int GetCount(out uint count); [PreserveSig] int Item(uint index,out IDevice device); }
     [ComImport,Guid("D666063F-1587-4E43-81F1-B948E807363F"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     interface IDevice
