@@ -27,6 +27,8 @@ After the first successful guest-baseline promotion, a small local provenance re
 
 Baseline promotion sets and verifies non-expiring account/password policy only for the disposable guest automation account. Guest readiness attests that policy before accepting work. An already-expired legacy account may reject both PowerShell Direct and an interactive password change. Recover only the managed baseline account under an exact-target, backed-up recovery plan that preserves its protected credential. The controller then verifies the policy, seals the corrected baseline, replaces the workers, and performs one full recovery refresh. This does not alter host account policy.
 
+The disposable guest account uses Windows Console Host so hidden harness processes cannot open Windows Terminal over the application under test. Baseline promotion verifies that guest setting; the host's terminal preference is unchanged.
+
 The current architecture does not provide a separately named live shadow broker and worker pool. The plan therefore calls its pre-promotion step `PrePromotionQualification` and explicitly reports `LiveShadowPoolAvailable = false`. That step proves parsing, builds, deterministic tests, exact invocation contracts, and the public payload; live behavior is accepted immediately after promotion in disposable workers. Do not describe this as a live shadow deployment.
 
 ## Apply once

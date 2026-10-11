@@ -276,14 +276,22 @@ try {
                     Get-ChildItem -LiteralPath $directory -Force | Remove-Item -Recurse -Force
                 }
             }
+            # Keep the disposable account's hidden agent out of Windows Terminal.
+            $consoleStartup = 'HKCU:\Console\%%Startup'
+            New-Item -Path $consoleStartup -Force -ErrorAction Stop | Out-Null
+            foreach ($valueName in @('DelegationConsole', 'DelegationTerminal')) {
+                New-ItemProperty -LiteralPath $consoleStartup -Name $valueName -PropertyType String -Value '{B23D10C0-E52E-411E-9D5B-C09FDF709C7D}' -Force -ErrorAction Stop | Out-Null
+            }
             $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
             $supervisorCommand = 'powershell.exe -NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "C:\CodexGuest\GuestAgentSupervisor.ps1"'
             New-ItemProperty -LiteralPath $runKey -Name CodexGuestAgent -PropertyType String -Value $supervisorCommand -Force | Out-Null
         }
         $guestHarness = Invoke-Command -Session $session -ScriptBlock {
             $account = Get-LocalUser -SID ([Security.Principal.WindowsIdentity]::GetCurrent().User)
+            $console = Get-ItemProperty -LiteralPath 'HKCU:\Console\%%Startup'
             [ordered]@{
                 AccountPolicyHealthy = $account.Enabled -and $null -eq $account.PasswordExpires -and $null -eq $account.AccountExpires
+                ConsoleHostHealthy = $console.DelegationConsole -eq '{B23D10C0-E52E-411E-9D5B-C09FDF709C7D}' -and $console.DelegationTerminal -eq '{B23D10C0-E52E-411E-9D5B-C09FDF709C7D}'
                 GuestAgentSha256 = (Get-FileHash -LiteralPath 'C:\CodexGuest\GuestAgent.ps1' -Algorithm SHA256).Hash
                 GuestSupervisorSha256 = (Get-FileHash -LiteralPath 'C:\CodexGuest\GuestAgentSupervisor.ps1' -Algorithm SHA256).Hash
                 GuestLiveEvidenceSha256 = (Get-FileHash -LiteralPath 'C:\CodexGuest\GuestLiveEvidence.ps1' -Algorithm SHA256).Hash
@@ -294,6 +302,7 @@ try {
         $sourceHash = (Get-FileHash -LiteralPath $GuestAgentSource -Algorithm SHA256).Hash
         if ($guestHarness.GuestPowerTestSha256 -ne (Get-FileHash -LiteralPath $GuestPowerTestSource -Algorithm SHA256).Hash) { throw 'Updated power-test module hash does not match the source file.' }
         if (-not $guestHarness.AccountPolicyHealthy) { throw 'The disposable guest automation account still expires or is disabled.' }
+        if (-not $guestHarness.ConsoleHostHealthy) { throw 'The disposable guest automation account does not use Windows Console Host.' }
         $supervisorSourceHash = (Get-FileHash -LiteralPath $GuestSupervisorSource -Algorithm SHA256).Hash
         $liveEvidenceSourceHash = (Get-FileHash -LiteralPath $GuestLiveEvidenceSource -Algorithm SHA256).Hash
         if ($guestHarness.GuestAgentSha256 -ne $sourceHash) {

@@ -26,6 +26,12 @@ function Assert-True {
 
 Import-NamedFunction -Path (Join-Path $SourceRoot 'HostWorker.ps1') -Name 'Test-WorkerCaptureRetryAllowed'
 Import-NamedFunction -Path (Join-Path $SourceRoot 'HostBroker.ps1') -Name 'Copy-GuestJobForExecution'
+Import-NamedFunction -Path (Join-Path $SourceRoot 'seed\guest\GuestAgent.ps1') -Name 'New-ScreenCaptureStartInfo'
+$captureStartInfo = New-ScreenCaptureStartInfo -EncodedCommand 'QQA='
+Assert-True (-not $captureStartInfo.UseShellExecute -and $captureStartInfo.CreateNoWindow -and
+    $captureStartInfo.WindowStyle -eq [Diagnostics.ProcessWindowStyle]::Hidden -and
+    $captureStartInfo.FileName -eq (Join-Path $PSHOME 'powershell.exe') -and
+    $captureStartInfo.Arguments.EndsWith('-EncodedCommand QQA=')) 'The screenshot helper could create a console that obscures its own capture.'
 $captureFailure = [pscustomobject]@{ Success = $false; FailureKind = 'CaptureInfrastructure' }
 Assert-True (Test-WorkerCaptureRetryAllowed -AttemptResult $captureFailure -RetryCount 0 -CancellationRequested $false) 'The first capture infrastructure failure was not retryable.'
 Assert-True (-not (Test-WorkerCaptureRetryAllowed -AttemptResult $captureFailure -RetryCount 1 -CancellationRequested $false)) 'A second capture infrastructure failure was incorrectly retryable.'
@@ -157,8 +163,9 @@ finally {
 
 [pscustomobject][ordered]@{
     Success = $true
-    ScenarioCount = 8
+    ScenarioCount = 9
     Scenarios = @(
+        'capture-helper-has-no-console',
         'first-capture-failure-retryable',
         'retry-bounded-to-one',
         'cancellation-disables-retry',

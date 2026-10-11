@@ -46,6 +46,13 @@ $werUser = 'HKCU:\Software\Microsoft\Windows\Windows Error Reporting'
 New-Item -Path $werUser -Force | Out-Null
 New-ItemProperty -LiteralPath $werUser -Name DontShowUI -PropertyType DWord -Value 1 -Force | Out-Null
 
+# Windows Terminal can ignore Hidden and cover the application under test.
+$consoleStartup = 'HKCU:\Console\%%Startup'
+New-Item -Path $consoleStartup -Force -ErrorAction Stop | Out-Null
+foreach ($valueName in @('DelegationConsole', 'DelegationTerminal')) {
+    New-ItemProperty -LiteralPath $consoleStartup -Name $valueName -PropertyType String -Value '{B23D10C0-E52E-411E-9D5B-C09FDF709C7D}' -Force -ErrorAction Stop | Out-Null
+}
+
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $agentCommand = 'powershell.exe -NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "C:\CodexGuest\GuestAgentSupervisor.ps1"'
 New-ItemProperty -LiteralPath $runKey -Name CodexGuestAgent -PropertyType String -Value $agentCommand -Force | Out-Null

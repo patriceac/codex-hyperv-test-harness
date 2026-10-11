@@ -1409,6 +1409,18 @@ function Wait-CaptureDesktopReady {
     $probe
 }
 
+function New-ScreenCaptureStartInfo {
+    param([Parameter(Mandatory = $true)] [string] $EncodedCommand)
+
+    $startInfo = New-Object Diagnostics.ProcessStartInfo
+    $startInfo.FileName = Join-Path $PSHOME 'powershell.exe'
+    $startInfo.Arguments = '-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand ' + $EncodedCommand
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+    $startInfo
+}
+
 function Invoke-ScreenCaptureHelper {
     param(
         [Parameter(Mandatory = $true)] [string] $Path,
@@ -1465,14 +1477,7 @@ catch {
     Remove-Item -LiteralPath $Path, $ErrorPath -Force -ErrorAction SilentlyContinue
     $captureProcess = $null
     try {
-        $captureProcess = Start-Process -FilePath 'powershell.exe' -ArgumentList @(
-            '-NoLogo',
-            '-NoProfile',
-            '-NonInteractive',
-            '-WindowStyle', 'Hidden',
-            '-ExecutionPolicy', 'Bypass',
-            '-EncodedCommand', $encodedCommand
-        ) -WindowStyle Hidden -PassThru
+        $captureProcess = [Diagnostics.Process]::Start((New-ScreenCaptureStartInfo -EncodedCommand $encodedCommand))
 
         if (-not $captureProcess.WaitForExit($TimeoutMilliseconds)) {
             try {
