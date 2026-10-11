@@ -360,7 +360,7 @@ function Mount-PayloadVhdForSync {
     $diskNumber = $null
     $partitionNumber = $null
     try {
-        $disk = Mount-VHD -Path $VhdxPath -Passthru -ErrorAction Stop | Get-Disk
+        $disk = Mount-VHD -Path $VhdxPath -NoDriveLetter -Passthru -ErrorAction Stop | Get-Disk
         $diskNumber = [int]$disk.Number
         if ($disk.IsOffline) {
             Set-Disk -Number $diskNumber -IsOffline $false -ErrorAction Stop | Out-Null
@@ -371,7 +371,7 @@ function Mount-PayloadVhdForSync {
         $disk = Get-Disk -Number $diskNumber
         if ([string]$disk.PartitionStyle -eq 'RAW') {
             Initialize-Disk -Number $diskNumber -PartitionStyle GPT -ErrorAction Stop | Out-Null
-            $partition = New-Partition -DiskNumber $diskNumber -UseMaximumSize -ErrorAction Stop
+            $partition = New-Partition -DiskNumber $diskNumber -UseMaximumSize -AssignDriveLetter:$false -ErrorAction Stop
             Format-Volume -Partition $partition -FileSystem NTFS -NewFileSystemLabel ('CODEX-' + $PayloadId.Substring(0, 8)) -Confirm:$false -Force -ErrorAction Stop | Out-Null
         }
         $partition = Get-Partition -DiskNumber $diskNumber | Where-Object { $_.Type -eq 'Basic' -or $_.GptType -eq '{EBD0A0A2-B9E5-4433-87C0-68B6B72699C7}' } | Sort-Object Size -Descending | Select-Object -First 1

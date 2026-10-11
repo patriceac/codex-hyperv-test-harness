@@ -15,10 +15,13 @@ $script:partitionSize = [long]2GB
 $script:maximumSize = [long]8GB
 $script:resizeCount = 0
 $script:accessPathCount = 0
+$script:partitionStyle = 'GPT'
+$script:formatCount = 0
 
 function Mount-VHD {
     [CmdletBinding()]
-    param([string] $Path, [switch] $Passthru)
+    param([string] $Path, [switch] $NoDriveLetter, [switch] $Passthru)
+    if (-not $NoDriveLetter) { throw 'Host payload attachment must suppress drive letters before either creation or remount.' }
     [pscustomobject]@{ Number = $script:diskNumber }
 }
 
@@ -33,9 +36,32 @@ function Get-Disk {
             Number = $script:diskNumber
             IsOffline = $false
             IsReadOnly = $false
-            PartitionStyle = 'GPT'
+            PartitionStyle = $script:partitionStyle
         }
     }
+}
+
+function Initialize-Disk {
+    [CmdletBinding()]
+    param([int] $Number, [string] $PartitionStyle)
+    if ($PartitionStyle -ne 'GPT') { throw 'New payload disk must retain its GPT layout.' }
+    $script:partitionStyle = $PartitionStyle
+}
+
+function New-Partition {
+    [CmdletBinding()]
+    param([int] $DiskNumber, [switch] $UseMaximumSize, [switch] $AssignDriveLetter)
+    if (-not $PSBoundParameters.ContainsKey('AssignDriveLetter') -or $AssignDriveLetter) {
+        throw 'Unformatted payload partition must be created without requesting a host drive letter.'
+    }
+    Get-Partition -DiskNumber $DiskNumber
+}
+
+function Format-Volume {
+    [CmdletBinding()]
+    param($Partition, [string] $FileSystem, [string] $NewFileSystemLabel, [switch] $Confirm, [switch] $Force)
+    if ($FileSystem -ne 'NTFS' -or $script:accessPathCount -ne 0) { throw 'New payload must be formatted before folder access.' }
+    $script:formatCount++
 }
 
 function Get-Partition {
@@ -85,8 +111,16 @@ try {
     if ($script:resizeCount -ne 0 -or $script:accessPathCount -ne 1) {
         throw 'An already full-size payload partition should mount without another resize.'
     }
+    if ($script:formatCount -ne 0) { throw 'Existing cached payload disks must not be reformatted on remount.' }
 
-    [pscustomobject]@{ Success = $true; ScenarioCount = 2; Scenarios = @('expanded-before-mount', 'sub-megabyte-noop') } | ConvertTo-Json -Depth 4
+    $script:partitionStyle = 'RAW'
+    $script:accessPathCount = 0
+    $null = Mount-PayloadVhdForSync -VhdxPath (Join-Path $testRoot 'new-payload.vhdx') -PayloadId ('C' * 64)
+    if ($script:formatCount -ne 1 -or $script:partitionStyle -ne 'GPT' -or $script:accessPathCount -ne 1) {
+        throw 'Fresh payload must suppress host letters, initialize/format once and retain folder access.'
+    }
+
+    [pscustomobject]@{ Success = $true; ScenarioCount = 3; Scenarios = @('expanded-before-mount', 'sub-megabyte-noop', 'fresh-payload-no-host-letter') } | ConvertTo-Json -Depth 4
 }
 finally {
     $resolvedRoot = [IO.Path]::GetFullPath($testRoot)
