@@ -28,6 +28,27 @@ Reject { Assert-NativeAppActions @($valid,$valid) }
 Reject { Assert-NativeAppActions @((1..33 | ForEach-Object { Action '{"type":"click_client","x":0,"y":0}' })) }
 $scenarios.Add('bounded-shared-schema-and-collection-validation')
 
+& {
+    Set-StrictMode -Version Latest
+    $canaryRoot=Join-Path (Split-Path -Parent $harnessRoot) 'Canaries'
+    foreach ($file in @('native-visual-actions.json','native-readiness-timeout-actions.json','native-controller-actions.json','native-audio-actions.json')) {
+        Assert-NativeAppActions @(Get-Content -LiteralPath (Join-Path $canaryRoot $file) -Raw | ConvertFrom-Json)
+    }
+    foreach ($json in @(
+        '{"type":"wait_content","name":"ready","timeoutMs":100,"pixels":[{"x":0,"y":0,"color":"#000000"}]}',
+        '{"type":"click_client","x":0,"y":0}',
+        '{"type":"assert_image","name":"image","referencePath":"{PAYLOAD}\\reference.png"}',
+        '{"type":"capture_burst","name":"burst","durationMs":50,"fps":1,"maxFrames":1,"maxBytes":1024}',
+        '{"type":"controller","operation":"state","holdMs":10}',
+        '{"type":"audio_probe","name":"audio"}',
+        '{"type":"capture_audio","name":"capture","durationMs":100,"maxBytes":1024}',
+        '{"type":"app_command","name":"ready","operation":"ready","timeoutMs":100}'
+    )) { Assert-NativeAppActions @((Action $json)) }
+    Reject { Assert-NativeAppAction (Action '{"type":"wait_content","name":"bad","pixels":[{"x":0,"y":0,"color":"#000000"}]}') }
+    Reject { ([pscustomobject]@{}).missing }
+}
+$scenarios.Add('optional-native-properties-under-caller-strict-mode')
+
 $g=[Codex.NativeApp.Visual]::Layout(1300,820,320,200,'integer_fit')
 $p=[Codex.NativeApp.Visual]::MapPoint($g,0,0)
 Assert-True ($g.ViewportX -eq 10 -and $g.ViewportY -eq 10 -and $p.X -eq 12 -and $p.Y -eq 12) 'Integer fit did not center the viewport and select the logical pixel center.'

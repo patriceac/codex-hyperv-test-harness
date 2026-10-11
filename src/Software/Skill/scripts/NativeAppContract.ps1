@@ -1,6 +1,12 @@
 # Shared, side-effect-free validation for the client, SYSTEM broker and guest.
 $script:NativeAppActionTypes = @('wait_content','click_client','assert_image','capture_burst','controller','audio_probe','capture_audio','app_command')
 
+function Get-NativeProperty {
+    param($Value, [string]$Name)
+    if ($null -ne $Value -and $Value.PSObject.Properties[$Name]) { return $Value.PSObject.Properties[$Name].Value }
+    return $null
+}
+
 function Assert-NativeProperties {
     param($Value, [string[]]$Allowed, [string]$Context)
     if ($null -eq $Value -or $Value -isnot [pscustomobject]) { throw "$Context must be a JSON object." }
@@ -47,38 +53,38 @@ function Assert-NativeAppAction {
     if ($type -notin @('click_client','controller')) {
         if ([string]$Action.name -cnotmatch '^[A-Za-z][A-Za-z0-9_-]{0,47}$') { throw "$type name must be a unique 1-48 character evidence identifier." }
     }
-    if ($Action.viewport) {
+    if (Get-NativeProperty $Action 'viewport') {
         Assert-NativeProperties $Action.viewport @('width','height','scaling') "$type.viewport"
         foreach ($field in @('width','height')) { $null = Get-NativeNumber $Action.viewport.$field 1 4096 "$type.viewport.$field" }
         if ([string]$Action.viewport.scaling -cnotin @('integer_fit','fit','stretch')) { throw "$type.viewport.scaling must be integer_fit, fit or stretch." }
     }
-    if ($Action.region) { Assert-NativeRectangle $Action.region "$type.region" }
+    if (Get-NativeProperty $Action 'region') { Assert-NativeRectangle $Action.region "$type.region" }
     if ($type -eq 'click_client') {
         foreach ($field in @('x','y')) { $null = Get-NativeNumber $Action.$field 0 8191 "$type.$field" }
     }
     if ($type -in @('wait_content','assert_image')) {
-        if ($null -ne $Action.channelTolerance) { $null = Get-NativeNumber $Action.channelTolerance 0 255 "$type.channelTolerance" }
-        if ($null -ne $Action.maxMismatchFraction) { $null = Get-NativeNumber $Action.maxMismatchFraction 0 1 "$type.maxMismatchFraction" -Fractional }
-        if ($Action.referencePath) {
+        if ($null -ne (Get-NativeProperty $Action 'channelTolerance')) { $null = Get-NativeNumber $Action.channelTolerance 0 255 "$type.channelTolerance" }
+        if ($null -ne (Get-NativeProperty $Action 'maxMismatchFraction')) { $null = Get-NativeNumber $Action.maxMismatchFraction 0 1 "$type.maxMismatchFraction" -Fractional }
+        if (Get-NativeProperty $Action 'referencePath') {
             if (([string]$Action.referencePath).Length -gt 1024) { throw "$type referencePath exceeds 1024 characters." }
             if (-not $ExpandedPaths -and [string]$Action.referencePath -cnotmatch '^\{(?:PAYLOAD|HOSTINPUT:[A-Za-z][A-Za-z0-9_-]{0,31})\}(?:[\\/]|$)') { throw "$type referencePath must be under PAYLOAD or a read-only HOSTINPUT token." }
             if ($ExpandedPaths -and [string]$Action.referencePath -notmatch '\.png$') { throw "$type referencePath must name a PNG." }
         }
         elseif ($type -eq 'assert_image') { throw 'assert_image requires referencePath.' }
-        if (@($Action.masks).Count -gt 32) { throw "$type allows at most 32 masks." }
-        foreach ($mask in @($Action.masks)) { if ($null -ne $mask) { Assert-NativeRectangle $mask "$type.mask" } }
+        if (@(Get-NativeProperty $Action 'masks').Count -gt 32) { throw "$type allows at most 32 masks." }
+        foreach ($mask in @(Get-NativeProperty $Action 'masks')) { if ($null -ne $mask) { Assert-NativeRectangle $mask "$type.mask" } }
     }
     if ($type -eq 'wait_content') {
         $null = Get-NativeNumber $Action.timeoutMs 100 300000 'wait_content.timeoutMs'
-        if ($null -ne $Action.pollMs) { $null = Get-NativeNumber $Action.pollMs 25 2000 'wait_content.pollMs' }
-        if ($null -ne $Action.stableMs) { $null = Get-NativeNumber $Action.stableMs 0 ([double]$Action.timeoutMs) 'wait_content.stableMs' }
-        $conditions = [int][bool]$Action.referencePath + [int][bool]$Action.notColor + [int][bool]$Action.pixels
+        if ($null -ne (Get-NativeProperty $Action 'pollMs')) { $null = Get-NativeNumber $Action.pollMs 25 2000 'wait_content.pollMs' }
+        if ($null -ne (Get-NativeProperty $Action 'stableMs')) { $null = Get-NativeNumber $Action.stableMs 0 ([double]$Action.timeoutMs) 'wait_content.stableMs' }
+        $conditions = [int][bool](Get-NativeProperty $Action 'referencePath') + [int][bool](Get-NativeProperty $Action 'notColor') + [int][bool](Get-NativeProperty $Action 'pixels')
         if ($conditions -ne 1) { throw 'wait_content requires exactly one of referencePath, notColor or pixels.' }
-        if ($Action.notColor) {
+        if (Get-NativeProperty $Action 'notColor') {
             if ([string]$Action.notColor -cnotmatch '^#[A-Fa-f0-9]{6}$') { throw 'notColor must be #RRGGBB.' }
             $null = Get-NativeNumber $Action.minFraction 0.000001 1 'wait_content.minFraction' -Fractional
         }
-        if ($Action.pixels) {
+        if (Get-NativeProperty $Action 'pixels') {
             if (@($Action.pixels).Count -gt 64) { throw 'wait_content allows at most 64 pixel conditions.' }
             foreach ($pixel in @($Action.pixels)) {
                 Assert-NativeProperties $pixel @('x','y','color') 'pixel'
@@ -92,7 +98,7 @@ function Assert-NativeAppAction {
         $null = Get-NativeNumber $Action.fps 1 60 'capture_burst.fps'
         $null = Get-NativeNumber $Action.maxFrames 1 240 'capture_burst.maxFrames'
         $null = Get-NativeNumber $Action.maxBytes 1024 67108864 'capture_burst.maxBytes'
-        if ($Action.trigger) {
+        if (Get-NativeProperty $Action 'trigger') {
             if ([string]$Action.trigger.type -cne 'click_client') { throw 'capture_burst.trigger supports only click_client.' }
             Assert-NativeAppAction $Action.trigger
         }
@@ -102,10 +108,10 @@ function Assert-NativeAppAction {
         if ($Action.operation -eq 'state') {
             $null = Get-NativeNumber $Action.holdMs 10 10000 'controller.holdMs'
             $buttons = @('Menu','View','A','B','X','Y','DPadUp','DPadDown','DPadLeft','DPadRight','LeftShoulder','RightShoulder','LeftThumbstick','RightThumbstick')
-            if (@($Action.buttons).Count -gt 14) { throw 'controller.buttons exceeds 14.' }
-            foreach ($button in @($Action.buttons)) { if ($null -ne $button -and $button -cnotin $buttons) { throw "Unsupported controller button: $button" } }
+            if (@(Get-NativeProperty $Action 'buttons').Count -gt 14) { throw 'controller.buttons exceeds 14.' }
+            foreach ($button in @(Get-NativeProperty $Action 'buttons')) { if ($null -ne $button -and $button -cnotin $buttons) { throw "Unsupported controller button: $button" } }
             foreach ($axis in @('leftX','leftY','rightX','rightY','leftTrigger','rightTrigger')) {
-                if ($null -ne $Action.$axis) { $null = Get-NativeNumber $Action.$axis $(if ($axis -like '*Trigger') { 0 } else { -1 }) 1 "controller.$axis" -Fractional }
+                if ($null -ne (Get-NativeProperty $Action $axis)) { $null = Get-NativeNumber $Action.$axis $(if ($axis -like '*Trigger') { 0 } else { -1 }) 1 "controller.$axis" -Fractional }
             }
         }
         elseif (@($Action.PSObject.Properties.Name | Where-Object { $_ -notin @('type','operation') }).Count -gt 0) { throw 'Controller input properties require operation=state.' }
@@ -113,17 +119,17 @@ function Assert-NativeAppAction {
     if ($type -eq 'capture_audio') {
         $null = Get-NativeNumber $Action.durationMs 100 30000 'capture_audio.durationMs'
         $null = Get-NativeNumber $Action.maxBytes 1024 33554432 'capture_audio.maxBytes'
-        if ($null -ne $Action.endpointId -and ([string]$Action.endpointId).Length -gt 512) { throw 'capture_audio.endpointId exceeds 512 characters.' }
+        if ($null -ne (Get-NativeProperty $Action 'endpointId') -and ([string]$Action.endpointId).Length -gt 512) { throw 'capture_audio.endpointId exceeds 512 characters.' }
     }
     if ($type -eq 'app_command') {
         if ([string]$Action.operation -cnotin @('ready','seed','advance','checkpoint')) { throw 'app_command.operation must be ready, seed, advance or checkpoint.' }
         $null = Get-NativeNumber $Action.timeoutMs 100 60000 'app_command.timeoutMs'
         if ($Action.operation -eq 'seed') { $null = Get-NativeNumber $Action.seed 0 2147483647 'app_command.seed' }
-        elseif ($null -ne $Action.seed) { throw 'seed is valid only for the seed operation.' }
+        elseif ($null -ne (Get-NativeProperty $Action 'seed')) { throw 'seed is valid only for the seed operation.' }
         if ($Action.operation -eq 'advance') { $null = Get-NativeNumber $Action.ticks 1 100000 'app_command.ticks' }
-        elseif ($null -ne $Action.ticks) { throw 'ticks is valid only for the advance operation.' }
-        if (($null -ne $Action.jsonPointer) -xor ($null -ne $Action.equalsJson)) { throw 'app_command requires both jsonPointer and equalsJson for an assertion.' }
-        if ($null -ne $Action.jsonPointer) {
+        elseif ($null -ne (Get-NativeProperty $Action 'ticks')) { throw 'ticks is valid only for the advance operation.' }
+        if (($null -ne (Get-NativeProperty $Action 'jsonPointer')) -xor ($null -ne (Get-NativeProperty $Action 'equalsJson'))) { throw 'app_command requires both jsonPointer and equalsJson for an assertion.' }
+        if ($null -ne (Get-NativeProperty $Action 'jsonPointer')) {
             if (([string]$Action.jsonPointer).Length -gt 1024 -or ([string]$Action.jsonPointer -ne '' -and [string]$Action.jsonPointer -notmatch '^/') -or [regex]::IsMatch([string]$Action.jsonPointer, '~(?![01])')) { throw 'app_command.jsonPointer is invalid.' }
             if (([string]$Action.equalsJson).Length -gt 16384) { throw 'app_command.equalsJson exceeds 16384 characters.' }
             try { $null = ('{"value":' + [string]$Action.equalsJson + '}') | ConvertFrom-Json -ErrorAction Stop } catch { throw 'app_command.equalsJson is invalid JSON.' }
@@ -138,7 +144,7 @@ function Assert-NativeAppActions {
     $names=@{}; $budget=0L
     foreach ($action in $native) {
         Assert-NativeAppAction $action -ExpandedPaths:$ExpandedPaths
-        if ($action.name) {
+        if (Get-NativeProperty $action 'name') {
             if ($names.ContainsKey([string]$action.name)) { throw "Duplicate native evidence name: $($action.name)" }
             $names[[string]$action.name]=$true
         }
