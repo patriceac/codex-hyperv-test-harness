@@ -46,6 +46,11 @@ $werUser = 'HKCU:\Software\Microsoft\Windows\Windows Error Reporting'
 New-Item -Path $werUser -Force | Out-Null
 New-ItemProperty -LiteralPath $werUser -Name DontShowUI -PropertyType DWord -Value 1 -Force | Out-Null
 
+# Payload disks must not display AutoPlay over the application under test.
+$autoPlayPolicy = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer'
+New-Item -Path $autoPlayPolicy -Force -ErrorAction Stop | Out-Null
+New-ItemProperty -LiteralPath $autoPlayPolicy -Name NoDriveTypeAutoRun -PropertyType DWord -Value 0xFF -Force -ErrorAction Stop | Out-Null
+
 # Windows Terminal can ignore Hidden and cover the application under test.
 $consoleStartup = 'HKCU:\Console\%%Startup'
 New-Item -Path $consoleStartup -Force -ErrorAction Stop | Out-Null

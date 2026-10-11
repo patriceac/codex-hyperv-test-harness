@@ -276,6 +276,10 @@ try {
                     Get-ChildItem -LiteralPath $directory -Force | Remove-Item -Recurse -Force
                 }
             }
+            # Payload disks must not display AutoPlay over the application under test.
+            $autoPlayPolicy = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer'
+            New-Item -Path $autoPlayPolicy -Force -ErrorAction Stop | Out-Null
+            New-ItemProperty -LiteralPath $autoPlayPolicy -Name NoDriveTypeAutoRun -PropertyType DWord -Value 0xFF -Force -ErrorAction Stop | Out-Null
             # Keep the disposable account's hidden agent out of Windows Terminal.
             $consoleStartup = 'HKCU:\Console\%%Startup'
             New-Item -Path $consoleStartup -Force -ErrorAction Stop | Out-Null
@@ -292,6 +296,7 @@ try {
             [ordered]@{
                 AccountPolicyHealthy = $account.Enabled -and $null -eq $account.PasswordExpires -and $null -eq $account.AccountExpires
                 ConsoleHostHealthy = $console.DelegationConsole -eq '{B23D10C0-E52E-411E-9D5B-C09FDF709C7D}' -and $console.DelegationTerminal -eq '{B23D10C0-E52E-411E-9D5B-C09FDF709C7D}'
+                AutoPlayDisabled = (Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer' -Name NoDriveTypeAutoRun -ErrorAction Stop).NoDriveTypeAutoRun -eq 0xFF
                 GuestAgentSha256 = (Get-FileHash -LiteralPath 'C:\CodexGuest\GuestAgent.ps1' -Algorithm SHA256).Hash
                 GuestSupervisorSha256 = (Get-FileHash -LiteralPath 'C:\CodexGuest\GuestAgentSupervisor.ps1' -Algorithm SHA256).Hash
                 GuestLiveEvidenceSha256 = (Get-FileHash -LiteralPath 'C:\CodexGuest\GuestLiveEvidence.ps1' -Algorithm SHA256).Hash
@@ -303,6 +308,7 @@ try {
         if ($guestHarness.GuestPowerTestSha256 -ne (Get-FileHash -LiteralPath $GuestPowerTestSource -Algorithm SHA256).Hash) { throw 'Updated power-test module hash does not match the source file.' }
         if (-not $guestHarness.AccountPolicyHealthy) { throw 'The disposable guest automation account still expires or is disabled.' }
         if (-not $guestHarness.ConsoleHostHealthy) { throw 'The disposable guest automation account does not use Windows Console Host.' }
+        if (-not $guestHarness.AutoPlayDisabled) { throw 'AutoPlay is not disabled for all disposable guest drives.' }
         $supervisorSourceHash = (Get-FileHash -LiteralPath $GuestSupervisorSource -Algorithm SHA256).Hash
         $liveEvidenceSourceHash = (Get-FileHash -LiteralPath $GuestLiveEvidenceSource -Algorithm SHA256).Hash
         if ($guestHarness.GuestAgentSha256 -ne $sourceHash) {
