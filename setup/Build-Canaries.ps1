@@ -69,6 +69,10 @@ try {
         if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Canary source is missing: $source" }
         $compilerArguments = @('/nologo', '/target:winexe', '/optimize+', "/out:$output", '/reference:System.dll', '/reference:System.Drawing.dll', '/reference:System.Windows.Forms.dll')
         if ($target.Source -in @('PowerTestCanary.cs','InstallerUacCanary.cs','InstallerUacVerifier.cs','NativeAppCanary.cs')) { $compilerArguments += @('/reference:System.Security.dll', '/reference:System.Web.Extensions.dll') }
+        if ($target.Source -eq 'NativeAppCanary.cs') {
+            # Use inbox WinRT metadata and the .NET Framework facade; no Windows SDK download.
+            $compilerArguments += @("/reference:$env:WINDIR\System32\WinMetadata\Windows.Foundation.winmd", "/reference:$env:WINDIR\System32\WinMetadata\Windows.Gaming.winmd", "/reference:$(Split-Path -Parent $compiler)\System.Runtime.WindowsRuntime.dll", "/reference:$env:WINDIR\Microsoft.NET\assembly\GAC_MSIL\System.Runtime\v4.0_4.0.0.0__b03f5f7f11d50a3a\System.Runtime.dll")
+        }
         if ($target.ContainsKey('Manifest')) {
             $manifest = Join-Path $CanaryRoot $target.Manifest
             if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) { throw "Canary manifest is missing: $manifest" }

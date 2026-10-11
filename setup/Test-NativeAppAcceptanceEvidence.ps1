@@ -2,6 +2,12 @@
 param([Parameter(Mandatory=$true)]$Results)
 $ErrorActionPreference='Stop'
 function Read-Evidence { param([string]$Root,[string]$Path) Get-Content -LiteralPath (Join-Path $Root $Path) -Raw -Encoding UTF8 | ConvertFrom-Json }
+function Assert-NativeControllerReception {
+    param($Pad)
+    if (-not $Pad.passed -or $Pad.backend -cne 'Windows.Gaming.Input' -or $Pad.buttons -cne 'A' -or [Math]::Abs($Pad.leftX - 0.5) -gt 0.001 -or [Math]::Abs($Pad.leftTrigger - 0.25) -gt 0.001 -or $Pad.physicalXboxVerified) {
+        throw 'Controller acceptance did not receive the requested button and analog state through Windows.Gaming.Input.'
+    }
+}
 $visual=$Results.NativeVisualProtocol
 $guest=Read-Evidence $visual.ResultPath 'result.json'
 $clientClick=@($guest.Actions | Where-Object { $_.Type -eq 'click_client' })[0]
@@ -42,8 +48,8 @@ foreach ($name in @('NativeController','NativeAudio')) {
     }
     elseif ($name -eq 'NativeController') {
         $pad=Read-Evidence $summary.ResultPath 'controller-a.json'
-        if (-not $pad.passed -or $pad.backend -cne 'XInput' -or $pad.physicalXboxVerified) { throw 'Controller acceptance did not prove application reception through XInput.' }
-        $capabilities[$name]=@{Status='Available';Proof='Virtual controller received through XInput; physical Xbox and Godot application behavior unverified';RequestId=$summary.RequestId}
+        Assert-NativeControllerReception $pad
+        $capabilities[$name]=@{Status='Available';Proof='Virtual controller button and analog state received through Windows.Gaming.Input; XInput compatibility, physical Xbox and Godot application behavior unverified';XInputAObserved=[bool]$pad.xInputAObserved;RequestId=$summary.RequestId}
     }
     else {
         $audio=Read-Evidence $summary.ResultPath 'native-audio\metadata.json'

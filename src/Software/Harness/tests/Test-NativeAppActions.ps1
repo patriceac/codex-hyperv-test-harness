@@ -135,4 +135,16 @@ $script:NativeAppProtocolReady=$false
 $noReady=Invoke-NativeAppCommand (Action '{"type":"app_command","name":"advance","operation":"advance","ticks":1,"timeoutMs":100}') $testRoot $protocolRoot 'unit-job'
 Assert-True ($noReady.FailureKind -eq 'CapabilityUnavailable') 'Commands were issued before an acknowledged ready handshake.'
 $scenarios.Add('application-protocol-opt-in-identity-and-existing-json-assertions')
+
+$evidenceAst=[Management.Automation.Language.Parser]::ParseFile((Join-Path $repositoryRoot 'setup\Test-NativeAppAcceptanceEvidence.ps1'),[ref]$null,[ref]$null)
+$receptionDefinition=$evidenceAst.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Assert-NativeControllerReception'},$true)
+. ([scriptblock]::Create($receptionDefinition.Extent.Text))
+$reception=Action '{"passed":true,"backend":"Windows.Gaming.Input","buttons":"A","leftX":0.5,"leftTrigger":0.25,"physicalXboxVerified":false}'
+Assert-NativeControllerReception $reception
+foreach ($change in @(@{backend='XInput'},@{backend='Windows.UI.Input.Preview.Injection.InputInjector'},@{buttons='B'},@{leftX=0},@{leftTrigger=0},@{physicalXboxVerified=$true})) {
+    $invalid=$reception | ConvertTo-Json | ConvertFrom-Json
+    foreach ($key in $change.Keys) { $invalid.$key=$change[$key] }
+    Reject { Assert-NativeControllerReception $invalid }
+}
+$scenarios.Add('controller-reception-requires-consumer-api-button-and-analog-state')
 [pscustomobject]@{Success=$true;ScenarioCount=$scenarios.Count;Scenarios=$scenarios.ToArray();EvidenceRoot=$testRoot} | ConvertTo-Json -Depth 8

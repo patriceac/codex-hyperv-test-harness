@@ -9,6 +9,7 @@ using System.Media;
 using System.Runtime.InteropServices;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
+using Windows.Gaming.Input;
 
 sealed class NativeAppCanary : Form
 {
@@ -18,7 +19,7 @@ sealed class NativeAppCanary : Form
     readonly Timer timer=new Timer();
     readonly HashSet<string> processed=new HashSet<string>();
     readonly JavaScriptSerializer json=new JavaScriptSerializer();
-    bool ready, controllerA;
+    bool ready, controllerA, xInputA;
     int clicks, paints, seed, ticks;
     uint value;
     long flashUntil;
@@ -46,7 +47,16 @@ sealed class NativeAppCanary : Form
     {
         if(!ready && clock.ElapsedMilliseconds>=1200) { ready=true;Invalidate();Atomic(Path.Combine(output,"ready.json"),new{ready=true});if(player!=null)player.PlayLooping(); }
         if(clock.ElapsedMilliseconds<flashUntil+100)Invalidate();
-        for(uint index=0;index<4;index++) { PadState state;if(XInputGetState(index,out state)==0 && (state.Gamepad.Buttons&0x1000)!=0) { controllerA=true;string marker=Path.Combine(output,"controller-a.json");if(!File.Exists(marker))Atomic(marker,new{passed=true,backend="XInput",physicalXboxVerified=false}); } }
+        for(uint index=0;index<4;index++) { PadState state;if(XInputGetState(index,out state)==0 && (state.Gamepad.Buttons&0x1000)!=0)xInputA=true; }
+        foreach(Gamepad pad in Gamepad.Gamepads)
+        {
+            string connected=Path.Combine(output,"controller-connected.json");
+            if(!File.Exists(connected))Atomic(connected,new{backend="Windows.Gaming.Input"});
+            GamepadReading reading=pad.GetCurrentReading();
+            if((reading.Buttons&GamepadButtons.A)==0)continue;
+            controllerA=true;string marker=Path.Combine(output,"controller-a.json");
+            if(!File.Exists(marker))Atomic(marker,new{passed=true,backend="Windows.Gaming.Input",buttons=reading.Buttons.ToString(),leftX=reading.LeftThumbstickX,leftTrigger=reading.LeftTrigger,xInputAObserved=xInputA,physicalXboxVerified=false});
+        }
         if(!String.IsNullOrEmpty(protocol) && Directory.Exists(protocol))
         {
             foreach(string commandPath in Directory.GetFiles(protocol,"*.command.json"))
