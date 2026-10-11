@@ -1219,7 +1219,7 @@ function Stop-TestVm {
         return
     }
     try {
-        Stop-VM -Name $VmName -Shutdown -ErrorAction Stop
+        Stop-VM -Name $VmName -AsJob -ErrorAction Stop | Out-Null
     }
     catch {
         # The graceful request can fail while the guest is still starting.
