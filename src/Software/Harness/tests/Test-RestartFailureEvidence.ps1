@@ -70,7 +70,7 @@ try {
     Check ($transferCalls -eq 3) 'Successful or already-transferred requests collected duplicate diagnostics.'
     $text = Get-Content -Raw -LiteralPath $broker
     $cleanup = $text.IndexOf('if ($requestNetworkRuntime -and -not $requestNetworkCleanupPerformed)')
-    Check ($cleanup -lt $gate.Extent.StartOffset -and $gate.Extent.StartOffset -lt $text.IndexOf('if ($Request.StopAfter -and $session)')) 'Harvest must follow network revocation and precede VM stop.'
+    Check ($cleanup -lt $gate.Extent.StartOffset -and $gate.Extent.EndOffset -lt $text.IndexOf('if ($Request.StopAfter)', $gate.Extent.EndOffset)) 'Harvest must follow network revocation and precede VM stop.'
 
     Import-Function 'Invoke-ExpectedPowerOffEvidenceTransferBounded'
     $script:started = $false; $script:stopped = $false
