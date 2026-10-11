@@ -65,6 +65,14 @@ function New-HarnessReleaseAcceptanceInvocations {
     )
 
     $canaryRoot = Join-Path $SoftwareRoot 'Canaries'
+    foreach ($native in @(
+        @{ Name='NativeVisualProtocol'; Actions='native-visual-actions.json'; Extra=' --protocol "{OUTDIR}\app-protocol"' },
+        @{ Name='NativeReadinessTimeout'; Actions='native-readiness-timeout-actions.json'; Extra='' },
+        @{ Name='NativeController'; Actions='native-controller-actions.json'; Extra='' },
+        @{ Name='NativeAudio'; Actions='native-audio-actions.json'; Extra=' --audio' }
+    )) {
+        [pscustomobject]@{ Name=$native.Name; Parameters=@{ ArtifactPath=$canaryRoot; ExecutableRelativePath='NativeAppCanary.exe'; Arguments=('--out "{OUTDIR}"'+$native.Extra); ActionsPath=(Join-Path $canaryRoot $native.Actions); BrokerRoot=$BrokerRoot; QueueTimeoutSeconds=900; ExecutionTimeoutSeconds=180 } }
+    }
     foreach($name in @('InstallerSelfElevation','InstallerStandardUser','InstallerDecline')) {
         [pscustomobject][ordered]@{
             Name=$name
@@ -208,14 +216,6 @@ function New-HarnessReleaseAcceptanceInvocations {
             }
         }
     )
-    foreach ($native in @(
-        @{ Name='NativeVisualProtocol'; Actions='native-visual-actions.json'; Extra=' --protocol "{OUTDIR}\app-protocol"' },
-        @{ Name='NativeReadinessTimeout'; Actions='native-readiness-timeout-actions.json'; Extra='' },
-        @{ Name='NativeController'; Actions='native-controller-actions.json'; Extra='' },
-        @{ Name='NativeAudio'; Actions='native-audio-actions.json'; Extra=' --audio' }
-    )) {
-        [pscustomobject]@{ Name=$native.Name; Parameters=@{ ArtifactPath=$canaryRoot; ExecutableRelativePath='NativeAppCanary.exe'; Arguments=('--out "{OUTDIR}"'+$native.Extra); ActionsPath=(Join-Path $canaryRoot $native.Actions); BrokerRoot=$BrokerRoot; QueueTimeoutSeconds=900; ExecutionTimeoutSeconds=180 } }
-    }
 }
 
 if ($InvocationPreflightOnly) {

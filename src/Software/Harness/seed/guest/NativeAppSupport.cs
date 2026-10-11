@@ -48,7 +48,35 @@ namespace Codex.NativeApp
         [DllImport("user32.dll")] static extern bool IsIconic(IntPtr h);
         [DllImport("user32.dll")] static extern uint GetDpiForWindow(IntPtr h);
         [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")] static extern bool ShowWindowAsync(IntPtr window, int command);
+        [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr window);
+        [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, IntPtr processId);
+        [DllImport("user32.dll",SetLastError=true)] static extern bool AttachThreadInput(uint from, uint to, bool attach);
+        [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
         [DllImport("user32.dll",SetLastError=true)] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+
+        public static void Focus(IntPtr window)
+        {
+            if (window == IntPtr.Zero || !IsWindowVisible(window)) throw new InvalidOperationException("Target window must be visible before focus.");
+            ShowWindowAsync(window, 9);
+            uint current = GetCurrentThreadId(), target = GetWindowThreadProcessId(window, IntPtr.Zero);
+            uint foreground = GetWindowThreadProcessId(GetForegroundWindow(), IntPtr.Zero);
+            bool attachedForeground = false, attachedTarget = false;
+            try
+            {
+                if (foreground != 0 && foreground != current) attachedForeground = AttachThreadInput(current, foreground, true);
+                if (target != 0 && target != current && target != foreground) attachedTarget = AttachThreadInput(current, target, true);
+                SetForegroundWindow(window);
+            }
+            finally
+            {
+                if (attachedTarget) AttachThreadInput(current, target, false);
+                if (attachedForeground) AttachThreadInput(current, foreground, false);
+            }
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            while (GetForegroundWindow() != window && watch.ElapsedMilliseconds < 1000) System.Threading.Thread.Sleep(25);
+            if (GetForegroundWindow() != window) throw new InvalidOperationException("Target window did not become foreground after focus.");
+        }
 
         public static Geometry Measure(IntPtr window, int width, int height, string scaling)
         {

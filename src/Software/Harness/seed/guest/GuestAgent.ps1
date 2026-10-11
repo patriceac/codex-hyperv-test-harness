@@ -1994,7 +1994,7 @@ function Invoke-GuestJob {
                         if ($actionType -cnotin $script:NativeAppActionTypes) { throw "Unsupported action type: $actionType" }
                         if ($actionType -in @('wait_content','click_client','assert_image','capture_burst','controller')) {
                             if ($windowHandle -eq [IntPtr]::Zero) { $windowHandle=Wait-MainWindow -Process $process }
-                            Focus-Window -WindowHandle $windowHandle
+                            [Codex.NativeApp.Visual]::Focus($windowHandle)
                         }
                         $actionDetails=Invoke-NativeAppAction -Action $action -Window $windowHandle -OutputRoot $jobOutputPath -JobId $jobId
                         if ($actionDetails.Evaluated) {

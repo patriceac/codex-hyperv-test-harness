@@ -377,7 +377,7 @@ function New-ReleasePlan {
         Operations = $operations.ToArray()
         PrePromotionQualification = 'Exact source parse, build, deterministic tests, invocation contracts, and public-payload audit. No live shadow pool is claimed.'
         LiveShadowPoolAvailable = $false
-        Acceptance = @('InstallerSelfElevation','InstallerStandardUser','InstallerDecline','LegacyLaunch','Utf8ActionName','KeyboardInput','ExpectedGuestPowerOff','SystemPrompts','GuestRestart','InstalledGuestPowerOff','GuestRestartFailure','NativeVisualProtocol','NativeReadinessTimeout','NativeController','NativeAudio','GroupedReservations')
+        Acceptance = @('NativeVisualProtocol','NativeReadinessTimeout','NativeController','NativeAudio','InstallerSelfElevation','InstallerStandardUser','InstallerDecline','LegacyLaunch','Utf8ActionName','KeyboardInput','ExpectedGuestPowerOff','SystemPrompts','GuestRestart','InstalledGuestPowerOff','GuestRestartFailure','GroupedReservations')
         RecoveryRefreshCount = 1
         AutomaticRollback = $false
         FailurePolicy = 'Stop at the failed checkpoint, preserve valid completed phases, and resume or supersede with a reviewed fix-forward candidate.'

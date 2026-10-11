@@ -55,7 +55,7 @@ if (-not [bool]$acceptancePreview.Success -or
     (Test-Path -LiteralPath $probeRoot)) {
     throw 'Acceptance invocation preflight was not successful and mutation-free.'
 }
-if ((@($acceptancePreview.TestNames) -join ',') -ne 'InstallerSelfElevation,InstallerStandardUser,InstallerDecline,LegacyLaunch,Utf8ActionName,KeyboardInput,ExpectedGuestPowerOff,SystemPrompts,GuestRestart,InstalledGuestPowerOff,GuestRestartFailure,NativeVisualProtocol,NativeReadinessTimeout,NativeController,NativeAudio,GroupedReservations') {
+if ((@($acceptancePreview.TestNames) -join ',') -ne 'NativeVisualProtocol,NativeReadinessTimeout,NativeController,NativeAudio,InstallerSelfElevation,InstallerStandardUser,InstallerDecline,LegacyLaunch,Utf8ActionName,KeyboardInput,ExpectedGuestPowerOff,SystemPrompts,GuestRestart,InstalledGuestPowerOff,GuestRestartFailure,GroupedReservations') {
     throw 'Release acceptance does not contain the exact sixteen required paths in order.'
 }
 $groupAcceptanceDescriptor = $acceptancePreview.GroupedReservations
