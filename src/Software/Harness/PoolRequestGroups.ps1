@@ -106,7 +106,9 @@ function Start-PoolRequestGroup {
     param([Parameter(Mandatory = $true)] [IO.FileInfo] $RequestFile, [AllowEmptyCollection()] [object[]] $ReadyStates)
     $request = Read-BrokerJsonWithRetry -Path $RequestFile.FullName
     $definition = Get-RequestGroupDefinition -Request $request -MaxWorkers ([int]$Config.PoolMaxWorkers)
-    $group = Read-BrokerJsonWithRetry -Path (Get-PoolRequestGroupPath -Id $definition.Id)
+    $groupPath = Get-PoolRequestGroupPath -Id $definition.Id
+    if (-not (Test-Path -LiteralPath $groupPath -PathType Leaf)) { return $false }
+    $group = Read-BrokerJsonWithRetry -Path $groupPath
     if ($group.Status -ne 'Queued' -or @($group.Members).Count -ne [int]$group.Size -or @($ReadyStates).Count -lt [int]$group.Size) { return $false }
     $files = @($group.Members | ForEach-Object { Get-Item -LiteralPath (Join-Path $requestPath ($_ + '.json')) -ErrorAction SilentlyContinue })
     if ($files.Count -ne [int]$group.Size) { return $false }

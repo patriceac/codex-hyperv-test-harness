@@ -124,6 +124,19 @@ function Reset-AdmissionFixture {
 }
 
 try {
+    Reset-AdmissionFixture -WorkerStates @((New-WorkerState 1), (New-WorkerState 2))
+    Update-PoolRequestGroups
+    $lateGroupId = [Guid]::NewGuid().ToString('N').ToLowerInvariant()
+    $lateOne = New-GroupMember -RequestId 'late-group-01' -GroupId $lateGroupId -GroupSize 2
+    $lateTwo = New-GroupMember -RequestId 'late-group-02' -GroupId $lateGroupId -GroupSize 2
+    Assign-PoolRequests
+    Assert-True ($script:assignments.Count -eq 0 -and @($script:states | Where-Object Status -eq 'Ready').Count -eq 2) 'A group arriving after reconciliation claimed workers before its journal existed.'
+    Assert-True ((Test-Path -LiteralPath $lateOne.FullName) -and (Test-Path -LiteralPath $lateTwo.FullName)) 'A newly arrived group left the queue before reconciliation.'
+    Update-PoolRequestGroups
+    Assign-PoolRequests
+    Assert-True ($script:assignments.Count -eq 2 -and @($script:assignments.WorkerId | Sort-Object -Unique).Count -eq 2) 'A newly arrived group was not admitted together on the next broker pass.'
+    $script:scenarios.Add('group-arriving-between-reconciliation-and-admission-waits-for-next-pass')
+
     Reset-AdmissionFixture -WorkerStates @((New-WorkerState 1), (New-WorkerState 2 'Off'))
     $firstGroupId = [Guid]::NewGuid().ToString('N').ToLowerInvariant()
     $first = New-GroupMember -RequestId 'group-a-01' -GroupId $firstGroupId -GroupSize 2
